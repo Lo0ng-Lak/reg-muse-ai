@@ -63,10 +63,23 @@ the app then, with no further clicks:
    therefore carries: creation time, email, the Muse.ai password, the
    mail.tm mailbox password, the session cookie (JSON, captured from the
    browser — it is passed from the helper to the app out of band and is
-   never printed in the log), and the invite code from the **Mã mời**
-   field in the window (kept in a local `invite.txt`; leave it empty if
-   you do not use one). Older sheets with only the first three columns
-   gain the new headers automatically on the next successful row.
+   never printed in the log), and the account's own invite code (below).
+   Older sheets with only the first three columns gain the new headers
+   automatically on the next successful row.
+7. Invite codes form a chain. Once inside the Muse interface, each
+   account first redeems the *previous* account's invite code — the app
+   passes it to the helper in `redeem.txt`, and the helper follows the
+   UI path from the screenshots: bottom-left menu → **Cài đặt** →
+   **Quy đổi mã lời mời** → type the 6 characters → **Xác nhận**. A
+   failed redemption is logged but does not fail the account (the code
+   can still be redeemed manually within 48 hours). The account then
+   opens the **Mời** panel and reads its *own* invite code, which is
+   saved in its sheet row and becomes the code the next account
+   redeems. The **Mã mời** field in the window is the chain's current
+   head: whatever is there when a run starts (typically your own
+   account's code) is redeemed by the run's first account, and the
+   field is overwritten with each new account's code as the run
+   proceeds; it persists between runs in a local `invite.txt`.
 
 The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the

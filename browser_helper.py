@@ -403,6 +403,264 @@ def _session_cookie_json(page):
         return ""
 
 
+def _load_redeem_code():
+    """Mã mời cần quy đổi cho tài khoản này (app chính ghi redeem.txt).
+
+    Đó là mã mời của tài khoản trước trong chuỗi. File trống hoặc
+    không có = không cần quy đổi (tài khoản đầu chuỗi).
+    """
+    try:
+        text = (
+            Path(__file__)
+            .with_name("redeem.txt")
+            .read_text(encoding="utf-8")
+        )
+    except OSError:
+        return ""
+    code = text.strip().upper()
+    return code if re.fullmatch(r"[A-Z0-9]{6}", code) else ""
+
+
+def _open_settings(page):
+    """Mở Cài đặt từ menu góc trái dưới của giao diện Muse."""
+    for name in ("Cài đặt", "Settings"):
+        item = page.get_by_text(name, exact=True)
+        try:
+            if item.count() and item.first.is_visible():
+                item.first.click(timeout=5000)
+                return True
+        except Exception:
+            pass
+    try:
+        opened = page.evaluate(
+            """() => {
+                const els = [
+                    ...document.querySelectorAll(
+                        'button, [role="button"], a'
+                    ),
+                ];
+                const cands = els.filter((el) => {
+                    const r = el.getBoundingClientRect();
+                    return (
+                        r.width > 0 &&
+                        r.left < 90 &&
+                        r.bottom > window.innerHeight - 100
+                    );
+                });
+                if (!cands.length) return false;
+                cands.sort(
+                    (a, b) =>
+                        b.getBoundingClientRect().bottom -
+                        a.getBoundingClientRect().bottom
+                );
+                cands[0].click();
+                return true;
+            }"""
+        )
+    except Exception:
+        opened = False
+    if not opened:
+        return False
+    page.wait_for_timeout(900)
+    for name in ("Cài đặt", "Settings"):
+        item = page.get_by_text(name, exact=True)
+        try:
+            if item.count() and item.first.is_visible():
+                item.first.click(timeout=5000)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _redeem_dialog_present(page):
+    for title in ("Quy đổi mã", "Redeem code"):
+        heading = page.get_by_text(title, exact=True)
+        try:
+            if heading.count() and heading.first.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _fill_redeem_code(page, code):
+    """Điền mã 6 ký tự vào hộp thoại quy đổi (6 ô riêng hoặc 1 ô)."""
+    boxes = page.locator("input:visible")
+    try:
+        count = boxes.count()
+    except Exception:
+        return False
+    if count == len(code) and count > 1:
+        for index, char in enumerate(code):
+            boxes.nth(index).fill(char)
+    elif count >= 1:
+        boxes.first.click(timeout=5000)
+        boxes.first.fill(code)
+    else:
+        return False
+    filled = 0
+    try:
+        for index in range(boxes.count()):
+            filled += len(boxes.nth(index).input_value() or "")
+    except Exception:
+        return False
+    return filled == len(code)
+
+
+def _close_settings(page):
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+
+def _redeem_invite_code(page, code):
+    """Quy đổi mã mời của tài khoản trước trong Cài đặt.
+
+    Luồng đúng theo giao diện: menu góc trái dưới → Cài đặt →
+    "Quy đổi mã lời mời" → điền 6 ô mã → Xác nhận. Trả True khi
+    hộp thoại quy đổi đóng lại. Lỗi ở bất kỳ bước nào thì False —
+    tài khoản vẫn tính là tạo thành công.
+    """
+    try:
+        if not _open_settings(page):
+            return False
+        row = None
+        for text in (
+            "Quy đổi mã lời mời",
+            "Redeem invite code",
+            "Redeem a code",
+        ):
+            candidate = page.get_by_text(text, exact=False)
+            try:
+                if candidate.count() and candidate.first.is_visible():
+                    row = candidate.first
+                    break
+            except Exception:
+                pass
+        if row is None:
+            return False
+        row.scroll_into_view_if_needed(timeout=5000)
+        row.click(timeout=5000)
+        deadline = time.monotonic() + 15
+        while not _redeem_dialog_present(page):
+            if page.is_closed() or time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(500)
+        if not _fill_redeem_code(page, code):
+            return False
+        confirm = page.get_by_role(
+            "button", name="Xác nhận", exact=True
+        )
+        if not (confirm.count() and confirm.first.is_visible()):
+            confirm = page.get_by_role(
+                "button", name="Confirm", exact=True
+            )
+        if not (confirm.count() and confirm.first.is_visible()):
+            return False
+        button = confirm.first
+        deadline = time.monotonic() + 10
+        while not button.is_enabled():
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(300)
+        _click_when_ready(page, button, "Xác nhận")
+        deadline = time.monotonic() + 15
+        while _redeem_dialog_present(page):
+            if page.is_closed():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            page.wait_for_timeout(500)
+        return True
+    except Exception:
+        return False
+    finally:
+        _close_settings(page)
+
+
+_HARVEST_CODE_JS = """() => {
+    const panels = [
+        ...document.querySelectorAll(
+            'div, section, aside, [role="dialog"]'
+        ),
+    ].filter((el) => {
+        const r = el.getBoundingClientRect();
+        return (
+            r.width > 0 &&
+            /Mời bạn bè|Invite friends/.test(el.textContent || '')
+        );
+    });
+    if (!panels.length) return '';
+    panels.sort(
+        (a, b) =>
+            (a.textContent || '').length - (b.textContent || '').length
+    );
+    const panel = panels[0];
+    for (const el of panel.querySelectorAll('*')) {
+        if (
+            el.tagName === 'INPUT' &&
+            /^[A-Z0-9]{6}$/.test((el.value || '').trim())
+        ) {
+            return el.value.trim();
+        }
+        if (el.childElementCount === 0) {
+            const t = (el.textContent || '').trim();
+            if (/^[A-Z0-9]{6}$/.test(t)) return t;
+        }
+    }
+    const m = (panel.textContent || '').match(/[A-Z0-9]{6}/);
+    return m ? m[0] : '';
+}"""
+
+
+def _harvest_invite_code(page):
+    """Lấy mã mời của chính tài khoản này từ panel "Mời bạn bè".
+
+    Bấm nút Mời ở góc phải trên rồi đọc mã 6 ký tự trong panel.
+    Không lấy được thì trả "" — tài khoản vẫn được lưu bình thường.
+    """
+    code = ""
+    try:
+        opened = False
+        for name in ("Mời", "Invite"):
+            button = page.get_by_role("button", name=name, exact=False)
+            try:
+                if button.count() and button.first.is_visible():
+                    button.first.click(timeout=5000)
+                    opened = True
+                    break
+            except Exception:
+                pass
+        if not opened:
+            return ""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not code:
+            if page.is_closed():
+                return ""
+            try:
+                found = page.evaluate(_HARVEST_CODE_JS) or ""
+            except Exception:
+                found = ""
+            found = str(found).strip().upper()
+            if re.fullmatch(r"[A-Z0-9]{6}", found):
+                code = found
+            else:
+                page.wait_for_timeout(700)
+    except Exception:
+        return ""
+    finally:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+    return code
+
+
 def _locator_visible(locator):
     try:
         return locator.count() > 0 and locator.first.is_visible()
@@ -640,6 +898,31 @@ def main():
             )
             _confirm_final_step(page)
             _wait_for_muse_interface(page)
+            redeem_code = _load_redeem_code()
+            if redeem_code:
+                if _redeem_invite_code(page, redeem_code):
+                    _status(
+                        f"Đã quy đổi mã mời {redeem_code} của tài "
+                        "khoản trước."
+                    )
+                else:
+                    _status(
+                        f"Không quy đổi được mã mời {redeem_code} — "
+                        "tài khoản vẫn được lưu; bạn có thể tự quy "
+                        "đổi trong Cài đặt trong vòng 48 giờ."
+                    )
+            own_code = _harvest_invite_code(page)
+            if own_code:
+                _status(f"INVITE_CODE: {own_code}")
+                _status(
+                    f"Đã lấy mã mời của tài khoản này: {own_code} — "
+                    "tài khoản sau sẽ quy đổi mã này."
+                )
+            else:
+                _status(
+                    "Không lấy được mã mời của tài khoản này — "
+                    "tài khoản sau sẽ dùng tiếp mã đang chờ hiện tại."
+                )
             cookie_json = _session_cookie_json(page)
             if cookie_json:
                 _status(f"SESSION_COOKIE: {cookie_json}")

@@ -233,6 +233,23 @@ def _session_cookie_from_line(line):
     return None
 
 
+def _invite_from_line(line):
+    """Tách mã mời của tài khoản từ dòng tín hiệu (None nếu không phải)."""
+    prefix = "INVITE_CODE:"
+    if line.startswith(prefix):
+        return line[len(prefix):].strip()
+    return None
+
+
+def _write_redeem_code(code):
+    """Ghi mã mời cần quy đổi cho tài khoản sắp chạy vào redeem.txt."""
+    redeem_file = Path(__file__).with_name("redeem.txt")
+    if code:
+        redeem_file.write_text(code + "\n", encoding="utf-8")
+    elif redeem_file.exists():
+        redeem_file.unlink()
+
+
 class _ProxyRotation:
     """Xoay proxy theo hạn mức tài khoản; proxy bị chặn thì bỏ ngay.
 
@@ -632,6 +649,12 @@ class MuseAIHelper(tk.Tk):
         fail = 0
         rotation = _ProxyRotation(pool, per_proxy)
         written_proxy_index = None
+        # Chuỗi mã mời: tài khoản sắp chạy sẽ quy đổi pending_code
+        # (mã của tài khoản trước, mở đầu bằng mã trong ô Mã mời);
+        # mã mời nó tự lấy được sẽ thành pending_code cho tài
+        # khoản sau và được ghi đè vào invite.txt để nối chuỗi
+        # sang cả lượt chạy sau.
+        pending_code = (invite or "").strip().upper()
         for index in range(1, total + 1):
             if self.stop_event.is_set():
                 break
@@ -673,7 +696,11 @@ class MuseAIHelper(tk.Tk):
                     f"[{index}/{total}] Đã tạo mail {address} — bắt đầu đăng ký.",
                 )
             )
-            helper_ok, burned, cookie = self._run_helper(
+            try:
+                _write_redeem_code(pending_code)
+            except OSError:
+                pass
+            helper_ok, burned, cookie, own_invite = self._run_helper(
                 helper, address, index, total
             )
             if helper_ok:
@@ -691,7 +718,7 @@ class MuseAIHelper(tk.Tk):
                         muse_password,
                         mail_password=mail_password,
                         cookie=cookie,
-                        invite=invite,
+                        invite=own_invite,
                     )
                     success += 1
                     self.events.put(
@@ -724,6 +751,15 @@ class MuseAIHelper(tk.Tk):
                             "— lý do ở dòng RESULT phía trên.",
                         )
                     )
+            if helper_ok and own_invite:
+                pending_code = own_invite
+                try:
+                    Path(__file__).with_name("invite.txt").write_text(
+                        own_invite + "\n", encoding="utf-8"
+                    )
+                except OSError:
+                    pass
+                self.events.put(("invite", own_invite))
             if burned:
                 self.events.put(
                     (
@@ -754,9 +790,9 @@ class MuseAIHelper(tk.Tk):
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False, ""
+            return False, False, "", ""
         self.helper_process = process
-        signals = {"burn": False, "cookie": ""}
+        signals = {"burn": False, "cookie": "", "invite": ""}
 
         def forward_output():
             for line in process.stdout:
@@ -768,6 +804,10 @@ class MuseAIHelper(tk.Tk):
                     if cookie is not None:
                         # Cookie phiên chỉ đi vào sheet, không vào log.
                         signals["cookie"] = cookie
+                        continue
+                    invite = _invite_from_line(line)
+                    if invite is not None:
+                        signals["invite"] = invite
                         continue
                     self.events.put(("log", f"[{index}/{total}] {line}"))
 
@@ -798,7 +838,7 @@ class MuseAIHelper(tk.Tk):
         self.helper_process = None
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"], signals["cookie"]
+        ), signals["burn"], signals["cookie"], signals["invite"]
 
     def _process_events(self):
         try:
@@ -806,6 +846,15 @@ class MuseAIHelper(tk.Tk):
                 kind, payload = self.events.get_nowait()
                 if kind == "log":
                     self._append_log(payload)
+                elif kind == "invite":
+                    # Ô Mã mời luôn phản ánh đầu chuỗi hiện tại: mã
+                    # của tài khoản thành công gần nhất.
+                    if self.running:
+                        self.invite_entry.configure(state="normal")
+                    self.invite_entry.delete(0, "end")
+                    self.invite_entry.insert(0, payload)
+                    if self.running:
+                        self.invite_entry.configure(state="disabled")
                 elif kind == "progress":
                     self.progress.set(payload)
                 elif kind == "finished":
