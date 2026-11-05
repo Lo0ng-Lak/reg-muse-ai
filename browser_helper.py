@@ -33,6 +33,7 @@ CARD_SERVICE = "MuseAIHelper:card"
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
 BUTTON_TIMEOUT_MS = 90000
+BUTTON_READY_TIMEOUT_MS = 30000
 UI_SETTLE_MS = 1500
 
 
@@ -388,16 +389,25 @@ def _locator_visible(locator):
         return False
 
 
+def _locator_enabled(locator):
+    try:
+        return locator.count() > 0 and locator.first.is_enabled()
+    except Exception:
+        return False
+
+
 def _open_signup_and_submit_email(page, email):
     """Mở trang đăng ký, chờ form HIỆN HẲN rồi mới điền email.
 
     Không điền ngay khi DOM vừa có ô nhập: trang qua proxy nạp
     chậm, form có thể hiện từng phần hoặc bị render lại ngay sau
     đó — điền sớm là email bị nuốt hoặc form bị thay giữa chừng.
-    Điều kiện để điền: ô email VÀ nút Continue đều đã hiển thị,
-    cộng thêm một nhịp chờ cho form ổn định. Điền xong còn kiểm
-    tra lại giá trị; bị mất thì điền lại một lần, vẫn mất mới báo
-    lỗi. Trả về nút Continue để main() bấm sau khi chụp mốc thư cũ.
+    Điều kiện để điền: ô email đã hiển thị và nút Continue đã
+    hiện VÀ đã bật (đổi sang màu sẵn sàng — nút còn xám là trang
+    chưa nạp xong), cộng thêm một nhịp chờ cho form ổn định.
+    Điền xong còn kiểm tra lại giá trị; bị mất thì điền lại một
+    lần, vẫn mất mới báo lỗi. Trả về nút Continue để main() bấm
+    sau khi chụp mốc thư cũ.
     """
     page.goto(
         SIGNUP_URL,
@@ -427,8 +437,29 @@ def _open_signup_and_submit_email(page, email):
             )
         page.wait_for_timeout(500)
     email_field.wait_for(state="visible", timeout=PAGE_TIMEOUT_MS)
-    # Nút Continue phải HIỂN THỊ rồi mới được điền email.
+    # Nút Continue phải HIỆN và BẬT (đổi sang màu sẵn sàng) rồi mới
+    # được điền email — nút còn xám/chưa bật nghĩa là trang chưa
+    # nạp xong, kể cả khi các ô đã có mặt trong DOM.
     continue_button.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    ready_deadline = time.monotonic() + BUTTON_READY_TIMEOUT_MS / 1000
+    button_ready = False
+    while time.monotonic() < ready_deadline:
+        if page.is_closed():
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi form sẵn sàng."
+            )
+        if _locator_enabled(continue_button):
+            button_ready = True
+            break
+        page.wait_for_timeout(500)
+    if button_ready:
+        _status("Nút Continue đã bật — form đã sẵn sàng.")
+    else:
+        _status(
+            "Nút Continue vẫn chưa bật sau "
+            f"{BUTTON_READY_TIMEOUT_MS // 1000} giây — điền email "
+            "trước để kích hoạt nút."
+        )
     page.wait_for_timeout(UI_SETTLE_MS)
     email_field.wait_for(state="visible", timeout=PAGE_TIMEOUT_MS)
     _status(f"Form đã hiển thị đầy đủ — đang điền email {email}...")
