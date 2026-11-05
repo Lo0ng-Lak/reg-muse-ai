@@ -49,6 +49,17 @@ def _wait_for_signup_completion(page):
         return heading.count() == 0
 
 
+def _profile_form_visible(page, timeout_ms):
+    """True nếu form hồ sơ đã hiện ra trong thời gian chờ cho phép."""
+    try:
+        page.get_by_role(
+            "heading", name="Finish creating your account"
+        ).wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
+
 def main():
     if len(sys.argv) not in (2, 3):
         raise ValueError("Thiếu địa chỉ email cần điền.")
@@ -127,10 +138,19 @@ def main():
         _status("Đã nhận mã xác minh, đang điền mã...")
         _fill_verification_code(page, code)
         page.wait_for_timeout(UI_SETTLE_MS)
-        confirm_button = page.get_by_role(
-            "button", name="Confirm", exact=True
-        )
-        _click_when_ready(page, confirm_button, "Confirm")
+        # Form mã của Muse.ai TỰ GỬI ngay khi nhập đủ số: trang tự nhảy
+        # sang bước hồ sơ mà không cần bấm Confirm. Nếu vẫn đi tìm nút
+        # "Confirm" lúc này, locator sẽ bám nhầm vào nút Confirm đang bị
+        # khóa của form hồ sơ và chờ nó bật — trong khi nút đó chỉ bật
+        # sau khi hồ sơ được điền xong: bế tắc tới hết thời gian chờ,
+        # trình duyệt đã qua bước mới mà log vẫn đứng ở bước điền mã.
+        # Vì vậy: chờ vài giây xem form hồ sơ có tự hiện không, chỉ bấm
+        # Confirm khi nó chưa hiện.
+        if not _profile_form_visible(page, 5000):
+            confirm_button = page.get_by_role(
+                "button", name="Confirm", exact=True
+            )
+            _click_when_ready(page, confirm_button, "Confirm")
         _status("Mã đã xác nhận, đang điền hồ sơ...")
         _fill_profile_name(page)
         finish_button = page.get_by_role(
