@@ -45,7 +45,9 @@ Chromium. For each account the app then, with no further clicks:
 3. Polls mail.tm for the code (up to three minutes), fills it, and submits
    **Confirm** on the code form.
 4. On the final profile form, fills the first and last name as "Long" and
-   "long" and the birthday 21 November 2001, then clicks **Confirm**.
+   "long" when the form asks for them (some regions, such as US IPs, only
+   ask for the birthday — the name step is then skipped), and picks a
+   random birthday with an age always over 18, then clicks **Confirm**.
 5. Watches the screen after the profile form. A "Join the waitlist" screen
    means Muse is unavailable in the VPN location's region and the attempt
    fails. On the card-entry screen the batch pauses for up to four minutes:

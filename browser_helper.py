@@ -1,6 +1,7 @@
 import html
 import json
 import re
+import secrets
 import sys
 import time
 import tkinter as tk
@@ -30,7 +31,6 @@ CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
 BUTTON_TIMEOUT_MS = 90000
 UI_SETTLE_MS = 1500
-BIRTH_DATE = date(2001, 11, 21)
 
 
 def _status(message):
@@ -211,7 +211,7 @@ def main():
             )
             _click_when_ready(page, confirm_button, "Confirm")
         _status("Mã đã xác nhận, đang điền hồ sơ...")
-        _fill_profile_name(page)
+        _fill_profile(page)
         finish_button = page.get_by_role(
             "button", name="Confirm", exact=True
         )
@@ -277,19 +277,48 @@ def main():
         playwright.stop()
 
 
-def _fill_profile_name(page):
+def _random_birth_date():
+    """Ngày sinh ngẫu nhiên với tuổi luôn trên 18.
+
+    Chọn tuổi mục tiêu 20–45 rồi lùi về năm sinh tương ứng; dù sinh
+    nhật của năm hiện tại chưa tới thì tuổi thật vẫn từ 19 trở lên.
+    Ngày luôn lấy trong 1–28 để tháng nào cũng hợp lệ.
+    """
+    today = date.today()
+    age = secrets.randbelow(26) + 20
+    return date(
+        today.year - age,
+        secrets.randbelow(12) + 1,
+        secrets.randbelow(28) + 1,
+    )
+
+
+def _fill_profile(page):
     page.get_by_role(
         "heading", name="Finish creating your account"
     ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
     first_name = page.get_by_placeholder("First name", exact=True)
     last_name = page.get_by_placeholder("Last name", exact=True)
-    first_name.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
-    last_name.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
-    first_name.fill("Long")
-    last_name.fill("long")
-    _wait_for_input_value(page, first_name, "Long", "tên")
-    _wait_for_input_value(page, last_name, "long", "họ")
-    _select_birth_date(page)
+    try:
+        first_name.wait_for(state="visible", timeout=5000)
+        last_name.wait_for(state="visible", timeout=5000)
+    except Exception:
+        # Một số khu vực (ví dụ IP Mỹ) form không hỏi tên — bỏ qua
+        # phần tên, chỉ điền ngày sinh.
+        _status("Form không yêu cầu tên — bỏ qua, chỉ điền ngày sinh.")
+    else:
+        first_name.fill("Long")
+        last_name.fill("long")
+        _wait_for_input_value(page, first_name, "Long", "tên")
+        _wait_for_input_value(page, last_name, "long", "họ")
+        _status("Đã điền tên.")
+    birth_date = _random_birth_date()
+    _select_birth_date(page, birth_date)
+    _status(
+        "Đã chọn ngày sinh ngẫu nhiên: "
+        f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year} "
+        "(tuổi trên 18)."
+    )
 
 
 def _wait_for_input_value(page, field, expected, label):
@@ -300,7 +329,7 @@ def _wait_for_input_value(page, field, expected, label):
         page.wait_for_timeout(250)
 
 
-def _select_birth_date(page):
+def _select_birth_date(page, birth_date):
     month_names = (
         "January",
         "February",
@@ -316,9 +345,9 @@ def _select_birth_date(page):
         "December",
     )
     targets = (
-        ("Month", month_names[BIRTH_DATE.month - 1], str(BIRTH_DATE.month)),
-        ("Day", str(BIRTH_DATE.day), str(BIRTH_DATE.day)),
-        ("Year", str(BIRTH_DATE.year), str(BIRTH_DATE.year)),
+        ("Month", month_names[birth_date.month - 1], str(birth_date.month)),
+        ("Day", str(birth_date.day), str(birth_date.day)),
+        ("Year", str(birth_date.year), str(birth_date.year)),
     )
     for label, value, option_value in targets:
         native_select = page.locator(
