@@ -204,7 +204,12 @@ def main():
                 "Email chưa được giữ trong form Muse.ai; chưa bấm Continue."
             )
         page.wait_for_timeout(UI_SETTLE_MS)
-        existing_ids = _get_message_ids(token)
+        try:
+            existing_ids = _get_message_ids(token)
+        except Exception:
+            # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
+            # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
+            existing_ids = set()
         _click_when_ready(page, continue_button, "Continue")
         _status("Đã gửi email, đang chờ mã xác minh từ mail.tm...")
 
@@ -485,13 +490,21 @@ def _mail_request(method, path, payload=None, token=None):
 
 
 def _get_mail_token(email, password):
-    response = _mail_request(
-        "POST", "/token", {"address": email, "password": password}
-    )
-    token = response.get("token")
-    if not token:
-        raise RuntimeError("mail.tm không trả về token truy cập.")
-    return token
+    last_error = None
+    for _ in range(3):
+        try:
+            response = _mail_request(
+                "POST", "/token", {"address": email, "password": password}
+            )
+        except Exception as error:
+            last_error = error
+            time.sleep(2)
+            continue
+        token = response.get("token")
+        if not token:
+            raise RuntimeError("mail.tm không trả về token truy cập.")
+        return token
+    raise last_error
 
 
 def _get_message_ids(token):
@@ -532,9 +545,12 @@ def _verification_code_from_new_messages(token, existing_ids):
         message_id = message.get("id")
         if not message_id or message_id in existing_ids:
             continue
-        detail = _mail_request(
-            "GET", f"/messages/{message_id}", token=token
-        )
+        try:
+            detail = _mail_request(
+                "GET", f"/messages/{message_id}", token=token
+            )
+        except Exception:
+            continue
         codes = re.findall(r"(?<!\d)\d{4,8}(?!\d)", _message_text(detail))
         if codes:
             return codes[0]
@@ -568,11 +584,24 @@ def _verification_input(page):
 def _wait_for_verification_code(page, token, existing_ids):
     deadline = time.monotonic() + CODE_TIMEOUT_SECONDS
     code = None
+    warned = False
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError("Cửa sổ Chromium đã đóng trước khi xác minh.")
         if code is None:
-            code = _verification_code_from_new_messages(token, existing_ids)
+            try:
+                code = _verification_code_from_new_messages(
+                    token, existing_ids
+                )
+            except Exception:
+                # Mạng qua VPN hay chập chờn: một lần rớt kết nối tới
+                # mail.tm không được giết cả tài khoản — bỏ qua lượt
+                # kiểm tra này và thử lại ở vòng chờ tiếp theo.
+                if not warned:
+                    _status(
+                        "Kiểm tra hộp thư bị rớt kết nối — đang thử lại..."
+                    )
+                    warned = True
         fields = _verification_input(page)
         if code and fields:
             return code

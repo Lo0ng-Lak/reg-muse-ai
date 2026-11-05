@@ -80,7 +80,19 @@ def _create_mailbox_account():
     Trả về (address, muse_password). Mật khẩu hộp thư chỉ sống trong
     keyring — browser_helper.py tự lấy lại từ đó khi chạy.
     """
-    domains = _request("GET", "/domains?page=1").get("hydra:member", [])
+    domains = []
+    last_error = None
+    for _ in range(3):
+        try:
+            domains = _request("GET", "/domains?page=1").get(
+                "hydra:member", []
+            )
+            break
+        except RuntimeError as error:
+            last_error = error
+            time.sleep(2)
+    else:
+        raise last_error
     active_domains = [
         domain["domain"]
         for domain in domains
