@@ -93,6 +93,77 @@ def _exit_country(ip):
     return code.upper() if isinstance(code, str) else None
 
 
+def _short_error(error):
+    """Rút gọn lỗi Playwright thành một dòng dễ đọc trong log."""
+    text = str(error).split("Call log:")[0].strip().splitlines()
+    first = text[0] if text else error.__class__.__name__
+    return first[:200]
+
+
+def _check_proxy_exit(page):
+    """Đọc IP thoát THẬT qua proxy ngay trong trình duyệt + quốc gia.
+
+    Thử lần lượt vài dịch vụ (mỗi cái 2 lần) vì proxy residential hay
+    chập ở lần kết nối đầu, và mỗi dịch vụ đi một đường khác nhau
+    (HTTP thường / HTTPS qua CONNECT). Trả về (ip, country).
+    Mọi cách đều hỏng → RuntimeError KÈM nguyên nhân gốc để hiện lên
+    log, thay vì một câu chung chung không tra được gì.
+    """
+    errors = []
+    # Cách 1: ip-api qua chính trình duyệt — trả cả IP lẫn quốc gia,
+    # và là HTTP thường nên không cần CONNECT như các trang https.
+    for _ in range(2):
+        try:
+            page.goto(
+                "http://ip-api.com/json/?fields=query,countryCode",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            raw = page.locator("body").inner_text(timeout=5000).strip()
+            data = json.loads(raw)
+            ip = data.get("query")
+            code = data.get("countryCode")
+            if ip:
+                country = (
+                    code.upper()
+                    if isinstance(code, str)
+                    else _exit_country(ip)
+                )
+                return ip, country
+            errors.append("ip-api: phản hồi không có IP")
+        except Exception as error:
+            errors.append(f"ip-api: {_short_error(error)}")
+    # Cách 2: các dịch vụ trả IP dạng text thuần.
+    for url in (
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+        "http://api.ipify.org",
+    ):
+        for _ in range(2):
+            try:
+                page.goto(
+                    url, wait_until="domcontentloaded", timeout=30000
+                )
+                text = page.locator("body").inner_text(
+                    timeout=5000
+                ).strip()
+                tokens = text.split()
+                candidate = tokens[0] if tokens else ""
+                chars = set("0123456789abcdefABCDEF.:")
+                if candidate and set(candidate) <= chars and (
+                    "." in candidate or ":" in candidate
+                ):
+                    return candidate, _exit_country(candidate)
+                errors.append(f"{url}: nội dung trả về lạ")
+            except Exception as error:
+                errors.append(f"{url}: {_short_error(error)}")
+    raise RuntimeError(
+        "Không kiểm tra được IP thoát qua proxy — huỷ đăng ký vì "
+        "bắt buộc phải qua proxy US. Chi tiết lỗi: "
+        + " | ".join(dict.fromkeys(errors))
+    )
+
+
 def _classify_after_profile(page, timeout_seconds=45):
     """Phân loại màn hình xuất hiện sau khi gửi form hồ sơ.
 
@@ -245,28 +316,15 @@ def main():
         )
         page = browser.new_page()
         page.set_default_timeout(PAGE_TIMEOUT_MS)
-        try:
-            page.goto(
-                "https://api.ipify.org",
-                wait_until="domcontentloaded",
-                timeout=20000,
-            )
-            exit_ip = page.locator("body").inner_text(
-                timeout=5000
-            ).strip()
-        except Exception as error:
-            raise RuntimeError(
-                "Không kiểm tra được IP thoát qua proxy — huỷ đăng "
-                "ký vì bắt buộc phải qua proxy US."
-            ) from error
+        _status("Đang kiểm tra IP thoát qua proxy...")
+        exit_ip, country = _check_proxy_exit(page)
         _status(
-            f"IP thoát qua proxy: {exit_ip} — đang kiểm tra quốc gia..."
+            f"IP thoát qua proxy: {exit_ip} — quốc gia: "
+            f"{country or 'không xác định'}."
         )
-        country = _exit_country(exit_ip)
         if country != "US":
             raise RuntimeError(
-                "IP thoát qua proxy không thuộc US (kiểm tra được: "
-                f"{country or 'không xác định'}) — huỷ đăng ký, "
+                "IP thoát qua proxy không thuộc US — huỷ đăng ký, "
                 "tài khoản không được lưu."
             )
         _status("Đã xác nhận IP thoát thuộc US — bắt đầu đăng ký.")
