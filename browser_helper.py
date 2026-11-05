@@ -626,28 +626,61 @@ def _open_settings(page):
     return False
 
 
+def _dialog_scope(page):
+    """Phạm vi hộp thoại đang mở, để không đụng trang phía sau.
+
+    Mọi thao tác với ô nhập mã và nút xác nhận phải giới hạn
+    trong hộp thoại: trang phía sau vẫn còn khung chat và các
+    nút khác — điền/tìm ở phạm vi toàn trang là mã có thể bị
+    gõ nhầm vào khung chat. Không có phần tử dialog (hoặc đối
+    tượng trang không hỗ trợ truy vấn lồng nhau) thì dùng cả
+    trang như cũ.
+    """
+    try:
+        dialogs = page.locator('[role="dialog"]')
+        if dialogs.count() >= 1:
+            scope = dialogs.first
+            scope.locator("input")
+            return scope
+    except Exception:
+        pass
+    return page
+
+
 def _redeem_dialog_present(page):
     """Hộp thoại nhập mã đã mở chưa.
 
-    Tiêu đề khớp một phần (tiếng Anh có thể là "Redeem invite
-    code", tiếng Việt "Quy đổi mã...") NHƯNG phải kèm ít nhất
-    một ô nhập đang hiện — mục quy đổi trong Cài đặt cũng chứa
-    các chữ đó, chỉ khác là nó không có ô nhập nào.
+    Trong phạm vi hộp thoại phải có cùng lúc: tiêu đề quy đổi
+    (khớp một phần — Anh/Việt đều được), ít nhất một ô nhập,
+    và nút xác nhận. Mục quy đổi trong Cài đặt chỉ có chữ,
+    không có ô nhập lẫn nút xác nhận, nên không bị nhận nhầm.
     """
-    for title in (
-        "Quy đổi mã",
-        "Redeem invite code",
-        "Redeem a code",
-        "Redeem code",
-    ):
-        heading = page.get_by_text(title, exact=False)
-        try:
+    scope = _dialog_scope(page)
+    try:
+        heading_found = False
+        for title in (
+            "Quy đổi mã",
+            "Redeem invite code",
+            "Redeem a code",
+            "Redeem code",
+        ):
+            heading = scope.get_by_text(title, exact=False)
             if heading.count() and heading.first.is_visible():
-                if page.locator("input:visible").count() >= 1:
-                    return True
-        except Exception:
-            pass
-    return False
+                heading_found = True
+                break
+        if not heading_found:
+            return False
+        if scope.locator("input:visible").count() < 1:
+            return False
+        for name in ("Xác nhận", "Confirm", "Redeem"):
+            button = scope.get_by_role(
+                "button", name=name, exact=True
+            )
+            if button.count() and button.first.is_visible():
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _fill_redeem_code(page, code):
@@ -658,7 +691,7 @@ def _fill_redeem_code(page, code):
     chứa cả mã. Cách nào cho tổng số ký tự đọc lại đúng bằng độ
     dài mã thì coi như xong.
     """
-    boxes = page.locator("input:visible")
+    boxes = _dialog_scope(page).locator("input:visible")
     try:
         count = boxes.count()
     except Exception:
@@ -759,17 +792,21 @@ def _redeem_invite_code(page, code):
         if not _fill_redeem_code(page, code):
             _status("Quy đổi mã: không điền được mã vào hộp thoại.")
             return False
-        confirm = page.get_by_role(
-            "button", name="Xác nhận", exact=True
-        )
-        if not (confirm.count() and confirm.first.is_visible()):
-            confirm = page.get_by_role(
-                "button", name="Confirm", exact=True
+        scope = _dialog_scope(page)
+        button = None
+        for name in ("Xác nhận", "Confirm", "Redeem"):
+            candidate = scope.get_by_role(
+                "button", name=name, exact=True
             )
-        if not (confirm.count() and confirm.first.is_visible()):
+            try:
+                if candidate.count() and candidate.first.is_visible():
+                    button = candidate.first
+                    break
+            except Exception:
+                pass
+        if button is None:
             _status("Quy đổi mã: không thấy nút Xác nhận.")
             return False
-        button = confirm.first
         deadline = time.monotonic() + 10
         while not button.is_enabled():
             if time.monotonic() >= deadline:
@@ -948,34 +985,24 @@ _SCRATCH_RECT_JS = """() => {
 }"""
 
 
-def _scratch_box(page, box):
-    """Nhấn giữ chuột và quét zíc-zắc phủ kín ô cào, như tay người.
+def _slide_reveal(page, box):
+    """Một lượt kéo trượt mở lớp phủ: nắm vòng ở đầu trái, kéo sang phải.
 
-    Lớp phủ chỉ bay khi đủ diện tích bị quét qua: nhấn xuống,
-    giữ một nhịp, rồi quét ngang từng hàng từ trên xuống dưới
-    (đổi chiều mỗi hàng), chậm rãi, sau đó mới nhả chuột.
+    Ô "Scratch to reveal" là một thanh trượt, không phải lớp
+    sơn cào: nhấn giữ vào vòng tròn ở đầu trái rồi kéo MỘT
+    MẠCH tới cuối thanh — kéo qua kéo lại kiểu zíc-zắc sẽ trả
+    thanh trượt về chỗ cũ. Kéo tới cuối, nút Copy referral
+    link chuyển xanh (hiệu lực) là thành công.
     """
     try:
-        left = box["x"] + 3
-        right = box["x"] + box["width"] - 3
-        top = box["y"] + 3
-        bottom = box["y"] + box["height"] - 3
-        rows = max(3, int((bottom - top) // 7) + 1)
-        page.mouse.move(left, (top + bottom) / 2)
+        center_y = box["y"] + box["height"] / 2
+        start_x = box["x"] + box["height"] / 2
+        end_x = box["x"] + box["width"] - 6
+        page.mouse.move(start_x, center_y)
         page.mouse.down()
-        page.wait_for_timeout(150)
-        for index in range(rows):
-            if rows > 1:
-                y = top + (bottom - top) * index / (rows - 1)
-            else:
-                y = (top + bottom) / 2
-            if index % 2 == 0:
-                page.mouse.move(left, y, steps=5)
-                page.mouse.move(right, y, steps=30)
-            else:
-                page.mouse.move(right, y, steps=5)
-                page.mouse.move(left, y, steps=30)
-        page.wait_for_timeout(150)
+        page.wait_for_timeout(200)
+        page.mouse.move(end_x, center_y, steps=50)
+        page.wait_for_timeout(250)
         page.mouse.up()
         page.wait_for_timeout(600)
         return True
@@ -993,17 +1020,13 @@ def _scan_once(page):
     return found if re.fullmatch(r"[A-Z0-9]{6}", found) else ""
 
 
-def _prepare_panel(page):
-    """Chờ panel Invite sẵn sàng và cào sạch lớp phủ che mã.
+def _wait_panel_ready(page):
+    """Chờ panel Invite mở xong; trả mã ngay nếu quét thấy sẵn.
 
-    Thứ tự đúng theo giao diện thật: mã của tài khoản mới nằm
-    sau lớp "Scratch to reveal" — phải cào xong mới bấm Copy
-    referral link lấy mã được. Mỗi lần cào xong đều quét lại
-    kiểm tra; mã chưa hiện thì cào tiếp (tối đa 3 lần). Tài
-    khoản mã đã hiện sẵn thì quét thấy ngay từ đầu.
+    Panel sẵn sàng khi thấy thanh trượt che mã hoặc nút copy.
+    Tối đa 10 giây (panel mở chậm qua proxy).
     """
-    deadline = time.monotonic() + 25
-    scratches = 0
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if page.is_closed():
             return ""
@@ -1011,26 +1034,51 @@ def _prepare_panel(page):
         if code:
             return code
         try:
+            if page.evaluate(_SCRATCH_RECT_JS):
+                return ""
+        except Exception:
+            pass
+        for name in (
+            "Copy referral link",
+            "Sao chép liên kết giới thiệu",
+        ):
+            button = page.get_by_role(
+                "button", name=name, exact=False
+            )
+            try:
+                if button.count() and button.first.is_visible():
+                    return ""
+            except Exception:
+                pass
+        page.wait_for_timeout(700)
+    return ""
+
+
+def _reveal_by_sliding(page):
+    """Kéo trượt lớp phủ cho tới khi lấy được mã (tối đa 4 lượt).
+
+    Mỗi lượt kéo xong đều kiểm chứng ngay: quét panel tìm mã,
+    rồi bấm Copy referral link (nút đã xanh sau khi kéo thành
+    công) và bóc mã khỏi nội dung copy.
+    """
+    for attempt in range(4):
+        try:
             box = page.evaluate(_SCRATCH_RECT_JS)
         except Exception:
             box = None
-        if box is None:
-            if scratches:
-                # Lớp phủ đã biến mất: chờ chữ mã hiện hẳn rồi
-                # quét nốt một lần; phần còn lại để bước copy lo.
-                page.wait_for_timeout(800)
-                return _scan_once(page)
-            page.wait_for_timeout(700)
-            continue
-        if scratches >= 3:
+        if not box:
             return ""
-        if _scratch_box(page, box):
-            scratches += 1
-            _status(
-                f"Đã quét cào lớp phủ che mã mời (lần {scratches})."
-            )
-        else:
-            page.wait_for_timeout(700)
+        if not _slide_reveal(page, box):
+            return ""
+        _status(
+            f"Đã kéo trượt mở lớp phủ che mã mời (lần {attempt + 1})."
+        )
+        code = _scan_once(page)
+        if code:
+            return code
+        code = _harvest_via_copy_link(page)
+        if code:
+            return code
     return ""
 
 
@@ -1050,11 +1098,12 @@ def _scan_panel_code(page, seconds):
 def _harvest_invite_code(page):
     """Lấy mã mời của chính tài khoản này từ panel "Mời bạn bè".
 
-    Bấm nút Mời/Invite ở góc phải trên → cào lớp "Scratch to
-    reveal" che mã (bắt buộc trước, chưa cào thì copy không
-    ra mã) → bấm "Copy referral link" và bóc mã khỏi nội dung
-    copy. Dự phòng cuối: quét chữ trong panel. Không lấy được
-    thì trả "" — tài khoản vẫn được lưu bình thường.
+    Bấm nút Mời/Invite ở góc phải trên → kéo trượt thanh
+    "Scratch to reveal" mở lớp phủ che mã (chưa kéo thì nút
+    copy còn mờ, copy không ra mã) → bấm "Copy referral link"
+    và bóc mã khỏi nội dung copy. Dự phòng cuối: quét chữ
+    trong panel. Không lấy được thì trả "" — tài khoản vẫn
+    được lưu bình thường.
     """
     code = ""
     try:
@@ -1084,11 +1133,17 @@ def _harvest_invite_code(page):
         if button is None:
             return ""
         button.click(timeout=5000)
-        # Cào lớp phủ trước (hoặc nhận mã ngay nếu đã hiện sẵn),
-        # rồi mới copy — chưa cào thì copy không ra mã.
-        code = _prepare_panel(page)
+        # Chờ panel mở xong (hoặc nhận mã ngay nếu đã hiện sẵn),
+        # thử copy — tài khoản đã mở mã thì nút copy hiệu lực sẵn.
+        code = _wait_panel_ready(page)
         if not code:
             code = _harvest_via_copy_link(page)
+        if not code:
+            # Chưa kéo mở lớp phủ thì nút copy còn mờ, copy
+            # không ra mã: kéo trượt thanh "Scratch to reveal"
+            # (nắm vòng ở đầu trái kéo một mạch sang phải) rồi
+            # copy lại sau mỗi lượt kéo.
+            code = _reveal_by_sliding(page)
         if not code:
             code = _scan_panel_code(page, 6)
     except Exception:
