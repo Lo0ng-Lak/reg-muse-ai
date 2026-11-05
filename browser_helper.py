@@ -1054,14 +1054,54 @@ def _paint_reveal(page, box):
         return False
 
 
+_INVITE_CODE_DOM_JS = """() => {
+    const isCode = (s) => /^[A-Z0-9]{6}$/.test((s || '').trim());
+    // Đúng cấu trúc thật của panel (người dùng gửi HTML): mã
+    // nằm trong một span có title chính là mã, chữ hiển thị
+    // cũng là mã — lớp canvas chỉ phủ lên trên để che mắt.
+    for (const el of document.querySelectorAll('[title]')) {
+        const t = (el.getAttribute('title') || '').trim();
+        if (isCode(t) && (el.textContent || '').trim() === t) {
+            return t;
+        }
+    }
+    // Dòng trạng thái cho trình đọc màn hình khi mã đã lộ:
+    // "Đã tiết lộ mã lời mời: ATGXDX" / "Invite code revealed:".
+    for (const el of document.querySelectorAll('span')) {
+        if (el.childElementCount > 0) continue;
+        const m = (el.textContent || '').match(
+            /(?:mã lời mời|invite code)[^A-Z0-9]{0,12}([A-Z0-9]{6})/i
+        );
+        if (m) return m[1].toUpperCase();
+    }
+    for (const el of document.querySelectorAll(
+        '[data-pel-impression*="invite_code"]'
+    )) {
+        const t = (el.textContent || '').trim();
+        if (isCode(t)) return t;
+        const title = (el.getAttribute('title') || '').trim();
+        if (isCode(title)) return title;
+    }
+    return '';
+}"""
+
+
 def _scan_once(page):
-    """Quét panel Mời một lần, trả mã 6 ký tự nếu thấy."""
-    try:
-        found = page.evaluate(_HARVEST_CODE_JS) or ""
-    except Exception:
-        found = ""
-    found = str(found).strip().upper()
-    return found if re.fullmatch(r"[A-Z0-9]{6}", found) else ""
+    """Đọc mã mời một lần: đọc thẳng từ DOM trước, quét panel sau.
+
+    Mã nằm sẵn trong DOM của panel (span mang title là mã) —
+    đọc được là khỏi cần copy hay tô gì cả. Bộ quét panel là
+    dự phòng cho cấu trúc khác.
+    """
+    for script in (_INVITE_CODE_DOM_JS, _HARVEST_CODE_JS):
+        try:
+            found = page.evaluate(script) or ""
+        except Exception:
+            found = ""
+        found = str(found).strip().upper()
+        if re.fullmatch(r"[A-Z0-9]{6}", found):
+            return found
+    return ""
 
 
 def _wait_panel_ready(page):
