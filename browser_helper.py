@@ -854,89 +854,35 @@ def _invite_code_from_text(text):
 
 
 def _harvest_via_copy_link(page):
-    """Bấm "Sao chép liên kết giới thiệu" rồi bóc mã khỏi link."""
-    for name in (
-        "Sao chép liên kết giới thiệu",
-        "Copy referral link",
-        "Sao chép",
-        "Copy link",
-    ):
-        button = page.get_by_role("button", name=name, exact=False)
-        try:
-            if button.count() and button.first.is_visible():
-                button.first.click(timeout=5000)
-                page.wait_for_timeout(700)
-                return _invite_code_from_text(_read_clipboard(page))
-        except Exception:
-            pass
-    return ""
+    """Bấm "Copy referral link" rồi bóc mã khỏi nội dung vừa copy.
 
-
-_FIND_CODE_RECT_JS = """() => {
-    const panels = [
-        ...document.querySelectorAll(
-            'div, section, aside, [role="dialog"]'
-        ),
-    ].filter((el) => {
-        const r = el.getBoundingClientRect();
-        return (
-            r.width > 0 &&
-            /Mời bạn bè|Invite friends/.test(el.textContent || '')
-        );
-    });
-    if (!panels.length) return null;
-    panels.sort(
-        (a, b) =>
-            (a.textContent || '').length - (b.textContent || '').length
-    );
-    const panel = panels[0];
-    const stripped = (s) => (s || '').replace(/\\s+/g, '');
-    let best = null;
-    for (const el of panel.querySelectorAll('*')) {
-        if (el.childElementCount > 8) continue;
-        if (/^[A-Z0-9]{6}$/.test(stripped(el.textContent))) {
-            const r = el.getBoundingClientRect();
-            if (r.width > 0 && (!best || r.width < best.width)) {
-                best = {
-                    x: r.x,
-                    y: r.y,
-                    width: r.width,
-                    height: r.height,
-                };
-            }
-        }
-    }
-    return best;
-}"""
-
-
-def _harvest_via_selection(page):
-    """Phương án cuối: bôi chuột chọn mã trên panel, Ctrl+C, đọc clipboard.
-
-    Mã trên panel là chữ hiển thị thường — muốn copy phải bôi
-    chuột chọn như người dùng vẫn làm tay.
+    Đây là đường lấy mã chính: bấm Invite xong bấm nút copy là
+    nội dung copy chứa mã (tin chia sẻ "Mã: XXXXXX" hoặc link
+    chứa mã). Panel mở chậm nên chờ nút copy xuất hiện tới 10
+    giây thay vì thử đúng một lần.
     """
-    try:
-        box = page.evaluate(_FIND_CODE_RECT_JS)
-    except Exception:
-        box = None
-    if not box:
-        return ""
-    try:
-        middle_y = box["y"] + box["height"] / 2
-        page.mouse.move(box["x"] + 2, middle_y)
-        page.mouse.down()
-        page.mouse.move(box["x"] + box["width"] - 2, middle_y, steps=10)
-        page.mouse.up()
-        page.keyboard.press("Control+c")
-        page.wait_for_timeout(400)
-    except Exception:
-        return ""
-    text = _read_clipboard(page)
-    compact = re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
-    if re.fullmatch(r"[A-Z0-9]{6}", compact):
-        return compact
-    return _invite_code_from_text(text)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return ""
+        for name in (
+            "Sao chép liên kết giới thiệu",
+            "Copy referral link",
+            "Sao chép",
+            "Copy link",
+        ):
+            button = page.get_by_role("button", name=name, exact=False)
+            try:
+                if button.count() and button.first.is_visible():
+                    button.first.click(timeout=5000)
+                    page.wait_for_timeout(700)
+                    return _invite_code_from_text(
+                        _read_clipboard(page)
+                    )
+            except Exception:
+                pass
+        page.wait_for_timeout(700)
+    return ""
 
 
 _SCRATCH_RECT_JS = """() => {
@@ -1011,11 +957,11 @@ def _scan_panel_code(page, seconds):
 def _harvest_invite_code(page):
     """Lấy mã mời của chính tài khoản này từ panel "Mời bạn bè".
 
-    Bấm nút Mời/Invite ở góc phải trên, rồi theo thứ tự: quét
-    chữ trong panel → bấm "Copy referral link" bóc mã khỏi nội
-    dung copy → cào lớp "Scratch to reveal" rồi quét lại → bôi
-    chuột chọn mã. Không lấy được thì trả "" — tài khoản vẫn
-    được lưu bình thường.
+    Bấm nút Mời/Invite ở góc phải trên, rồi bấm "Copy referral
+    link" và bóc mã khỏi nội dung copy — đó là đường chính.
+    Dự phòng khi copy không ra mã: quét chữ trong panel, và
+    cào lớp "Scratch to reveal" rồi quét lại. Không lấy được
+    thì trả "" — tài khoản vẫn được lưu bình thường.
     """
     code = ""
     try:
@@ -1045,19 +991,16 @@ def _harvest_invite_code(page):
         if button is None:
             return ""
         button.click(timeout=5000)
-        code = _scan_panel_code(page, 6)
+        # Đường chính theo đúng thao tác tay: bấm Copy referral
+        # link là ra mã, không cần bôi chọn gì cả.
+        code = _harvest_via_copy_link(page)
         if not code:
-            # Đường chủ đạo: bấm "Copy referral link" rồi bóc mã
-            # khỏi nội dung vừa copy (tin chia sẻ chứa "Mã: XXXXXX"
-            # hoặc link chứa mã).
-            code = _harvest_via_copy_link(page)
+            code = _scan_panel_code(page, 4)
         if not code and _scratch_to_reveal(page):
             # Mã bị che sau lớp "Scratch to reveal": cào xong mã
             # hiện thành chữ — quét lại panel.
             _status("Mã mời bị che — đã cào lớp phủ, quét lại panel.")
             code = _scan_panel_code(page, 6)
-        if not code:
-            code = _harvest_via_selection(page)
     except Exception:
         return ""
     finally:
