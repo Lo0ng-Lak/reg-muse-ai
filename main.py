@@ -846,6 +846,14 @@ class MuseAIHelper(tk.Tk):
                 except OSError:
                     pass
                 self.events.put(("invite", own_invite))
+                self.events.put(
+                    (
+                        "log",
+                        f"[{index}/{total}] Chuỗi mã mời: tài khoản "
+                        f"tiếp theo sẽ quy đổi mã {own_invite} — mã "
+                        "của tài khoản này.",
+                    )
+                )
             if burned:
                 self.events.put(
                     (
