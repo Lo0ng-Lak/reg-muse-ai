@@ -55,6 +55,25 @@ The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
 
+### Optional: rotate the Surfshark IP during a run
+
+The Surfshark app itself has no interface the helper can drive, so rotation
+uses Surfshark's manual WireGuard configurations instead:
+
+1. Install the official WireGuard app for Windows.
+2. In your Surfshark account, open **VPN → Manual setup → WireGuard**,
+   create configurations for a few locations, and download the `.conf` files.
+3. Copy the `.conf` files into `%LOCALAPPDATA%\MuseAIHelper\wg\`.
+4. Disconnect the Surfshark desktop app (the WireGuard tunnels replace it)
+   and start this app **as Administrator** — installing a tunnel service
+   requires elevation.
+
+Set **Đổi IP sau mỗi** to how many accounts run per IP (0 disables
+rotation). At the start of a run the app activates the first configuration,
+logs the current public IP, and after every N accounts it switches to the
+next configuration and logs the new IP. If no configurations are found, the
+run simply continues on the current connection.
+
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
 The Excel sheet contains the Muse.ai passwords in readable form, so protect
 the file and do not share or sync it to an untrusted location. The Muse.ai

@@ -13,6 +13,16 @@ from html.parser import HTMLParser
 import keyring
 
 
+# Ép stdout/stderr sang UTF-8. Trên Windows, print() tiếng Việt vào pipe
+# mặc định dùng bảng mã console (charmap) và sập ngay ở dòng trạng thái
+# đầu tiên — trước cả khi kịp điền email vào form.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 SIGNUP_URL = "https://muse.ai/"
 API_BASE = "https://api.mail.tm"
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
