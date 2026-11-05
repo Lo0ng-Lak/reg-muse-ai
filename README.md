@@ -72,7 +72,11 @@ proxy per line**: `host:port:username:password` (or a full
 **Tài khoản / proxy** sets how many accounts each proxy serves: the count
 advances by account position, whether the accounts pass or fail, and when
 a proxy's quota is used up the run moves to the next proxy in the pool,
-wrapping back to the first when the pool runs out. The pool is expected to
+wrapping back to the first when the pool runs out. One exception: if Meta
+answers an attempt with the "Something went wrong — You can't create a new
+account right now" dialog, that IP is treated as blocked — the account
+fails at once and the rest of that proxy's quota is skipped, so the next
+account starts on the next proxy. The pool is expected to
 be US proxies supplied by you: **the tool does not verify exit IPs** (that
 check cost several page loads per account and was removed for speed at the
 owner's direction). The backstop is the post-profile classification — if

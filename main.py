@@ -191,14 +191,35 @@ def _proxy_display(value):
     return ":".join(parts[:2]) if len(parts) >= 2 else display
 
 
-def _proxy_index_for_account(index, per_proxy, pool_size):
-    """Tài khoản thứ index (1-based) dùng proxy nào trong kho.
+def _line_burns_proxy(line):
+    """Dòng tín hiệu từ browser_helper: proxy đang dùng bị Meta chặn."""
+    return line.startswith("PROXY_BURN")
 
-    Hết per_proxy tài khoản thì sang proxy kế — tính theo vị trí
-    của tài khoản trong lượt chạy, bất kể các tài khoản trước
-    thành công hay thất bại. Hết kho thì quay vòng lại từ đầu.
+
+class _ProxyRotation:
+    """Xoay proxy theo hạn mức tài khoản; proxy bị chặn thì bỏ ngay.
+
+    current() cho proxy của tài khoản sắp chạy. Sau mỗi tài khoản
+    gọi advance_after_account(): đủ hạn mức — hoặc tài khoản đó
+    báo proxy bị Meta chặn tạo tài khoản — thì tài khoản sau dùng
+    proxy kế tiếp; hết kho thì quay vòng lại từ đầu. Hạn mức tính
+    theo lượt thử, bất kể thành công hay thất bại.
     """
-    return ((index - 1) // per_proxy) % pool_size
+
+    def __init__(self, pool, per_proxy):
+        self.pool = pool
+        self.per_proxy = per_proxy
+        self.cursor = 0
+        self.used = 0
+
+    def current(self):
+        return self.cursor, self.pool[self.cursor]
+
+    def advance_after_account(self, burned=False):
+        self.used += 1
+        if burned or self.used >= self.per_proxy:
+            self.cursor = (self.cursor + 1) % len(self.pool)
+            self.used = 0
 
 
 def _write_active_proxy(line):
@@ -541,16 +562,14 @@ class MuseAIHelper(tk.Tk):
         helper = Path(__file__).with_name("browser_helper.py")
         success = 0
         fail = 0
-        active_proxy_index = None
+        rotation = _ProxyRotation(pool, per_proxy)
+        written_proxy_index = None
         for index in range(1, total + 1):
             if self.stop_event.is_set():
                 break
-            proxy_index = _proxy_index_for_account(
-                index, per_proxy, len(pool)
-            )
-            if proxy_index != active_proxy_index:
-                active_proxy_index = proxy_index
-                line = pool[proxy_index]
+            proxy_index, line = rotation.current()
+            if proxy_index != written_proxy_index:
+                written_proxy_index = proxy_index
                 try:
                     _write_active_proxy(line)
                     note = ""
@@ -578,6 +597,7 @@ class MuseAIHelper(tk.Tk):
                 self.events.put(
                     ("log", f"[{index}/{total}] Tạo hộp thư thất bại: {error}")
                 )
+                rotation.advance_after_account()
                 continue
             self.events.put(
                 (
@@ -585,7 +605,10 @@ class MuseAIHelper(tk.Tk):
                     f"[{index}/{total}] Đã tạo mail {address} — bắt đầu đăng ký.",
                 )
             )
-            if self._run_helper(helper, address, index, total):
+            helper_ok, burned = self._run_helper(
+                helper, address, index, total
+            )
+            if helper_ok:
                 try:
                     _append_spreadsheet_row(address, muse_password)
                     success += 1
@@ -619,6 +642,15 @@ class MuseAIHelper(tk.Tk):
                             "— lý do ở dòng RESULT phía trên.",
                         )
                     )
+            if burned:
+                self.events.put(
+                    (
+                        "log",
+                        f"Proxy #{proxy_index + 1} bị Meta chặn — "
+                        "đổi sang proxy kế từ tài khoản sau.",
+                    )
+                )
+            rotation.advance_after_account(burned=burned)
             if index < total and not self.stop_event.is_set():
                 time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
         self.events.put(
@@ -640,13 +672,16 @@ class MuseAIHelper(tk.Tk):
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False
+            return False, False
         self.helper_process = process
+        signals = {"burn": False}
 
         def forward_output():
             for line in process.stdout:
                 line = line.strip()
                 if line:
+                    if _line_burns_proxy(line):
+                        signals["burn"] = True
                     self.events.put(("log", f"[{index}/{total}] {line}"))
 
         reader = threading.Thread(target=forward_output, daemon=True)
@@ -674,7 +709,9 @@ class MuseAIHelper(tk.Tk):
             process.kill()
         reader.join(timeout=2)
         self.helper_process = None
-        return process.returncode == 0 and not self.stop_event.is_set()
+        return (
+            process.returncode == 0 and not self.stop_event.is_set()
+        ), signals["burn"]
 
     def _process_events(self):
         try:

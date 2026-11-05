@@ -96,7 +96,10 @@ def _classify_after_profile(page, timeout_seconds=45):
       khu vực của IP hiện tại, đăng ký coi như THẤT BẠI.
     - "card": màn hình nhập thẻ — đăng ký đi đúng hướng; phải hoàn
       tất bước nhập thẻ nữa mới tính là THÀNH CÔNG.
-    - "unknown": hết thời gian chờ mà không thấy hai màn hình trên.
+    - "error": hộp thoại "Something went wrong — You can't create a
+      new account right now": IP hiện tại đang bị Meta chặn tạo tài
+      khoản. THẤT BẠI ngay, và proxy đó bị đánh dấu bỏ.
+    - "unknown": hết thời gian chờ mà không thấy các màn hình trên.
     """
     waitlist_markers = ("join the waitlist", "available in your country")
     card_markers = (
@@ -106,6 +109,10 @@ def _classify_after_profile(page, timeout_seconds=45):
         "add a card",
         "payment method",
     )
+    error_markers = (
+        "something went wrong",
+        "create a new account right now",
+    )
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if page.is_closed():
@@ -114,6 +121,8 @@ def _classify_after_profile(page, timeout_seconds=45):
             text = page.locator("body").inner_text(timeout=3000).lower()
         except Exception:
             text = ""
+        if any(marker in text for marker in error_markers):
+            return "error"
         if any(marker in text for marker in waitlist_markers):
             return "waitlist"
         if any(marker in text for marker in card_markers):
@@ -485,6 +494,15 @@ def main():
         if auto:
             _status("Đã gửi hồ sơ, đang chờ màn hình tiếp theo...")
             outcome = _classify_after_profile(page)
+            if outcome == "error":
+                _status(
+                    "PROXY_BURN: Meta chặn tạo tài khoản trên IP này "
+                    "('Something went wrong')."
+                )
+                raise RuntimeError(
+                    "Meta báo không thể tạo tài khoản lúc này — IP "
+                    "của proxy đang dùng đã bị chặn; đổi proxy khác."
+                )
             if outcome == "waitlist":
                 raise RuntimeError(
                     "Ra màn hình 'Join the waitlist' — Muse chưa khả "
