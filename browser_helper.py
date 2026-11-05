@@ -400,6 +400,43 @@ def _wait_for_muse_interface(page, timeout_seconds=30):
     page.wait_for_timeout(1500)
 
 
+def _wait_for_app_shell(page, timeout_seconds=20):
+    """Chờ khung giao diện Muse dựng xong (nút Mời hoặc thanh trái).
+
+    URL đổi sang giao diện trước khi các nút bấm sẵn sàng — qua
+    proxy chậm, quy đổi/lấy mã chạy ngay lúc này sẽ trượt hết.
+    Thấy nút Mời ở góc phải trên, hoặc thanh icon bên trái đã
+    dựng, thì mới coi là sẵn sàng; hết giờ vẫn đi tiếp.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return
+        invite = page.get_by_role("button", name="Mời", exact=False)
+        try:
+            if invite.count() and invite.first.is_visible():
+                return
+        except Exception:
+            pass
+        try:
+            rail_ready = page.evaluate(
+                """() => [...document.querySelectorAll('button')]
+                    .some((el) => {
+                        const r = el.getBoundingClientRect();
+                        return (
+                            r.width > 0 &&
+                            r.left < 90 &&
+                            r.bottom > window.innerHeight - 100
+                        );
+                    })"""
+            )
+        except Exception:
+            rail_ready = False
+        if rail_ready:
+            return
+        page.wait_for_timeout(800)
+
+
 def _session_cookie_header(page):
     """Cookie phiên đăng nhập, dạng chuỗi "name=value; name=value".
 
@@ -446,8 +483,31 @@ def _load_redeem_code():
     return code if re.fullmatch(r"[A-Z0-9]{6}", code) else ""
 
 
+def _settings_open(page):
+    """Cửa sổ Cài đặt đã mở chưa (thấy hàng quy đổi mã là chắc chắn)."""
+    for text in ("Quy đổi mã lời mời", "Redeem invite code"):
+        probe = page.get_by_text(text, exact=False)
+        try:
+            if probe.count():
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _open_settings(page):
-    """Mở Cài đặt từ menu góc trái dưới của giao diện Muse."""
+    """Mở Cài đặt: phím tắt Ctrl+, trước, menu góc trái dưới sau.
+
+    Menu của Muse ghi rõ Cài đặt = Ctrl+, — bấm phím tắt chắc
+    chắn hơn mò bấm menu, nhất là khi giao diện vừa tải xong.
+    """
+    try:
+        page.keyboard.press("Control+,")
+        page.wait_for_timeout(1200)
+        if _settings_open(page):
+            return True
+    except Exception:
+        pass
     for name in ("Cài đặt", "Settings"):
         item = page.get_by_text(name, exact=True)
         try:
@@ -510,27 +570,52 @@ def _redeem_dialog_present(page):
 
 
 def _fill_redeem_code(page, code):
-    """Điền mã 6 ký tự vào hộp thoại quy đổi (6 ô riêng hoặc 1 ô)."""
+    """Điền mã 6 ký tự vào hộp thoại quy đổi, có đọc lại kiểm chứng.
+
+    Lần lượt thử: điền từng ô (6 ô riêng) → gõ phím như người
+    dùng (bấm ô đầu rồi gõ, các ô tự nhảy) → điền một ô duy nhất
+    chứa cả mã. Cách nào cho tổng số ký tự đọc lại đúng bằng độ
+    dài mã thì coi như xong.
+    """
     boxes = page.locator("input:visible")
     try:
         count = boxes.count()
     except Exception:
         return False
+    if count == 0:
+        return False
+
+    def total_filled():
+        try:
+            return sum(
+                len(boxes.nth(index).input_value() or "")
+                for index in range(boxes.count())
+            )
+        except Exception:
+            return -1
+
     if count == len(code) and count > 1:
-        for index, char in enumerate(code):
-            boxes.nth(index).fill(char)
-    elif count >= 1:
-        boxes.first.click(timeout=5000)
-        boxes.first.fill(code)
-    else:
-        return False
-    filled = 0
+        try:
+            for index, char in enumerate(code):
+                boxes.nth(index).fill(char)
+        except Exception:
+            pass
+        if total_filled() == len(code):
+            return True
     try:
-        for index in range(boxes.count()):
-            filled += len(boxes.nth(index).input_value() or "")
+        boxes.first.click(timeout=5000)
+        page.keyboard.type(code, delay=80)
     except Exception:
-        return False
-    return filled == len(code)
+        pass
+    if total_filled() == len(code):
+        return True
+    if count == 1:
+        try:
+            boxes.first.fill(code)
+        except Exception:
+            pass
+        return total_filled() == len(code)
+    return False
 
 
 def _close_settings(page):
@@ -554,19 +639,28 @@ def _redeem_invite_code(page, code):
     try:
         if not _open_settings(page):
             return False
+        # Hàng quy đổi nằm khá sâu trong Cài đặt và hiện hơi
+        # muộn: dò theo sự tồn tại (không đòi hỏi đã nhìn thấy),
+        # bấm thì Playwright tự cuộn tới.
         row = None
-        for text in (
-            "Quy đổi mã lời mời",
-            "Redeem invite code",
-            "Redeem a code",
-        ):
-            candidate = page.get_by_text(text, exact=False)
-            try:
-                if candidate.count() and candidate.first.is_visible():
-                    row = candidate.first
-                    break
-            except Exception:
-                pass
+        deadline = time.monotonic() + 10
+        while row is None and time.monotonic() < deadline:
+            if page.is_closed():
+                return False
+            for text in (
+                "Quy đổi mã lời mời",
+                "Redeem invite code",
+                "Redeem a code",
+            ):
+                candidate = page.get_by_text(text, exact=False)
+                try:
+                    if candidate.count():
+                        row = candidate.first
+                        break
+                except Exception:
+                    pass
+            if row is None:
+                page.wait_for_timeout(600)
         if row is None:
             return False
         row.scroll_into_view_if_needed(timeout=5000)
@@ -678,6 +772,13 @@ def _invite_code_from_text(text):
     text = text.strip()
     if re.fullmatch(r"[A-Z0-9]{6}", text):
         return text
+    # Mẫu tin chia sẻ của Muse có sẵn nhãn: "Mã: ATGXDX
+    # https://muse.ai/join" — bám nhãn là chắc chắn nhất.
+    anchored = re.search(
+        r"(?:Mã|Code)\s*:\s*([A-Z0-9]{6})", text, re.IGNORECASE
+    )
+    if anchored:
+        return anchored.group(1).upper()
     match = re.search(r"(?<![A-Za-z0-9])[A-Z0-9]{6}(?![A-Za-z0-9])", text)
     return match.group(0) if match else ""
 
@@ -776,18 +877,32 @@ def _harvest_invite_code(page):
     """
     code = ""
     try:
-        opened = False
-        for name in ("Mời", "Invite"):
-            button = page.get_by_role("button", name=name, exact=False)
-            try:
-                if button.count() and button.first.is_visible():
-                    button.first.click(timeout=5000)
-                    opened = True
-                    break
-            except Exception:
-                pass
-        if not opened:
+        # Nút Mời có thể hiện muộn vài giây sau khi vào giao
+        # diện (nhất là qua proxy chậm): chờ nó xuất hiện thay
+        # vì thử đúng một lần rồi bỏ cuộc.
+        button = None
+        deadline = time.monotonic() + 20
+        while button is None and time.monotonic() < deadline:
+            if page.is_closed():
+                return ""
+            for name in ("Mời", "Invite"):
+                candidate = page.get_by_role(
+                    "button", name=name, exact=False
+                )
+                try:
+                    if (
+                        candidate.count()
+                        and candidate.first.is_visible()
+                    ):
+                        button = candidate.first
+                        break
+                except Exception:
+                    pass
+            if button is None:
+                page.wait_for_timeout(800)
+        if button is None:
             return ""
+        button.click(timeout=5000)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and not code:
             if page.is_closed():
@@ -1054,6 +1169,7 @@ def main():
             )
             _confirm_final_step(page)
             _wait_for_muse_interface(page)
+            _wait_for_app_shell(page)
             redeem_code = _load_redeem_code()
             if redeem_code:
                 if _redeem_invite_code(page, redeem_code):

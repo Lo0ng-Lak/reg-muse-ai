@@ -70,11 +70,16 @@ the app then, with no further clicks:
    account's own invite code (below). Sheets written by older versions
    are migrated on the next successful row: a fictional "Muse.ai
    password" column, if present, is dropped and the remaining columns
-   shifted left; missing headers are filled in.
+   shifted left; missing headers are filled in. If `accounts.xlsx`
+   cannot be written because it is locked (usually because it is open
+   in Excel), the row is kept in `accounts.pending.xlsx` next to it
+   and merged into the main sheet on the next successful write — close
+   the Excel window to unblock it.
 7. Invite codes form a chain. Once inside the Muse interface, each
    account first redeems the *previous* account's invite code — the app
    passes it to the helper in `redeem.txt`, and the helper follows the
-   UI path from the screenshots: bottom-left menu → **Cài đặt** →
+   UI path from the screenshots: **Cài đặt** (opened with its Ctrl+,
+   shortcut, falling back to the bottom-left menu) →
    **Quy đổi mã lời mời** → type the 6 characters → **Xác nhận**. A
    failed redemption is logged but does not fail the account (the code
    can still be redeemed manually within 48 hours). The account then

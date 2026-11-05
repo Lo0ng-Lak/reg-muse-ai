@@ -22,6 +22,7 @@ API_BASE = "https://api.mail.tm"
 SPREADSHEET_FILE = (
     Path.home() / "AppData" / "Local" / "MuseAIHelper" / "accounts.xlsx"
 )
+PENDING_SPREADSHEET_FILE = SPREADSHEET_FILE.with_name("accounts.pending.xlsx")
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
 CARD_SERVICE = "MuseAIHelper:card"
 CARD_FIELDS = ("number", "expiry", "cvv", "zip")
@@ -145,8 +146,15 @@ def _append_spreadsheet_row(email, mail_password="", cookie="", invite=""):
     temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
     try:
         SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
-        if SPREADSHEET_FILE.exists():
-            workbook = load_workbook(SPREADSHEET_FILE)
+        # File chờ (từ lần ghi bị khóa trước) là bản đầy đủ nhất:
+        # lấy nó làm nền để không mất dòng nào đã giữ ở đó.
+        base_file = (
+            PENDING_SPREADSHEET_FILE
+            if PENDING_SPREADSHEET_FILE.exists()
+            else SPREADSHEET_FILE
+        )
+        if base_file.exists():
+            workbook = load_workbook(base_file)
             sheet = workbook.active
             _migrate_legacy_sheet(sheet)
             # Bổ sung tiêu đề cho các cột còn thiếu (sheet đời đầu
@@ -170,8 +178,45 @@ def _append_spreadsheet_row(email, mail_password="", cookie="", invite=""):
                 invite,
             ]
         )
-        workbook.save(temporary_file)
-        temporary_file.replace(SPREADSHEET_FILE)
+        # accounts.xlsx đang mở trong Excel là khóa cứng trên
+        # Windows (WinError 5 khi thay file): thử lại vài nhịp,
+        # vẫn khóa thì giữ toàn bộ sheet vào accounts.pending.xlsx
+        # — dòng không mất, lần ghi sau tự gộp vào sheet chính.
+        written = False
+        last_error = None
+        for _ in range(3):
+            try:
+                workbook.save(temporary_file)
+                temporary_file.replace(SPREADSHEET_FILE)
+                written = True
+                break
+            except PermissionError as error:
+                last_error = error
+                time.sleep(1)
+        if written:
+            if PENDING_SPREADSHEET_FILE.exists():
+                try:
+                    PENDING_SPREADSHEET_FILE.unlink()
+                except OSError:
+                    pass
+        else:
+            pending_tmp = SPREADSHEET_FILE.with_name(
+                "accounts.pending.tmp.xlsx"
+            )
+            try:
+                workbook.save(pending_tmp)
+                pending_tmp.replace(PENDING_SPREADSHEET_FILE)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "File accounts.xlsx đang bị khóa (thường do đang "
+                "mở trong Excel) nên chưa ghi được. Dòng này KHÔNG "
+                "mất — đã giữ ở accounts.pending.xlsx và sẽ tự gộp "
+                "vào sheet chính ở lần ghi thành công sau; bạn chỉ "
+                "cần đóng file Excel đang mở."
+            ) from last_error
+    except RuntimeError:
+        raise
     except Exception as error:
         raise RuntimeError(f"Không ghi được file Excel: {error}") from error
     finally:
@@ -187,27 +232,28 @@ def _last_invite_from_sheet():
     đổi. Tìm cột theo tên tiêu đề "Mã mời" nên sheet đời nào
     cũng đọc được.
     """
-    try:
-        if not SPREADSHEET_FILE.exists():
-            return ""
-        workbook = load_workbook(SPREADSHEET_FILE, read_only=True)
-        sheet = workbook.active
-        column = None
-        for cell in sheet[1]:
-            if cell.value == "Mã mời":
-                column = cell.column
-                break
-        if column is None:
-            return ""
-        for row in range(sheet.max_row, 1, -1):
-            value = sheet.cell(row=row, column=column).value
-            if value:
-                code = str(value).strip().upper()
-                if re.fullmatch(r"[A-Z0-9]{6}", code):
-                    return code
-        return ""
-    except Exception:
-        return ""
+    for path in (PENDING_SPREADSHEET_FILE, SPREADSHEET_FILE):
+        try:
+            if not path.exists():
+                continue
+            workbook = load_workbook(path, read_only=True)
+            sheet = workbook.active
+            column = None
+            for cell in sheet[1]:
+                if cell.value == "Mã mời":
+                    column = cell.column
+                    break
+            if column is None:
+                continue
+            for row in range(sheet.max_row, 1, -1):
+                value = sheet.cell(row=row, column=column).value
+                if value:
+                    code = str(value).strip().upper()
+                    if re.fullmatch(r"[A-Z0-9]{6}", code):
+                        return code
+        except Exception:
+            continue
+    return ""
 
 
 def _load_card_from_keyring():
