@@ -950,6 +950,26 @@ def _harvest_via_copy_link(page):
 
 
 _SCRATCH_RECT_JS = """() => {
+    // Ô phủ là một thẻ <canvas> phủ kín thanh mã (theo HTML
+    // thật người dùng gửi): nó mang aria-label "Hiển thị mã
+    // lời mời" ở mọi trạng thái. Dòng chữ "Scratch to reveal"
+    // có thể được VẼ trên canvas chứ không có trong DOM —
+    // tìm theo chữ là không bao giờ thấy ô, tô cũng vô ích.
+    for (const c of document.querySelectorAll('canvas')) {
+        if (
+            /mã lời mời|invite code/i.test(
+                c.getAttribute('aria-label') || ''
+            )
+        ) {
+            const r = c.getBoundingClientRect();
+            if (r.width > 0) {
+                return {
+                    x: r.x, y: r.y,
+                    width: r.width, height: r.height,
+                };
+            }
+        }
+    }
     const hits = [
         ...document.querySelectorAll(
             'div, span, button, canvas, section'
@@ -1082,6 +1102,15 @@ _INVITE_CODE_DOM_JS = """() => {
         const title = (el.getAttribute('title') || '').trim();
         if (isCode(title)) return title;
     }
+    // Cả thân trang: dòng thông báo tiết lộ mã có thể nằm ở
+    // phần tử không phải span lá.
+    const bodyText = document.body
+        ? (document.body.textContent || '')
+        : '';
+    const ann = bodyText.match(
+        /(?:mã lời mời|invite code)[^A-Z0-9]{0,20}([A-Z0-9]{6})/i
+    );
+    if (ann) return ann[1].toUpperCase();
     return '';
 }"""
 
@@ -1158,9 +1187,18 @@ def _reveal_by_painting(page):
         try:
             page.evaluate(
                 """() => {
-                    const el = [...document.querySelectorAll(
-                        'div, span, button, canvas, section'
-                    )].find((e) =>
+                    const canvas = [...document
+                        .querySelectorAll('canvas')
+                    ].find((c) =>
+                        /mã lời mời|invite code/i.test(
+                            c.getAttribute('aria-label') || ''
+                        )
+                    );
+                    const el = canvas || [...document
+                        .querySelectorAll(
+                            'div, span, button, canvas, section'
+                        )
+                    ].find((e) =>
                         /scratch to reveal|cào để/i.test(
                             e.textContent || ''
                         )
@@ -1204,6 +1242,48 @@ def _scan_panel_code(page, seconds):
             return code
         page.wait_for_timeout(700)
     return ""
+
+
+_INVITE_DEBUG_JS = """() => {
+    const info = {url: location.href};
+    const canvas = [...document.querySelectorAll('canvas')].find(
+        (c) => /mã lời mời|invite code/i.test(
+            c.getAttribute('aria-label') || ''
+        )
+    );
+    info.canvas_found = !!canvas;
+    let node = canvas;
+    for (let i = 0; i < 4 && node && node.parentElement; i++) {
+        node = node.parentElement;
+    }
+    info.panel_html = node ? node.outerHTML.slice(0, 20000) : '';
+    return JSON.stringify(info);
+}"""
+
+
+def _dump_invite_debug(page):
+    """Lưu cấu trúc panel Mời khi lấy mã thất bại để chẩn đoán.
+
+    File invite_debug.html nằm cùng thư mục với accounts.xlsx.
+    Cấu trúc panel của tài khoản MỚI (chưa tiết lộ mã) chỉ xem
+    được ở máy người dùng — có nó mới sửa trúng được thay vì
+    đoán mò theo ảnh chụp.
+    """
+    try:
+        raw = page.evaluate(_INVITE_DEBUG_JS) or ""
+        data_dir = (
+            Path.home() / "AppData" / "Local" / "MuseAIHelper"
+        )
+        data_dir.mkdir(parents=True, exist_ok=True)
+        target = data_dir / "invite_debug.html"
+        target.write_text(str(raw), encoding="utf-8")
+        _status(
+            "Không lấy được mã mời — đã lưu cấu trúc panel vào "
+            "invite_debug.html (cùng thư mục với accounts.xlsx); "
+            "gửi file đó để chẩn đoán đúng chỗ."
+        )
+    except Exception:
+        pass
 
 
 def _harvest_invite_code(page):
@@ -1258,12 +1338,14 @@ def _harvest_invite_code(page):
         if not code:
             code = _scan_panel_code(page, 6)
     except Exception:
-        return ""
+        code = ""
     finally:
         try:
             page.keyboard.press("Escape")
         except Exception:
             pass
+    if not code:
+        _dump_invite_debug(page)
     return code
 
 
