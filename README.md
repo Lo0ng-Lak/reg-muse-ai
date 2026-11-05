@@ -86,11 +86,12 @@ the app then, with no further clicks:
    opens the **Mời** panel and reads its *own* invite code, which is
    saved in its sheet row and becomes the code the next account
    redeems. (Reading the code follows the real panel: a fresh
-   account's code sits behind a **Scratch to reveal** slider, so the
-   tool grabs the handle at the bar's left edge and drags it to the
-   right first — the copy button only turns active after the reveal —
-   then clicks **Copy referral link** and parses the code out of what
-   was copied. Fallback: scan the panel text.) The **Mã mời** field
+   account's code sits behind a **Scratch to reveal** cover, so the
+   tool paints over it with the held mouse first — hovering turns
+   the cursor into a round brush, and painting the cover away
+   reveals the code and turns the copy button active — then clicks
+   **Copy referral link** and parses the code out of what was
+   copied. Fallback: scan the panel text.) The **Mã mời** field
    in the
    window is the chain's current
    head: whatever is there when a run starts (typically your own

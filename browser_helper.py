@@ -985,24 +985,39 @@ _SCRATCH_RECT_JS = """() => {
 }"""
 
 
-def _slide_reveal(page, box):
-    """Một lượt kéo trượt mở lớp phủ: nắm vòng ở đầu trái, kéo sang phải.
+def _paint_reveal(page, box):
+    """Một lượt tô mở lớp phủ "Scratch to reveal".
 
-    Ô "Scratch to reveal" là một thanh trượt, không phải lớp
-    sơn cào: nhấn giữ vào vòng tròn ở đầu trái rồi kéo MỘT
-    MẠCH tới cuối thanh — kéo qua kéo lại kiểu zíc-zắc sẽ trả
-    thanh trượt về chỗ cũ. Kéo tới cuối, nút Copy referral
-    link chuyển xanh (hiệu lực) là thành công.
+    Đưa chuột vào ô, con trỏ đổi thành hình tròn như một cây
+    cọ; nhấn giữ rồi TÔ qua lại phủ kín cả ô — lớp phủ bị xoá
+    ở nơi cọ quét qua. Tô đủ thì mã mời hiện ra và nút Copy
+    referral link chuyển xanh, bấm được. Tô chậm và dày (hàng
+    cách ~6px, nhiều bước di chuyển) cho giống tay người.
     """
     try:
-        center_y = box["y"] + box["height"] / 2
-        start_x = box["x"] + box["height"] / 2
-        end_x = box["x"] + box["width"] - 6
-        page.mouse.move(start_x, center_y)
+        left = box["x"] + 4
+        right = box["x"] + box["width"] - 4
+        top = box["y"] + 4
+        bottom = box["y"] + box["height"] - 4
+        # Đưa chuột vào giữa ô trước để con trỏ cọ xuất hiện.
+        page.mouse.move((left + right) / 2, (top + bottom) / 2)
+        page.wait_for_timeout(400)
         page.mouse.down()
         page.wait_for_timeout(200)
-        page.mouse.move(end_x, center_y, steps=50)
-        page.wait_for_timeout(250)
+        rows = max(4, int((bottom - top) // 6) + 1)
+        for index in range(rows):
+            if rows > 1:
+                y = top + (bottom - top) * index / (rows - 1)
+            else:
+                y = (top + bottom) / 2
+            if index % 2 == 0:
+                page.mouse.move(left, y, steps=8)
+                page.mouse.move(right, y, steps=60)
+            else:
+                page.mouse.move(right, y, steps=8)
+                page.mouse.move(left, y, steps=60)
+            page.wait_for_timeout(40)
+        page.wait_for_timeout(200)
         page.mouse.up()
         page.wait_for_timeout(600)
         return True
@@ -1023,7 +1038,7 @@ def _scan_once(page):
 def _wait_panel_ready(page):
     """Chờ panel Invite mở xong; trả mã ngay nếu quét thấy sẵn.
 
-    Panel sẵn sàng khi thấy thanh trượt che mã hoặc nút copy.
+    Panel sẵn sàng khi thấy lớp phủ che mã hoặc nút copy.
     Tối đa 10 giây (panel mở chậm qua proxy).
     """
     deadline = time.monotonic() + 10
@@ -1054,12 +1069,13 @@ def _wait_panel_ready(page):
     return ""
 
 
-def _reveal_by_sliding(page):
-    """Kéo trượt lớp phủ cho tới khi lấy được mã (tối đa 4 lượt).
+def _reveal_by_painting(page):
+    """Tô mở lớp phủ cho tới khi lấy được mã (tối đa 4 lượt).
 
-    Mỗi lượt kéo xong đều kiểm chứng ngay: quét panel tìm mã,
-    rồi bấm Copy referral link (nút đã xanh sau khi kéo thành
-    công) và bóc mã khỏi nội dung copy.
+    Mỗi lượt tô xong đều kiểm chứng ngay: quét panel tìm mã
+    (mã hiện ra sau lớp phủ là chữ đọc được), rồi bấm Copy
+    referral link (nút đã xanh khi mã hiện) và bóc mã khỏi
+    nội dung copy.
     """
     for attempt in range(4):
         try:
@@ -1068,10 +1084,10 @@ def _reveal_by_sliding(page):
             box = None
         if not box:
             return ""
-        if not _slide_reveal(page, box):
+        if not _paint_reveal(page, box):
             return ""
         _status(
-            f"Đã kéo trượt mở lớp phủ che mã mời (lần {attempt + 1})."
+            f"Đã tô mở lớp phủ che mã mời (lần {attempt + 1})."
         )
         code = _scan_once(page)
         if code:
@@ -1098,12 +1114,12 @@ def _scan_panel_code(page, seconds):
 def _harvest_invite_code(page):
     """Lấy mã mời của chính tài khoản này từ panel "Mời bạn bè".
 
-    Bấm nút Mời/Invite ở góc phải trên → kéo trượt thanh
-    "Scratch to reveal" mở lớp phủ che mã (chưa kéo thì nút
-    copy còn mờ, copy không ra mã) → bấm "Copy referral link"
-    và bóc mã khỏi nội dung copy. Dự phòng cuối: quét chữ
-    trong panel. Không lấy được thì trả "" — tài khoản vẫn
-    được lưu bình thường.
+    Bấm nút Mời/Invite ở góc phải trên → tô mở lớp phủ
+    "Scratch to reveal" che mã (chưa tô thì nút copy còn mờ,
+    copy không ra mã) → bấm "Copy referral link" và bóc mã
+    khỏi nội dung copy. Dự phòng cuối: quét chữ trong panel.
+    Không lấy được thì trả "" — tài khoản vẫn được lưu bình
+    thường.
     """
     code = ""
     try:
@@ -1139,11 +1155,11 @@ def _harvest_invite_code(page):
         if not code:
             code = _harvest_via_copy_link(page)
         if not code:
-            # Chưa kéo mở lớp phủ thì nút copy còn mờ, copy
-            # không ra mã: kéo trượt thanh "Scratch to reveal"
-            # (nắm vòng ở đầu trái kéo một mạch sang phải) rồi
-            # copy lại sau mỗi lượt kéo.
-            code = _reveal_by_sliding(page)
+            # Chưa tô mở lớp phủ thì nút copy còn mờ, copy
+            # không ra mã: đưa chuột vào ô "Scratch to reveal",
+            # nhấn giữ và tô phủ kín cho mã hiện ra, rồi copy
+            # lại sau mỗi lượt tô.
+            code = _reveal_by_painting(page)
         if not code:
             code = _scan_panel_code(page, 6)
     except Exception:
