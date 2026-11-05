@@ -72,14 +72,14 @@ proxy per line**: `host:port:username:password` (or a full
 **Tài khoản / proxy** sets how many accounts each proxy serves: the count
 advances by account position, whether the accounts pass or fail, and when
 a proxy's quota is used up the run moves to the next proxy in the pool,
-wrapping back to the first when the pool runs out. For every account, the
-Chromium signup browser runs through the currently active proxy, reads its
-real exit IP, and looks up that IP's country; **unless the country is US,
-the account is aborted before any registration happens** and nothing is
-saved. This check runs per account because rotating proxies can hand out a
-different exit for each session. mail.tm traffic stays on the machine's
-direct connection. The log only ever shows each proxy's host:port, never
-its password. `proxies.txt` and `proxy.txt` are listed in `.gitignore`, so
+wrapping back to the first when the pool runs out. The pool is expected to
+be US proxies supplied by you: **the tool does not verify exit IPs** (that
+check cost several page loads per account and was removed for speed at the
+owner's direction). The backstop is the post-profile classification — if
+an exit lands in an unsupported region, the "Join the waitlist" screen
+still fails that account. mail.tm traffic stays on the machine's direct
+connection. The log only ever shows each proxy's host:port, never its
+password. `proxies.txt` and `proxy.txt` are listed in `.gitignore`, so
 they are never committed — keep it that way.
 
 ### Your card: entered once, kept in Windows Credential Manager

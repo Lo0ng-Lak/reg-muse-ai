@@ -34,7 +34,7 @@ CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
 BUTTON_TIMEOUT_MS = 90000
 BUTTON_READY_TIMEOUT_MS = 30000
-UI_SETTLE_MS = 1500
+UI_SETTLE_MS = 700
 
 
 def _status(message):
@@ -47,8 +47,8 @@ def _load_proxy():
     Một dòng duy nhất, một trong hai dạng:
     host:port:username:password  hoặc  http://username:password@host:port
     Không có file (hoặc file trống) → None, và main() sẽ huỷ lượt chạy
-    vì đăng ký bắt buộc phải qua proxy có IP thoát thuộc US. Chỉ lưu
-    lượng Chromium (muse.ai) đi qua proxy; mail.tm vẫn đi thẳng.
+    vì đăng ký bắt buộc phải qua proxy. Chỉ lưu lượng Chromium
+    (muse.ai) đi qua proxy; mail.tm vẫn đi thẳng.
     """
     try:
         raw = Path(__file__).with_name("proxy.txt").read_text(
@@ -81,89 +81,11 @@ def _load_proxy():
     return proxy
 
 
-def _exit_country(ip):
-    """Tra mã quốc gia của một IP công khai (ở đây là IP thoát qua proxy)."""
-    try:
-        with urllib.request.urlopen(
-            f"http://ip-api.com/json/{ip}?fields=countryCode",
-            timeout=10,
-        ) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return None
-    code = data.get("countryCode")
-    return code.upper() if isinstance(code, str) else None
-
-
 def _short_error(error):
     """Rút gọn lỗi Playwright thành một dòng dễ đọc trong log."""
     text = str(error).split("Call log:")[0].strip().splitlines()
     first = text[0] if text else error.__class__.__name__
     return first[:200]
-
-
-def _check_proxy_exit(page):
-    """Đọc IP thoát THẬT qua proxy ngay trong trình duyệt + quốc gia.
-
-    Thử lần lượt vài dịch vụ (mỗi cái 2 lần) vì proxy residential hay
-    chập ở lần kết nối đầu, và mỗi dịch vụ đi một đường khác nhau
-    (HTTP thường / HTTPS qua CONNECT). Trả về (ip, country).
-    Mọi cách đều hỏng → RuntimeError KÈM nguyên nhân gốc để hiện lên
-    log, thay vì một câu chung chung không tra được gì.
-    """
-    errors = []
-    # Cách 1: ip-api qua chính trình duyệt — trả cả IP lẫn quốc gia,
-    # và là HTTP thường nên không cần CONNECT như các trang https.
-    for _ in range(2):
-        try:
-            page.goto(
-                "http://ip-api.com/json/?fields=query,countryCode",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            raw = page.locator("body").inner_text(timeout=5000).strip()
-            data = json.loads(raw)
-            ip = data.get("query")
-            code = data.get("countryCode")
-            if ip:
-                country = (
-                    code.upper()
-                    if isinstance(code, str)
-                    else _exit_country(ip)
-                )
-                return ip, country
-            errors.append("ip-api: phản hồi không có IP")
-        except Exception as error:
-            errors.append(f"ip-api: {_short_error(error)}")
-    # Cách 2: các dịch vụ trả IP dạng text thuần.
-    for url in (
-        "https://api.ipify.org",
-        "https://icanhazip.com",
-        "http://api.ipify.org",
-    ):
-        for _ in range(2):
-            try:
-                page.goto(
-                    url, wait_until="domcontentloaded", timeout=30000
-                )
-                text = page.locator("body").inner_text(
-                    timeout=5000
-                ).strip()
-                tokens = text.split()
-                candidate = tokens[0] if tokens else ""
-                chars = set("0123456789abcdefABCDEF.:")
-                if candidate and set(candidate) <= chars and (
-                    "." in candidate or ":" in candidate
-                ):
-                    return candidate, _exit_country(candidate)
-                errors.append(f"{url}: nội dung trả về lạ")
-            except Exception as error:
-                errors.append(f"{url}: {_short_error(error)}")
-    raise RuntimeError(
-        "Không kiểm tra được IP thoát qua proxy — huỷ đăng ký vì "
-        "bắt buộc phải qua proxy US. Chi tiết lỗi: "
-        + " | ".join(dict.fromkeys(errors))
-    )
 
 
 def _classify_after_profile(page, timeout_seconds=45):
@@ -196,7 +118,7 @@ def _classify_after_profile(page, timeout_seconds=45):
             return "waitlist"
         if any(marker in text for marker in card_markers):
             return "card"
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1200)
     return "unknown"
 
 
@@ -233,7 +155,7 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
                 return "done"
         else:
             clear_polls = 0
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1500)
     return "timeout"
 
 
@@ -371,7 +293,7 @@ def _fill_card_form(page, card):
         field = page.get_by_placeholder(placeholder).first
         field.wait_for(state="visible", timeout=15000)
         field.fill(value)
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(250)
     entered = digits(
         page.get_by_placeholder("Card number").first.input_value()
     )
@@ -465,7 +387,7 @@ def _open_signup_and_submit_email(page, email):
     _status(f"Form đã hiển thị đầy đủ — đang điền email {email}...")
     for _ in range(2):
         email_field.fill(email)
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(400)
         if email_field.input_value() == email:
             return continue_button
     raise RuntimeError(
@@ -509,8 +431,8 @@ def main():
     proxy = _load_proxy()
     if not proxy:
         detail = (
-            "Chưa cấu hình proxy — tool chỉ đăng ký qua proxy có IP "
-            "thoát thuộc US. Hãy nhập proxy trong ứng dụng rồi chạy lại."
+            "Chưa cấu hình proxy — tool chỉ đăng ký qua proxy. "
+            "Hãy nhập proxy trong ứng dụng rồi chạy lại."
         )
         if auto:
             _status(f"RESULT: FAIL {detail}")
@@ -528,18 +450,9 @@ def main():
         )
         page = browser.new_page()
         page.set_default_timeout(PAGE_TIMEOUT_MS)
-        _status("Đang kiểm tra IP thoát qua proxy...")
-        exit_ip, country = _check_proxy_exit(page)
-        _status(
-            f"IP thoát qua proxy: {exit_ip} — quốc gia: "
-            f"{country or 'không xác định'}."
-        )
-        if country != "US":
-            raise RuntimeError(
-                "IP thoát qua proxy không thuộc US — huỷ đăng ký, "
-                "tài khoản không được lưu."
-            )
-        _status("Đã xác nhận IP thoát thuộc US — bắt đầu đăng ký.")
+        # Không kiểm tra IP thoát nữa: kho proxy do người dùng đảm
+        # bảo toàn bộ là proxy US. Nếu một proxy nào đó thoát sai
+        # khu vực, màn hình waitlist sau bước hồ sơ vẫn chặn lại.
         continue_button = _open_signup_and_submit_email(page, email)
         try:
             existing_ids = _get_message_ids(token)
@@ -951,7 +864,7 @@ def _wait_for_verification_code(page, token, existing_ids):
         fields = _verification_input(page)
         if code and fields:
             return code
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
     raise TimeoutError(
         f"Không tìm thấy mã xác minh mới trong mail.tm sau "
         f"{CODE_TIMEOUT_SECONDS} giây."

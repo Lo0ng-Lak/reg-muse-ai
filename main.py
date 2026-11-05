@@ -26,7 +26,7 @@ MUSE_SERVICE = "MuseAIHelper:muse.ai"
 CARD_SERVICE = "MuseAIHelper:card"
 CARD_FIELDS = ("number", "expiry", "cvv", "zip")
 HELPER_TIMEOUT_SECONDS = 900
-PAUSE_BETWEEN_ACCOUNTS_SECONDS = 3
+PAUSE_BETWEEN_ACCOUNTS_SECONDS = 1
 
 
 def _generate_password():
@@ -262,8 +262,8 @@ class MuseAIHelper(tk.Tk):
         ttk.Label(
             proxy_row,
             text=(
-                "mỗi dòng 1 proxy (host:port:user:pass) — bắt buộc, "
-                "IP thoát phải thuộc US"
+                "mỗi dòng 1 proxy (host:port:user:pass) — kho proxy "
+                "US của bạn, tool không kiểm tra lại IP thoát"
             ),
             wraplength=190,
         ).grid(row=0, column=2, sticky="w")
@@ -503,7 +503,7 @@ class MuseAIHelper(tk.Tk):
         if not pool:
             messagebox.showwarning(
                 "Thiếu proxy",
-                "Tool chỉ đăng ký qua proxy có IP thoát thuộc US. "
+                "Tool chỉ đăng ký qua proxy. "
                 "Hãy nhập ít nhất một proxy (mỗi dòng một proxy, "
                 "dạng host:port:user:pass) vào ô Proxy rồi bấm lại.",
             )
@@ -514,8 +514,8 @@ class MuseAIHelper(tk.Tk):
         self._append_log(f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---")
         self._append_log(
             f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
-            "khoản (tính cả thành công lẫn thất bại) — mỗi tài khoản "
-            "chỉ chạy khi IP thoát kiểm tra được là US."
+            "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
+            "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
         )
         threading.Thread(
             target=self._run_loop, args=(total, pool, per_proxy), daemon=True
