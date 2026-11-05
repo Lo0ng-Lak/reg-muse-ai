@@ -225,7 +225,7 @@ class MuseAIHelper(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(3, weight=1)
+        root.rowconfigure(4, weight=1)
 
         ttk.Label(
             root,
@@ -243,8 +243,30 @@ class MuseAIHelper(tk.Tk):
             wraplength=720,
         ).grid(row=1, column=0, sticky="ew", pady=(6, 12))
 
+        proxy_row = ttk.Frame(root)
+        proxy_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        proxy_row.columnconfigure(1, weight=1)
+        ttk.Label(proxy_row, text="Proxy:").grid(row=0, column=0, sticky="w")
+        self.proxy_entry = ttk.Entry(proxy_row)
+        self.proxy_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        ttk.Label(
+            proxy_row,
+            text="host:port:user:pass — để trống = dùng VPN",
+        ).grid(row=0, column=2, sticky="w")
+        try:
+            saved_proxy = (
+                Path(__file__)
+                .with_name("proxy.txt")
+                .read_text(encoding="utf-8")
+                .strip()
+            )
+        except OSError:
+            saved_proxy = ""
+        if saved_proxy:
+            self.proxy_entry.insert(0, saved_proxy.splitlines()[0].strip())
+
         controls = ttk.Frame(root)
-        controls.grid(row=2, column=0, sticky="ew")
+        controls.grid(row=3, column=0, sticky="ew")
         ttk.Label(controls, text="Số tài khoản:").pack(side="left")
         self.count_var = tk.IntVar(value=5)
         self.count_spin = ttk.Spinbox(
@@ -278,7 +300,7 @@ class MuseAIHelper(tk.Tk):
         self.open_sheet_button.pack(side="right")
 
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -291,7 +313,7 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=4, column=0, sticky="ew", pady=(10, 0)
+            row=5, column=0, sticky="ew", pady=(10, 0)
         )
 
     def _confirm_surfshark_vpn(self):
@@ -311,10 +333,37 @@ class MuseAIHelper(tk.Tk):
             self.vpn_confirmed = True
         return confirmed
 
+    def _sync_proxy_file(self):
+        """Đồng bộ ô Proxy ra proxy.txt để browser_helper đọc.
+
+        Ô trống → xoá file (tránh dính proxy cũ). Trả về "host:port"
+        để ghi log — không bao giờ đưa user/password của proxy vào log.
+        """
+        value = self.proxy_entry.get().strip()
+        proxy_file = Path(__file__).with_name("proxy.txt")
+        if not value:
+            try:
+                proxy_file.unlink()
+            except OSError:
+                pass
+            return None
+        try:
+            proxy_file.write_text(value + "\n", encoding="utf-8")
+        except OSError as error:
+            raise RuntimeError(f"Không ghi được proxy.txt: {error}") from error
+        display = value
+        if "://" in display:
+            display = display.split("://", 1)[1]
+        if "@" in display:
+            display = display.rsplit("@", 1)[1]
+        parts = display.split(":")
+        return ":".join(parts[:2]) if len(parts) >= 2 else display
+
     def _set_controls_running(self, running):
         self.start_button.configure(state="disabled" if running else "normal")
         self.count_spin.configure(state="disabled" if running else "normal")
         self.rotate_spin.configure(state="disabled" if running else "normal")
+        self.proxy_entry.configure(state="disabled" if running else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
         self.open_sheet_button.configure(
             state=(
@@ -342,12 +391,21 @@ class MuseAIHelper(tk.Tk):
         except (tk.TclError, ValueError):
             rotate_every = 0
         rotate_every = max(0, min(rotate_every, 50))
+        try:
+            proxy_display = self._sync_proxy_file()
+        except RuntimeError as error:
+            messagebox.showerror("Lỗi proxy", str(error))
+            return
         if not self._confirm_surfshark_vpn():
             return
         self.running = True
         self.stop_event.clear()
         self._set_controls_running(True)
         self._append_log(f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---")
+        if proxy_display:
+            self._append_log(
+                f"Dùng proxy {proxy_display} cho trình duyệt đăng ký."
+            )
         threading.Thread(
             target=self._run_loop, args=(total, rotate_every), daemon=True
         ).start()

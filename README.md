@@ -63,13 +63,16 @@ successfully registered accounts.
 
 ### Optional: use a proxy instead of Surfshark
 
-Create a `proxy.txt` file next to the scripts with a single line —
+Paste the proxy into the **Proxy** field in the app window —
 `host:port:username:password` (or a full `http://username:password@host:port`
-URL). The Chromium signup browser then runs through that proxy and logs the
-exit IP it actually gets before starting; mail.tm traffic stays on the
-machine's direct connection. When `proxy.txt` exists, the app skips the
-Surfshark confirmation. `proxy.txt` contains a password: it is listed in
-`.gitignore`, so it is never committed — keep it that way.
+URL) — and leave it empty to use the VPN/direct connection instead. The app
+stores it in a local `proxy.txt` next to the scripts and pre-fills the field
+on the next launch. The Chromium signup browser then runs through that proxy
+and logs the exit IP it actually gets before starting; mail.tm traffic stays
+on the machine's direct connection. When a proxy is set, the app skips the
+Surfshark confirmation and the log only ever shows the proxy's host:port,
+never its password. `proxy.txt` is listed in `.gitignore`, so it is never
+committed — keep it that way.
 
 ### Optional: rotate the Surfshark IP during a run
 
