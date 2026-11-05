@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import secrets
 import subprocess
 import sys
@@ -176,6 +177,37 @@ def _append_spreadsheet_row(email, mail_password="", cookie="", invite=""):
     finally:
         if temporary_file.exists():
             temporary_file.unlink()
+
+
+def _last_invite_from_sheet():
+    """Mã mời gần nhất trong accounts.xlsx (dòng cuối cùng có mã).
+
+    Dùng làm mã đầu chuỗi khi ô Mã mời đang trống: tài khoản đầu
+    tiên của lượt chạy sẽ quy đổi mã này thay vì bỏ qua bước quy
+    đổi. Tìm cột theo tên tiêu đề "Mã mời" nên sheet đời nào
+    cũng đọc được.
+    """
+    try:
+        if not SPREADSHEET_FILE.exists():
+            return ""
+        workbook = load_workbook(SPREADSHEET_FILE, read_only=True)
+        sheet = workbook.active
+        column = None
+        for cell in sheet[1]:
+            if cell.value == "Mã mời":
+                column = cell.column
+                break
+        if column is None:
+            return ""
+        for row in range(sheet.max_row, 1, -1):
+            value = sheet.cell(row=row, column=column).value
+            if value:
+                code = str(value).strip().upper()
+                if re.fullmatch(r"[A-Z0-9]{6}", code):
+                    return code
+        return ""
+    except Exception:
+        return ""
 
 
 def _load_card_from_keyring():
@@ -611,6 +643,16 @@ class MuseAIHelper(tk.Tk):
             )
             return
         invite = self._sync_invite_code()
+        if not invite:
+            seed = _last_invite_from_sheet()
+            if seed:
+                self.invite_entry.delete(0, "end")
+                self.invite_entry.insert(0, seed)
+                invite = self._sync_invite_code()
+                self._append_log(
+                    f"Ô Mã mời trống — tự lấy mã {seed} từ dòng "
+                    "cuối trong sheet làm đầu chuỗi."
+                )
         self.running = True
         self.stop_event.clear()
         self._set_controls_running(True)

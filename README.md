@@ -89,7 +89,11 @@ the app then, with no further clicks:
    head: whatever is there when a run starts (typically your own
    account's code) is redeemed by the run's first account, and the
    field is overwritten with each new account's code as the run
-   proceeds; it persists between runs in a local `invite.txt`.
+   proceeds; it persists between runs in a local `invite.txt`. You
+   never have to type it: if the field is empty at Start, the app
+   seeds the chain from the newest invite code already in
+   `accounts.xlsx`, and if there is none, the first account simply
+   redeems nothing and starts the chain with its own code.
 
 The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
