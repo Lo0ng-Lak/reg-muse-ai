@@ -31,17 +31,16 @@ times out, is logged as failed, and the batch moves on to the next address.
    py main.py
    ```
 
-Set the number of accounts (1–100) and click **Bắt đầu đăng ký**. Before the
-run, the app asks you to confirm that Surfshark VPN is connected (once per app
-session); the app does not verify VPN status or control network routing, so
-make sure Surfshark is connected and that split tunneling does not exclude
-Chromium. For each account the app then, with no further clicks:
+Paste a proxy into the **Proxy** field (required — see below), set the
+number of accounts (1–100), and click **Bắt đầu đăng ký**. For each account
+the app then, with no further clicks:
 
 1. Creates a random mail.tm address and a random Muse.ai password, and saves
    both passwords to Windows Credential Manager.
-2. Opens a dedicated Chromium window, fills the email into the visible
-   "Mobile number or email" field, and submits **Continue** to request a
-   verification code.
+2. Opens a dedicated Chromium window **through the proxy**, first checks the
+   exit IP it actually got, and only continues if that IP is in the US.
+   It then fills the email into the visible "Mobile number or email" field
+   and submits **Continue** to request a verification code.
 3. Polls mail.tm for the code (up to three minutes), fills it, and submits
    **Confirm** on the code form.
 4. On the final profile form, fills the first and last name as "Long" and
@@ -49,7 +48,7 @@ Chromium. For each account the app then, with no further clicks:
    ask for the birthday — the name step is then skipped), and picks a
    random birthday with an age always over 18, then clicks **Confirm**.
 5. Watches the screen after the profile form. A "Join the waitlist" screen
-   means Muse is unavailable in the VPN location's region and the attempt
+   means Muse is unavailable in the proxy exit's region and the attempt
    fails. On the card-entry screen the batch pauses for up to four minutes:
    you enter the card and a US ZIP in the Chromium window yourself — the
    tool never receives, stores, or types card details. Only after the card
@@ -61,37 +60,20 @@ The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
 
-### Optional: use a proxy instead of Surfshark
+### Proxy: required, US exit only
 
-Paste the proxy into the **Proxy** field in the app window —
+Registration only ever happens through the proxy — there is no VPN/direct
+mode. Paste the proxy into the **Proxy** field in the app window:
 `host:port:username:password` (or a full `http://username:password@host:port`
-URL) — and leave it empty to use the VPN/direct connection instead. The app
-stores it in a local `proxy.txt` next to the scripts and pre-fills the field
-on the next launch. The Chromium signup browser then runs through that proxy
-and logs the exit IP it actually gets before starting; mail.tm traffic stays
-on the machine's direct connection. When a proxy is set, the app skips the
-Surfshark confirmation and the log only ever shows the proxy's host:port,
-never its password. `proxy.txt` is listed in `.gitignore`, so it is never
-committed — keep it that way.
-
-### Optional: rotate the Surfshark IP during a run
-
-The Surfshark app itself has no interface the helper can drive, so rotation
-uses Surfshark's manual WireGuard configurations instead:
-
-1. Install the official WireGuard app for Windows.
-2. In your Surfshark account, open **VPN → Manual setup → WireGuard**,
-   create configurations for a few locations, and download the `.conf` files.
-3. Copy the `.conf` files into `%LOCALAPPDATA%\MuseAIHelper\wg\`.
-4. Disconnect the Surfshark desktop app (the WireGuard tunnels replace it)
-   and start this app **as Administrator** — installing a tunnel service
-   requires elevation.
-
-Set **Đổi IP sau mỗi** to how many accounts run per IP (0 disables
-rotation). At the start of a run the app activates the first configuration,
-logs the current public IP, and after every N accounts it switches to the
-next configuration and logs the new IP. If no configurations are found, the
-run simply continues on the current connection.
+URL). The app stores it in a local `proxy.txt` next to the scripts and
+pre-fills the field on the next launch. For every account, the Chromium
+signup browser runs through the proxy, reads its real exit IP, and looks up
+that IP's country; **unless the country is US, the account is aborted before
+any registration happens** and nothing is saved. This check runs per account
+because rotating proxies can hand out a different exit for each session.
+mail.tm traffic stays on the machine's direct connection. The log only ever
+shows the proxy's host:port, never its password. `proxy.txt` is listed in
+`.gitignore`, so it is never committed — keep it that way.
 
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
 The Excel sheet contains the Muse.ai passwords in readable form, so protect

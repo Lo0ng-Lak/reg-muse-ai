@@ -25,8 +25,6 @@ MAIL_SERVICE = "MuseAIHelper:mail.tm"
 MUSE_SERVICE = "MuseAIHelper:muse.ai"
 HELPER_TIMEOUT_SECONDS = 900
 PAUSE_BETWEEN_ACCOUNTS_SECONDS = 3
-WG_EXE = r"C:\Program Files\WireGuard\wireguard.exe"
-WG_CONFIG_DIR = Path.home() / "AppData" / "Local" / "MuseAIHelper" / "wg"
 
 
 def _generate_password():
@@ -154,53 +152,6 @@ def _append_spreadsheet_row(email, password):
             temporary_file.unlink()
 
 
-def _wireguard_configs():
-    """Các file cấu hình WireGuard (Surfshark manual setup) để xoay IP."""
-    try:
-        return sorted(WG_CONFIG_DIR.glob("*.conf"))
-    except OSError:
-        return []
-
-
-def _current_ip():
-    try:
-        with urllib.request.urlopen(
-            "https://api.ipify.org", timeout=5
-        ) as response:
-            return response.read().decode("ascii", "replace").strip()
-    except Exception:
-        return None
-
-
-def _set_wireguard_tunnel(configs, index, current_name):
-    """Gỡ tunnel WireGuard cũ (nếu có) và bật tunnel ở vị trí index.
-
-    Trả về tên tunnel mới. Cần quyền Administrator; nếu thiếu quyền,
-    wireguard.exe trả mã lỗi và hàm này ném RuntimeError.
-    """
-    if not Path(WG_EXE).exists():
-        raise RuntimeError(f"Chưa cài WireGuard (không thấy {WG_EXE}).")
-    target = configs[index % len(configs)]
-    name = target.stem
-    if current_name and current_name != name:
-        subprocess.run(
-            [WG_EXE, "/uninstalltunnelservice", current_name],
-            capture_output=True,
-            timeout=30,
-        )
-    result = subprocess.run(
-        [WG_EXE, "/installtunnelservice", str(target)],
-        capture_output=True,
-        timeout=60,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"WireGuard trả mã {result.returncode} khi bật {target.name} "
-            "(thường do ứng dụng chưa chạy bằng quyền Administrator)."
-        )
-    return name
-
-
 class MuseAIHelper(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -211,7 +162,6 @@ class MuseAIHelper(tk.Tk):
         self.running = False
         self.stop_event = threading.Event()
         self.helper_process = None
-        self.vpn_confirmed = False
 
         self._build_ui()
         self.after(100, self._process_events)
@@ -251,7 +201,7 @@ class MuseAIHelper(tk.Tk):
         self.proxy_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
         ttk.Label(
             proxy_row,
-            text="host:port:user:pass — để trống = dùng VPN",
+            text="host:port:user:pass — bắt buộc, IP thoát phải thuộc US",
         ).grid(row=0, column=2, sticky="w")
         try:
             saved_proxy = (
@@ -273,13 +223,6 @@ class MuseAIHelper(tk.Tk):
             controls, from_=1, to=100, width=5, textvariable=self.count_var
         )
         self.count_spin.pack(side="left", padx=(6, 12))
-        ttk.Label(controls, text="Đổi IP sau mỗi:").pack(side="left")
-        self.rotate_var = tk.IntVar(value=5)
-        self.rotate_spin = ttk.Spinbox(
-            controls, from_=0, to=50, width=4, textvariable=self.rotate_var
-        )
-        self.rotate_spin.pack(side="left", padx=(6, 4))
-        ttk.Label(controls, text="tài khoản").pack(side="left", padx=(0, 12))
         self.start_button = ttk.Button(
             controls, text="Bắt đầu đăng ký", command=self._start_registration
         )
@@ -316,23 +259,6 @@ class MuseAIHelper(tk.Tk):
             row=5, column=0, sticky="ew", pady=(10, 0)
         )
 
-    def _confirm_surfshark_vpn(self):
-        if self.vpn_confirmed:
-            return True
-        if Path(__file__).with_name("proxy.txt").exists():
-            # Đang dùng proxy riêng cho trình duyệt — không cần VPN.
-            self.vpn_confirmed = True
-            return True
-        confirmed = messagebox.askyesno(
-            "Xác nhận Surfshark VPN",
-            "Hãy kết nối Surfshark VPN trước khi tiếp tục.\n\n"
-            "Chỉ chọn Có khi Surfshark hiển thị đã kết nối. "
-            "Ứng dụng không thể tự xác minh VPN hoặc định tuyến mạng.",
-        )
-        if confirmed:
-            self.vpn_confirmed = True
-        return confirmed
-
     def _sync_proxy_file(self):
         """Đồng bộ ô Proxy ra proxy.txt để browser_helper đọc.
 
@@ -362,7 +288,6 @@ class MuseAIHelper(tk.Tk):
     def _set_controls_running(self, running):
         self.start_button.configure(state="disabled" if running else "normal")
         self.count_spin.configure(state="disabled" if running else "normal")
-        self.rotate_spin.configure(state="disabled" if running else "normal")
         self.proxy_entry.configure(state="disabled" if running else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
         self.open_sheet_button.configure(
@@ -387,27 +312,28 @@ class MuseAIHelper(tk.Tk):
             )
             return
         try:
-            rotate_every = int(self.rotate_var.get())
-        except (tk.TclError, ValueError):
-            rotate_every = 0
-        rotate_every = max(0, min(rotate_every, 50))
-        try:
             proxy_display = self._sync_proxy_file()
         except RuntimeError as error:
             messagebox.showerror("Lỗi proxy", str(error))
             return
-        if not self._confirm_surfshark_vpn():
+        if not proxy_display:
+            messagebox.showwarning(
+                "Thiếu proxy",
+                "Tool chỉ đăng ký qua proxy có IP thoát thuộc US. "
+                "Hãy nhập proxy (host:port:user:pass) vào ô Proxy "
+                "rồi bấm Bắt đầu lại.",
+            )
             return
         self.running = True
         self.stop_event.clear()
         self._set_controls_running(True)
         self._append_log(f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---")
-        if proxy_display:
-            self._append_log(
-                f"Dùng proxy {proxy_display} cho trình duyệt đăng ký."
-            )
+        self._append_log(
+            f"Dùng proxy {proxy_display} cho trình duyệt đăng ký — "
+            "mỗi tài khoản chỉ chạy khi IP thoát kiểm tra được là US."
+        )
         threading.Thread(
-            target=self._run_loop, args=(total, rotate_every), daemon=True
+            target=self._run_loop, args=(total,), daemon=True
         ).start()
 
     def _stop_registration(self):
@@ -426,63 +352,10 @@ class MuseAIHelper(tk.Tk):
                     pass
         self.destroy()
 
-    def _run_loop(self, total, rotate_every):
+    def _run_loop(self, total):
         helper = Path(__file__).with_name("browser_helper.py")
         success = 0
         fail = 0
-        configs = _wireguard_configs() if rotate_every > 0 else []
-        tunnel_name = None
-        rotation_index = 0
-        if rotate_every > 0:
-            if configs:
-                self.events.put(
-                    (
-                        "log",
-                        f"Đổi IP: tìm thấy {len(configs)} cấu hình WireGuard "
-                        f"trong {WG_CONFIG_DIR} — sẽ đổi sau mỗi "
-                        f"{rotate_every} tài khoản.",
-                    )
-                )
-                try:
-                    for cfg in configs:
-                        subprocess.run(
-                            [WG_EXE, "/uninstalltunnelservice", cfg.stem],
-                            capture_output=True,
-                            timeout=30,
-                        )
-                    tunnel_name = _set_wireguard_tunnel(
-                        configs, rotation_index, None
-                    )
-                    time.sleep(3)
-                    self.events.put(
-                        (
-                            "log",
-                            f"Đổi IP: đã bật tunnel {tunnel_name} cho "
-                            "nhóm tài khoản đầu tiên.",
-                        )
-                    )
-                except Exception as error:
-                    configs = []
-                    self.events.put(
-                        (
-                            "log",
-                            f"Đổi IP: không bật được tunnel đầu tiên ({error}) "
-                            "— chạy tiếp bằng IP hiện tại.",
-                        )
-                    )
-            else:
-                self.events.put(
-                    (
-                        "log",
-                        "Đổi IP: chưa có file .conf nào trong "
-                        f"{WG_CONFIG_DIR} — chạy tiếp bằng IP hiện tại. "
-                        "(Tải cấu hình WireGuard từ Surfshark → Manual "
-                        "setup rồi bỏ vào thư mục đó để bật tính năng này.)",
-                    )
-                )
-        ip = _current_ip()
-        if ip:
-            self.events.put(("log", f"IP hiện tại: {ip}"))
         for index in range(1, total + 1):
             if self.stop_event.is_set():
                 break
@@ -539,41 +412,6 @@ class MuseAIHelper(tk.Tk):
                             "log",
                             f"[{index}/{total}] ✘ Đăng ký thất bại cho {address} "
                             "— lý do ở dòng RESULT phía trên.",
-                        )
-                    )
-            if (
-                configs
-                and rotate_every > 0
-                and index % rotate_every == 0
-                and index < total
-                and not self.stop_event.is_set()
-            ):
-                rotation_index += 1
-                self.events.put(
-                    (
-                        "log",
-                        f"Đã chạy {index} tài khoản — đang đổi IP...",
-                    )
-                )
-                try:
-                    tunnel_name = _set_wireguard_tunnel(
-                        configs, rotation_index, tunnel_name
-                    )
-                    time.sleep(3)
-                    new_ip = _current_ip()
-                    self.events.put(
-                        (
-                            "log",
-                            "Đã đổi IP. IP hiện tại: "
-                            f"{new_ip or 'không kiểm tra được'}.",
-                        )
-                    )
-                except Exception as error:
-                    self.events.put(
-                        (
-                            "log",
-                            f"Đổi IP thất bại: {error} — giữ IP cũ, "
-                            "chạy tiếp.",
                         )
                     )
             if index < total and not self.stop_event.is_set():

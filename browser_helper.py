@@ -44,9 +44,9 @@ def _load_proxy():
 
     Một dòng duy nhất, một trong hai dạng:
     host:port:username:password  hoặc  http://username:password@host:port
-    Không có file (hoặc file trống) → None, trình duyệt đi thẳng bằng
-    kết nối hiện tại của máy (ví dụ Surfshark). Chỉ lưu lượng Chromium
-    (muse.ai) đi qua proxy; mail.tm vẫn đi thẳng.
+    Không có file (hoặc file trống) → None, và main() sẽ huỷ lượt chạy
+    vì đăng ký bắt buộc phải qua proxy có IP thoát thuộc US. Chỉ lưu
+    lượng Chromium (muse.ai) đi qua proxy; mail.tm vẫn đi thẳng.
     """
     try:
         raw = Path(__file__).with_name("proxy.txt").read_text(
@@ -77,6 +77,20 @@ def _load_proxy():
         proxy["username"] = parts[2]
         proxy["password"] = ":".join(parts[3:])
     return proxy
+
+
+def _exit_country(ip):
+    """Tra mã quốc gia của một IP công khai (ở đây là IP thoát qua proxy)."""
+    try:
+        with urllib.request.urlopen(
+            f"http://ip-api.com/json/{ip}?fields=countryCode",
+            timeout=10,
+        ) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    code = data.get("countryCode")
+    return code.upper() if isinstance(code, str) else None
 
 
 def _classify_after_profile(page, timeout_seconds=45):
@@ -209,34 +223,53 @@ def main():
         _show_error("Thiếu Playwright", detail)
         return
 
+    proxy = _load_proxy()
+    if not proxy:
+        detail = (
+            "Chưa cấu hình proxy — tool chỉ đăng ký qua proxy có IP "
+            "thoát thuộc US. Hãy nhập proxy trong ứng dụng rồi chạy lại."
+        )
+        if auto:
+            _status(f"RESULT: FAIL {detail}")
+            sys.exit(1)
+        _show_error("Chưa cấu hình proxy", detail)
+        return
+
     playwright = sync_playwright().start()
     browser = None
     page = None
     try:
         token = _get_mail_token(email, mailbox_password)
-        proxy = _load_proxy()
-        launch_options = {"headless": False}
-        if proxy:
-            launch_options["proxy"] = proxy
-            _status("Đang dùng proxy từ file proxy.txt cho trình duyệt.")
-        browser = playwright.chromium.launch(**launch_options)
+        browser = playwright.chromium.launch(
+            headless=False, proxy=proxy
+        )
         page = browser.new_page()
         page.set_default_timeout(PAGE_TIMEOUT_MS)
-        if proxy:
-            try:
-                page.goto(
-                    "https://api.ipify.org",
-                    wait_until="domcontentloaded",
-                    timeout=15000,
-                )
-                exit_ip = page.locator("body").inner_text(
-                    timeout=5000
-                ).strip()
-                _status(f"IP thoát qua proxy: {exit_ip}")
-            except Exception:
-                _status(
-                    "Không kiểm tra được IP thoát qua proxy — vẫn tiếp tục."
-                )
+        try:
+            page.goto(
+                "https://api.ipify.org",
+                wait_until="domcontentloaded",
+                timeout=20000,
+            )
+            exit_ip = page.locator("body").inner_text(
+                timeout=5000
+            ).strip()
+        except Exception as error:
+            raise RuntimeError(
+                "Không kiểm tra được IP thoát qua proxy — huỷ đăng "
+                "ký vì bắt buộc phải qua proxy US."
+            ) from error
+        _status(
+            f"IP thoát qua proxy: {exit_ip} — đang kiểm tra quốc gia..."
+        )
+        country = _exit_country(exit_ip)
+        if country != "US":
+            raise RuntimeError(
+                "IP thoát qua proxy không thuộc US (kiểm tra được: "
+                f"{country or 'không xác định'}) — huỷ đăng ký, "
+                "tài khoản không được lưu."
+            )
+        _status("Đã xác nhận IP thoát thuộc US — bắt đầu đăng ký.")
         page.goto(
             SIGNUP_URL,
             wait_until="domcontentloaded",
