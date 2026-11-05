@@ -75,7 +75,12 @@ the app then, with no further clicks:
    can still be redeemed manually within 48 hours). The account then
    opens the **Mời** panel and reads its *own* invite code, which is
    saved in its sheet row and becomes the code the next account
-   redeems. The **Mã mời** field in the window is the chain's current
+   redeems. (The code in the panel is plain display text — a human has
+   to mouse-select it to copy — so the reader works in three passes:
+   scan the panel's DOM, click "Sao chép liên kết giới thiệu" and parse
+   the code out of the copied link, and finally drag-select the code
+   with the mouse and read the clipboard.) The **Mã mời** field in the
+   window is the chain's current
    head: whatever is there when a run starts (typically your own
    account's code) is redeemed by the run's first account, and the
    field is overwritten with each new account's code as the run

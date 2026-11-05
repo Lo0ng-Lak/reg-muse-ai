@@ -613,9 +613,134 @@ _HARVEST_CODE_JS = """() => {
             if (/^[A-Z0-9]{6}$/.test(t)) return t;
         }
     }
+    const stripped = (s) => (s || '').replace(/\\s+/g, '');
+    for (const el of panel.querySelectorAll('*')) {
+        if (
+            el.childElementCount <= 8 &&
+            /^[A-Z0-9]{6}$/.test(stripped(el.textContent))
+        ) {
+            return stripped(el.textContent);
+        }
+    }
     const m = (panel.textContent || '').match(/[A-Z0-9]{6}/);
     return m ? m[0] : '';
 }"""
+
+
+def _read_clipboard(page):
+    try:
+        page.context.grant_permissions(
+            ["clipboard-read", "clipboard-write"],
+            origin="https://muse.ai",
+        )
+    except Exception:
+        pass
+    try:
+        return (
+            page.evaluate(
+                "() => navigator.clipboard.readText().catch(() => '')"
+            )
+            or ""
+        )
+    except Exception:
+        return ""
+
+
+def _invite_code_from_text(text):
+    """Bóc mã mời 6 ký tự (chữ hoa/số) khỏi một đoạn text hoặc URL."""
+    if not text:
+        return ""
+    text = text.strip()
+    if re.fullmatch(r"[A-Z0-9]{6}", text):
+        return text
+    match = re.search(r"(?<![A-Za-z0-9])[A-Z0-9]{6}(?![A-Za-z0-9])", text)
+    return match.group(0) if match else ""
+
+
+def _harvest_via_copy_link(page):
+    """Bấm "Sao chép liên kết giới thiệu" rồi bóc mã khỏi link."""
+    for name in (
+        "Sao chép liên kết giới thiệu",
+        "Copy referral link",
+        "Sao chép",
+        "Copy link",
+    ):
+        button = page.get_by_role("button", name=name, exact=False)
+        try:
+            if button.count() and button.first.is_visible():
+                button.first.click(timeout=5000)
+                page.wait_for_timeout(700)
+                return _invite_code_from_text(_read_clipboard(page))
+        except Exception:
+            pass
+    return ""
+
+
+_FIND_CODE_RECT_JS = """() => {
+    const panels = [
+        ...document.querySelectorAll(
+            'div, section, aside, [role="dialog"]'
+        ),
+    ].filter((el) => {
+        const r = el.getBoundingClientRect();
+        return (
+            r.width > 0 &&
+            /Mời bạn bè|Invite friends/.test(el.textContent || '')
+        );
+    });
+    if (!panels.length) return null;
+    panels.sort(
+        (a, b) =>
+            (a.textContent || '').length - (b.textContent || '').length
+    );
+    const panel = panels[0];
+    const stripped = (s) => (s || '').replace(/\\s+/g, '');
+    let best = null;
+    for (const el of panel.querySelectorAll('*')) {
+        if (el.childElementCount > 8) continue;
+        if (/^[A-Z0-9]{6}$/.test(stripped(el.textContent))) {
+            const r = el.getBoundingClientRect();
+            if (r.width > 0 && (!best || r.width < best.width)) {
+                best = {
+                    x: r.x,
+                    y: r.y,
+                    width: r.width,
+                    height: r.height,
+                };
+            }
+        }
+    }
+    return best;
+}"""
+
+
+def _harvest_via_selection(page):
+    """Phương án cuối: bôi chuột chọn mã trên panel, Ctrl+C, đọc clipboard.
+
+    Mã trên panel là chữ hiển thị thường — muốn copy phải bôi
+    chuột chọn như người dùng vẫn làm tay.
+    """
+    try:
+        box = page.evaluate(_FIND_CODE_RECT_JS)
+    except Exception:
+        box = None
+    if not box:
+        return ""
+    try:
+        middle_y = box["y"] + box["height"] / 2
+        page.mouse.move(box["x"] + 2, middle_y)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] - 2, middle_y, steps=10)
+        page.mouse.up()
+        page.keyboard.press("Control+c")
+        page.wait_for_timeout(400)
+    except Exception:
+        return ""
+    text = _read_clipboard(page)
+    compact = re.sub(r"[^A-Za-z0-9]", "", text or "").upper()
+    if re.fullmatch(r"[A-Z0-9]{6}", compact):
+        return compact
+    return _invite_code_from_text(text)
 
 
 def _harvest_invite_code(page):
@@ -651,6 +776,12 @@ def _harvest_invite_code(page):
                 code = found
             else:
                 page.wait_for_timeout(700)
+        if not code:
+            # Mã là chữ phải bôi chuột mới copy được: thử bấm nút
+            # sao chép link giới thiệu, cuối cùng là bôi chuột thật.
+            code = _harvest_via_copy_link(page)
+        if not code:
+            code = _harvest_via_selection(page)
     except Exception:
         return ""
     finally:
