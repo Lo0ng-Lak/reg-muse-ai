@@ -430,12 +430,16 @@ def _app_shell_visible(page):
     trang chủ trong khi màn hình cổng Get started còn chưa kịp
     hiện — phải thấy bằng chứng của giao diện thật mới tin.
     """
-    invite = page.get_by_role("button", name="Mời", exact=False)
-    try:
-        if invite.count() and invite.first.is_visible():
-            return True
-    except Exception:
-        pass
+    # Giao diện trong trình duyệt của tool là tiếng Anh (nút
+    # "Invite"), trên máy người dùng là tiếng Việt (nút "Mời"):
+    # dò cả hai.
+    for name in ("Mời", "Invite"):
+        invite = page.get_by_role("button", name=name, exact=False)
+        try:
+            if invite.count() and invite.first.is_visible():
+                return True
+        except Exception:
+            pass
     try:
         return bool(
             page.evaluate(
@@ -534,15 +538,21 @@ def _open_settings(page):
     """Mở Cài đặt: phím tắt Ctrl+, trước, menu góc trái dưới sau.
 
     Menu của Muse ghi rõ Cài đặt = Ctrl+, — bấm phím tắt chắc
-    chắn hơn mò bấm menu, nhất là khi giao diện vừa tải xong.
+    chắn hơn mò bấm menu. Trang nạp qua proxy khá chậm nên sau
+    mỗi cách mở đều CHỜ Cài đặt hiện thật vài giây (dò mục quy
+    đổi mã) thay vì ngó đúng một lần rồi bỏ cuộc.
     """
     try:
         page.keyboard.press("Control+,")
-        page.wait_for_timeout(1200)
-        if _settings_open(page):
-            return True
     except Exception:
         pass
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        if _settings_open(page):
+            return True
+        page.wait_for_timeout(500)
     for name in ("Cài đặt", "Settings"):
         item = page.get_by_text(name, exact=True)
         try:
@@ -563,6 +573,7 @@ def _open_settings(page):
                     const r = el.getBoundingClientRect();
                     return (
                         r.width > 0 &&
+                        r.width <= 90 &&
                         r.left < 90 &&
                         r.bottom > window.innerHeight - 100
                     );
@@ -581,15 +592,20 @@ def _open_settings(page):
         opened = False
     if not opened:
         return False
-    page.wait_for_timeout(900)
-    for name in ("Cài đặt", "Settings"):
-        item = page.get_by_text(name, exact=True)
-        try:
-            if item.count() and item.first.is_visible():
-                item.first.click(timeout=5000)
-                return True
-        except Exception:
-            pass
+    # Menu trượt lên cũng có thể chậm: chờ mục Cài đặt xuất hiện.
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        for name in ("Cài đặt", "Settings"):
+            item = page.get_by_text(name, exact=True)
+            try:
+                if item.count() and item.first.is_visible():
+                    item.first.click(timeout=5000)
+                    return True
+            except Exception:
+                pass
+        page.wait_for_timeout(600)
     return False
 
 
@@ -673,12 +689,14 @@ def _redeem_invite_code(page, code):
     """
     try:
         if not _open_settings(page):
+            _status("Quy đổi mã: không mở được Cài đặt.")
             return False
         # Hàng quy đổi nằm khá sâu trong Cài đặt và hiện hơi
-        # muộn: dò theo sự tồn tại (không đòi hỏi đã nhìn thấy),
-        # bấm thì Playwright tự cuộn tới.
+        # muộn (trang nạp chậm): dò theo sự tồn tại tới 20 giây
+        # (không đòi hỏi đã nhìn thấy), bấm thì Playwright tự
+        # cuộn tới.
         row = None
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         while row is None and time.monotonic() < deadline:
             if page.is_closed():
                 return False
@@ -697,15 +715,23 @@ def _redeem_invite_code(page, code):
             if row is None:
                 page.wait_for_timeout(600)
         if row is None:
+            _status(
+                "Quy đổi mã: không thấy mục quy đổi mã trong Cài đặt."
+            )
             return False
         row.scroll_into_view_if_needed(timeout=5000)
         row.click(timeout=5000)
         deadline = time.monotonic() + 15
         while not _redeem_dialog_present(page):
             if page.is_closed() or time.monotonic() >= deadline:
+                _status(
+                    "Quy đổi mã: bấm mục quy đổi nhưng hộp thoại "
+                    "không mở."
+                )
                 return False
             page.wait_for_timeout(500)
         if not _fill_redeem_code(page, code):
+            _status("Quy đổi mã: không điền được mã vào hộp thoại.")
             return False
         confirm = page.get_by_role(
             "button", name="Xác nhận", exact=True
@@ -715,11 +741,16 @@ def _redeem_invite_code(page, code):
                 "button", name="Confirm", exact=True
             )
         if not (confirm.count() and confirm.first.is_visible()):
+            _status("Quy đổi mã: không thấy nút Xác nhận.")
             return False
         button = confirm.first
         deadline = time.monotonic() + 10
         while not button.is_enabled():
             if time.monotonic() >= deadline:
+                _status(
+                    "Quy đổi mã: nút Xác nhận không sáng lên "
+                    "(mã chưa đủ 6 ký tự?)."
+                )
                 return False
             page.wait_for_timeout(300)
         _click_when_ready(page, button, "Xác nhận")
@@ -728,6 +759,10 @@ def _redeem_invite_code(page, code):
             if page.is_closed():
                 return True
             if time.monotonic() >= deadline:
+                _status(
+                    "Quy đổi mã: đã bấm Xác nhận nhưng hộp thoại "
+                    "không đóng — mã có thể sai hoặc mạng chậm."
+                )
                 return False
             page.wait_for_timeout(500)
         return True
@@ -904,11 +939,83 @@ def _harvest_via_selection(page):
     return _invite_code_from_text(text)
 
 
+_SCRATCH_RECT_JS = """() => {
+    const hits = [
+        ...document.querySelectorAll(
+            'div, span, button, canvas, section'
+        ),
+    ].filter((el) => {
+        const r = el.getBoundingClientRect();
+        return (
+            r.width >= 40 &&
+            r.height >= 8 &&
+            /scratch to reveal|cào để/i.test(el.textContent || '')
+        );
+    });
+    if (!hits.length) return null;
+    hits.sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        return ra.width * ra.height - rb.width * rb.height;
+    });
+    const r = hits[0].getBoundingClientRect();
+    return {x: r.x, y: r.y, width: r.width, height: r.height};
+}"""
+
+
+def _scratch_to_reveal(page):
+    """Cào lớp phủ "Scratch to reveal" che mã mời bằng chuột thật.
+
+    Panel Invite của tài khoản mới che mã sau một lớp phải kéo
+    chuột qua mới hiện — y như người dùng cào tay. Kéo vài
+    đường ngang qua ô đó; cào xong mã hiện thành chữ thường.
+    """
+    try:
+        box = page.evaluate(_SCRATCH_RECT_JS)
+    except Exception:
+        box = None
+    if not box:
+        return False
+    try:
+        left = box["x"] + 4
+        right = box["x"] + box["width"] - 4
+        for fraction in (0.5, 0.3, 0.7):
+            y = box["y"] + box["height"] * fraction
+            page.mouse.move(left, y)
+            page.mouse.down()
+            page.mouse.move(right, y, steps=20)
+            page.mouse.up()
+        page.wait_for_timeout(700)
+        return True
+    except Exception:
+        return False
+
+
+def _scan_panel_code(page, seconds):
+    """Quét chữ trong panel Mời tìm mã 6 ký tự, chờ tối đa vài giây."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return ""
+        try:
+            found = page.evaluate(_HARVEST_CODE_JS) or ""
+        except Exception:
+            found = ""
+        found = str(found).strip().upper()
+        if re.fullmatch(r"[A-Z0-9]{6}", found):
+            return found
+        page.wait_for_timeout(700)
+    return ""
+
+
 def _harvest_invite_code(page):
     """Lấy mã mời của chính tài khoản này từ panel "Mời bạn bè".
 
-    Bấm nút Mời ở góc phải trên rồi đọc mã 6 ký tự trong panel.
-    Không lấy được thì trả "" — tài khoản vẫn được lưu bình thường.
+    Bấm nút Mời/Invite ở góc phải trên, rồi theo thứ tự: quét
+    chữ trong panel → bấm "Copy referral link" bóc mã khỏi nội
+    dung copy → cào lớp "Scratch to reveal" rồi quét lại → bôi
+    chuột chọn mã. Không lấy được thì trả "" — tài khoản vẫn
+    được lưu bình thường.
     """
     code = ""
     try:
@@ -938,23 +1045,17 @@ def _harvest_invite_code(page):
         if button is None:
             return ""
         button.click(timeout=5000)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not code:
-            if page.is_closed():
-                return ""
-            try:
-                found = page.evaluate(_HARVEST_CODE_JS) or ""
-            except Exception:
-                found = ""
-            found = str(found).strip().upper()
-            if re.fullmatch(r"[A-Z0-9]{6}", found):
-                code = found
-            else:
-                page.wait_for_timeout(700)
+        code = _scan_panel_code(page, 6)
         if not code:
-            # Mã là chữ phải bôi chuột mới copy được: thử bấm nút
-            # sao chép link giới thiệu, cuối cùng là bôi chuột thật.
+            # Đường chủ đạo: bấm "Copy referral link" rồi bóc mã
+            # khỏi nội dung vừa copy (tin chia sẻ chứa "Mã: XXXXXX"
+            # hoặc link chứa mã).
             code = _harvest_via_copy_link(page)
+        if not code and _scratch_to_reveal(page):
+            # Mã bị che sau lớp "Scratch to reveal": cào xong mã
+            # hiện thành chữ — quét lại panel.
+            _status("Mã mời bị che — đã cào lớp phủ, quét lại panel.")
+            code = _scan_panel_code(page, 6)
         if not code:
             code = _harvest_via_selection(page)
     except Exception:
