@@ -347,6 +347,7 @@ def _confirm_final_step(page, timeout_seconds=30):
     deadline = time.monotonic() + timeout_seconds
     clicks = 0
     last_click = None
+    interface_since = None
     while time.monotonic() < deadline:
         if page.is_closed():
             return
@@ -366,6 +367,15 @@ def _confirm_final_step(page, timeout_seconds=30):
             except Exception:
                 visible = False
             if not visible:
+                # Phòng khi nút không khai role=button: dò theo chữ.
+                try:
+                    text_hit = page.get_by_text(name, exact=True)
+                    if text_hit.count() and text_hit.first.is_visible():
+                        button = text_hit
+                        visible = True
+                except Exception:
+                    pass
+            if not visible:
                 continue
             url_before = page.url
             if last_click == (name, url_before):
@@ -383,8 +393,21 @@ def _confirm_final_step(page, timeout_seconds=30):
             break
         if clicks >= 3:
             return
-        if not clicked and _in_muse_interface(page):
-            return
+        if not clicked:
+            if _in_muse_interface(page):
+                # URL giống giao diện chưa đủ tin — lúc chuyển
+                # cảnh nó đổi trước khi màn hình cổng kịp hiện
+                # (đã trượt thật ở tài khoản 2, 16:36). Chỉ dừng
+                # khi thấy khung giao diện thật, hoặc URL đã yên
+                # ở dạng giao diện suốt 12 giây mà cổng không hiện.
+                if _app_shell_visible(page):
+                    return
+                if interface_since is None:
+                    interface_since = time.monotonic()
+                elif time.monotonic() - interface_since >= 12:
+                    return
+            else:
+                interface_since = None
         page.wait_for_timeout(1200 if clicked else 1000)
 
 
@@ -400,6 +423,38 @@ def _wait_for_muse_interface(page, timeout_seconds=30):
     page.wait_for_timeout(1500)
 
 
+def _app_shell_visible(page):
+    """Khung giao diện đã dựng chưa: nút Mời hiện hoặc thanh trái có nút.
+
+    Chỉ nhìn URL thì không đủ tin: lúc chuyển cảnh, URL đã là
+    trang chủ trong khi màn hình cổng Get started còn chưa kịp
+    hiện — phải thấy bằng chứng của giao diện thật mới tin.
+    """
+    invite = page.get_by_role("button", name="Mời", exact=False)
+    try:
+        if invite.count() and invite.first.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(
+            page.evaluate(
+                """() => [...document.querySelectorAll('button')]
+                    .some((el) => {
+                        const r = el.getBoundingClientRect();
+                        return (
+                            r.width > 0 &&
+                            r.width <= 90 &&
+                            r.left < 90 &&
+                            r.bottom > window.innerHeight - 100
+                        );
+                    })"""
+            )
+        )
+    except Exception:
+        return False
+
+
 def _wait_for_app_shell(page, timeout_seconds=20):
     """Chờ khung giao diện Muse dựng xong (nút Mời hoặc thanh trái).
 
@@ -412,27 +467,7 @@ def _wait_for_app_shell(page, timeout_seconds=20):
     while time.monotonic() < deadline:
         if page.is_closed():
             return
-        invite = page.get_by_role("button", name="Mời", exact=False)
-        try:
-            if invite.count() and invite.first.is_visible():
-                return
-        except Exception:
-            pass
-        try:
-            rail_ready = page.evaluate(
-                """() => [...document.querySelectorAll('button')]
-                    .some((el) => {
-                        const r = el.getBoundingClientRect();
-                        return (
-                            r.width > 0 &&
-                            r.left < 90 &&
-                            r.bottom > window.innerHeight - 100
-                        );
-                    })"""
-            )
-        except Exception:
-            rail_ready = False
-        if rail_ready:
+        if _app_shell_visible(page):
             return
         page.wait_for_timeout(800)
 
