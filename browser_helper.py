@@ -235,6 +235,39 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
     return "timeout"
 
 
+def _profile_form_present(page):
+    """Nhận diện form hồ sơ bằng NHIỀU dấu hiệu độc lập.
+
+    Chỉ dựa vào role "heading" là không đủ tin cậy: trang có thể
+    render tiêu đề bằng thẻ thường không có role heading, hoặc dấu
+    nháy trong "What's" là nháy cong (’) khác với nháy thẳng trong
+    code — cả hai đều khiến tool không thấy form dù nó đang hiển
+    thị ngay trên màn hình. Vì vậy kiểm tra cả nội dung text của
+    trang (không lệ thuộc dấu nháy hay loại thẻ) lẫn sự hiện diện
+    của các ô nhập đặc trưng của form hồ sơ.
+    """
+    try:
+        text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        text = ""
+    if "finish creating your account" in text or "your birthday" in text:
+        return True
+    probes = (
+        lambda: page.get_by_placeholder("First name", exact=True).count(),
+        lambda: page.locator('select[autocomplete^="bday"]').count(),
+        lambda: page.get_by_role(
+            "combobox", name=re.compile(r"^(Month|Day|Year)$", re.I)
+        ).count(),
+    )
+    for probe in probes:
+        try:
+            if probe():
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def _wait_for_profile_form(page, timeout_ms):
     """Chờ form hồ sơ xuất hiện — form này có HAI biến thể:
 
@@ -247,18 +280,49 @@ def _wait_for_profile_form(page, timeout_ms):
     while time.monotonic() < deadline:
         if page.is_closed():
             return False
-        for name in (
-            "Finish creating your account",
-            "What's your birthday?",
-        ):
-            heading = page.get_by_role("heading", name=name)
-            try:
-                if heading.count() and heading.first.is_visible():
-                    return True
-            except Exception:
-                pass
+        if _profile_form_present(page):
+            return True
         page.wait_for_timeout(500)
     return False
+
+
+def _code_form_present(page):
+    """Form nhập mã còn trên màn hình không (còn ô nhập mã là còn)."""
+    try:
+        fields = _verification_input(page)
+        return bool(fields) and fields.count() > 0
+    except Exception:
+        return False
+
+
+def _ensure_profile_form(page):
+    """Đưa trang tới form hồ sơ sau khi điền mã — KHÔNG bấm mò.
+
+    Form mã tự gửi khi nhập đủ số nên thường trang tự sang form hồ
+    sơ. Chỉ bấm Confirm khi form mã VẪN còn trên màn hình: nếu form
+    mã đã biến mất mà form hồ sơ chưa nhận diện được, nút Confirm
+    duy nhất còn lại trên màn hình là của form hồ sơ — bấm vào là
+    gửi form hồ sơ còn trống (ngày sinh mặc định = ngày hôm nay,
+    tuổi 0) và bị chặn dưới 18 tuổi. Trường hợp đó phải dừng và
+    báo rõ, tuyệt đối không bấm.
+    """
+    if _wait_for_profile_form(page, 15000):
+        return
+    if not _code_form_present(page):
+        raise RuntimeError(
+            "Form nhập mã đã biến mất nhưng chưa nhận diện được "
+            "form hồ sơ — dừng lại để tránh bấm nhầm Confirm của "
+            "form hồ sơ khi chưa điền. Hãy chụp màn hình hiện tại "
+            "gửi lại để bổ sung cách nhận diện."
+        )
+    confirm_button = page.get_by_role(
+        "button", name="Confirm", exact=True
+    )
+    _click_when_ready(page, confirm_button, "Confirm")
+    if not _wait_for_profile_form(page, 15000):
+        raise RuntimeError(
+            "Không thấy form hồ sơ sau khi xác nhận mã xác minh."
+        )
 
 
 def main():
@@ -378,15 +442,7 @@ def main():
         # 18 tuổi. Vì vậy: chờ form hồ sơ (cả hai biến thể) tự hiện
         # trước; chỉ khi nó không hiện mới bấm Confirm của form mã rồi
         # chờ tiếp.
-        if not _wait_for_profile_form(page, 15000):
-            confirm_button = page.get_by_role(
-                "button", name="Confirm", exact=True
-            )
-            _click_when_ready(page, confirm_button, "Confirm")
-            if not _wait_for_profile_form(page, 15000):
-                raise RuntimeError(
-                    "Không thấy form hồ sơ sau khi xác nhận mã xác minh."
-                )
+        _ensure_profile_form(page)
         _status("Mã đã xác nhận, đang điền hồ sơ...")
         _fill_profile(page)
         finish_button = page.get_by_role(
