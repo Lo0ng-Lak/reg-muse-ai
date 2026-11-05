@@ -62,20 +62,25 @@ The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
 
-### Proxy: required, US exit only
+### Proxy pool: required, US exit only
 
-Registration only ever happens through the proxy — there is no VPN/direct
-mode. Paste the proxy into the **Proxy** field in the app window:
-`host:port:username:password` (or a full `http://username:password@host:port`
-URL). The app stores it in a local `proxy.txt` next to the scripts and
-pre-fills the field on the next launch. For every account, the Chromium
-signup browser runs through the proxy, reads its real exit IP, and looks up
-that IP's country; **unless the country is US, the account is aborted before
-any registration happens** and nothing is saved. This check runs per account
-because rotating proxies can hand out a different exit for each session.
-mail.tm traffic stays on the machine's direct connection. The log only ever
-shows the proxy's host:port, never its password. `proxy.txt` is listed in
-`.gitignore`, so it is never committed — keep it that way.
+Registration only ever happens through a proxy — there is no VPN/direct
+mode. Paste your proxies into the **Proxy** box in the app window, **one
+proxy per line**: `host:port:username:password` (or a full
+`http://username:password@host:port` URL). The pool is stored in a local
+`proxies.txt` next to the scripts and pre-fills the box on the next launch.
+**Tài khoản / proxy** sets how many accounts each proxy serves: the count
+advances by account position, whether the accounts pass or fail, and when
+a proxy's quota is used up the run moves to the next proxy in the pool,
+wrapping back to the first when the pool runs out. For every account, the
+Chromium signup browser runs through the currently active proxy, reads its
+real exit IP, and looks up that IP's country; **unless the country is US,
+the account is aborted before any registration happens** and nothing is
+saved. This check runs per account because rotating proxies can hand out a
+different exit for each session. mail.tm traffic stays on the machine's
+direct connection. The log only ever shows each proxy's host:port, never
+its password. `proxies.txt` and `proxy.txt` are listed in `.gitignore`, so
+they are never committed — keep it that way.
 
 ### Your card: entered once, kept in Windows Credential Manager
 

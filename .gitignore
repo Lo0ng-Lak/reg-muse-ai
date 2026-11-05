@@ -4,3 +4,4 @@ __pycache__/
 venv/
 .vscode/settings.json
 proxy.txt
+proxies.txt

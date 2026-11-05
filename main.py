@@ -180,6 +180,34 @@ def _delete_card_from_keyring():
             pass
 
 
+def _proxy_display(value):
+    """Chỉ lấy host:port của một proxy để ghi log (che thông tin đăng nhập)."""
+    display = value
+    if "://" in display:
+        display = display.split("://", 1)[1]
+    if "@" in display:
+        display = display.rsplit("@", 1)[1]
+    parts = display.split(":")
+    return ":".join(parts[:2]) if len(parts) >= 2 else display
+
+
+def _proxy_index_for_account(index, per_proxy, pool_size):
+    """Tài khoản thứ index (1-based) dùng proxy nào trong kho.
+
+    Hết per_proxy tài khoản thì sang proxy kế — tính theo vị trí
+    của tài khoản trong lượt chạy, bất kể các tài khoản trước
+    thành công hay thất bại. Hết kho thì quay vòng lại từ đầu.
+    """
+    return ((index - 1) // per_proxy) % pool_size
+
+
+def _write_active_proxy(line):
+    """Ghi proxy đang dùng cho nhóm hiện tại vào proxy.txt (helper đọc)."""
+    Path(__file__).with_name("proxy.txt").write_text(
+        line + "\n", encoding="utf-8"
+    )
+
+
 class MuseAIHelper(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -228,24 +256,32 @@ class MuseAIHelper(tk.Tk):
         proxy_row = ttk.Frame(root)
         proxy_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         proxy_row.columnconfigure(1, weight=1)
-        ttk.Label(proxy_row, text="Proxy:").grid(row=0, column=0, sticky="w")
-        self.proxy_entry = ttk.Entry(proxy_row)
-        self.proxy_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        ttk.Label(proxy_row, text="Proxy:").grid(row=0, column=0, sticky="nw")
+        self.proxy_text = tk.Text(proxy_row, height=3, width=52)
+        self.proxy_text.grid(row=0, column=1, sticky="ew", padx=(6, 6))
         ttk.Label(
             proxy_row,
-            text="host:port:user:pass — bắt buộc, IP thoát phải thuộc US",
+            text=(
+                "mỗi dòng 1 proxy (host:port:user:pass) — bắt buộc, "
+                "IP thoát phải thuộc US"
+            ),
+            wraplength=190,
         ).grid(row=0, column=2, sticky="w")
-        try:
-            saved_proxy = (
-                Path(__file__)
-                .with_name("proxy.txt")
-                .read_text(encoding="utf-8")
-                .strip()
-            )
-        except OSError:
-            saved_proxy = ""
-        if saved_proxy:
-            self.proxy_entry.insert(0, saved_proxy.splitlines()[0].strip())
+        saved_pool = ""
+        for pool_name in ("proxies.txt", "proxy.txt"):
+            try:
+                saved_pool = (
+                    Path(__file__)
+                    .with_name(pool_name)
+                    .read_text(encoding="utf-8")
+                    .strip()
+                )
+            except OSError:
+                saved_pool = ""
+            if saved_pool:
+                break
+        if saved_pool:
+            self.proxy_text.insert("1.0", saved_pool)
 
         card_row = ttk.Frame(root)
         card_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
@@ -286,6 +322,12 @@ class MuseAIHelper(tk.Tk):
             controls, from_=1, to=100, width=5, textvariable=self.count_var
         )
         self.count_spin.pack(side="left", padx=(6, 12))
+        ttk.Label(controls, text="Tài khoản / proxy:").pack(side="left")
+        self.per_proxy_var = tk.IntVar(value=5)
+        self.per_proxy_spin = ttk.Spinbox(
+            controls, from_=1, to=100, width=5, textvariable=self.per_proxy_var
+        )
+        self.per_proxy_spin.pack(side="left", padx=(6, 12))
         self.start_button = ttk.Button(
             controls, text="Bắt đầu đăng ký", command=self._start_registration
         )
@@ -384,36 +426,39 @@ class MuseAIHelper(tk.Tk):
             "Đã xoá thẻ đã lưu — bước thẻ sẽ chờ bạn nhập tay."
         )
 
-    def _sync_proxy_file(self):
-        """Đồng bộ ô Proxy ra proxy.txt để browser_helper đọc.
+    def _sync_proxy_pool(self):
+        """Đồng bộ ô Proxy (nhiều dòng) thành kho proxy cho lượt chạy.
 
-        Ô trống → xoá file (tránh dính proxy cũ). Trả về "host:port"
-        để ghi log — không bao giờ đưa user/password của proxy vào log.
+        Mỗi dòng là một proxy; dòng trống bị bỏ qua. Kho được lưu
+        vào proxies.txt để lần mở sau tự điền lại, còn proxy.txt
+        chỉ chứa proxy đang dùng cho nhóm tài khoản hiện tại
+        (browser_helper đọc file đó). Ô trống → xoá cả hai file và
+        trả về None. Log chỉ dùng _proxy_display — không bao giờ
+        lộ user/password của proxy.
         """
-        value = self.proxy_entry.get().strip()
-        proxy_file = Path(__file__).with_name("proxy.txt")
-        if not value:
-            try:
-                proxy_file.unlink()
-            except OSError:
-                pass
+        raw = self.proxy_text.get("1.0", "end")
+        pool = [line.strip() for line in raw.splitlines() if line.strip()]
+        pool_file = Path(__file__).with_name("proxies.txt")
+        active_file = Path(__file__).with_name("proxy.txt")
+        if not pool:
+            for path in (pool_file, active_file):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             return None
         try:
-            proxy_file.write_text(value + "\n", encoding="utf-8")
+            pool_file.write_text("\n".join(pool) + "\n", encoding="utf-8")
+            active_file.write_text(pool[0] + "\n", encoding="utf-8")
         except OSError as error:
-            raise RuntimeError(f"Không ghi được proxy.txt: {error}") from error
-        display = value
-        if "://" in display:
-            display = display.split("://", 1)[1]
-        if "@" in display:
-            display = display.rsplit("@", 1)[1]
-        parts = display.split(":")
-        return ":".join(parts[:2]) if len(parts) >= 2 else display
+            raise RuntimeError(f"Không ghi được file proxy: {error}") from error
+        return pool
 
     def _set_controls_running(self, running):
         self.start_button.configure(state="disabled" if running else "normal")
         self.count_spin.configure(state="disabled" if running else "normal")
-        self.proxy_entry.configure(state="disabled" if running else "normal")
+        self.proxy_text.configure(state="disabled" if running else "normal")
+        self.per_proxy_spin.configure(state="disabled" if running else "normal")
         for widget in (
             self.card_number_entry,
             self.card_expiry_entry,
@@ -446,16 +491,21 @@ class MuseAIHelper(tk.Tk):
             )
             return
         try:
-            proxy_display = self._sync_proxy_file()
+            per_proxy = int(self.per_proxy_var.get())
+        except (tk.TclError, ValueError):
+            per_proxy = 5
+        per_proxy = max(1, min(per_proxy, 100))
+        try:
+            pool = self._sync_proxy_pool()
         except RuntimeError as error:
             messagebox.showerror("Lỗi proxy", str(error))
             return
-        if not proxy_display:
+        if not pool:
             messagebox.showwarning(
                 "Thiếu proxy",
                 "Tool chỉ đăng ký qua proxy có IP thoát thuộc US. "
-                "Hãy nhập proxy (host:port:user:pass) vào ô Proxy "
-                "rồi bấm Bắt đầu lại.",
+                "Hãy nhập ít nhất một proxy (mỗi dòng một proxy, "
+                "dạng host:port:user:pass) vào ô Proxy rồi bấm lại.",
             )
             return
         self.running = True
@@ -463,11 +513,12 @@ class MuseAIHelper(tk.Tk):
         self._set_controls_running(True)
         self._append_log(f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---")
         self._append_log(
-            f"Dùng proxy {proxy_display} cho trình duyệt đăng ký — "
-            "mỗi tài khoản chỉ chạy khi IP thoát kiểm tra được là US."
+            f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
+            "khoản (tính cả thành công lẫn thất bại) — mỗi tài khoản "
+            "chỉ chạy khi IP thoát kiểm tra được là US."
         )
         threading.Thread(
-            target=self._run_loop, args=(total,), daemon=True
+            target=self._run_loop, args=(total, pool, per_proxy), daemon=True
         ).start()
 
     def _stop_registration(self):
@@ -486,13 +537,33 @@ class MuseAIHelper(tk.Tk):
                     pass
         self.destroy()
 
-    def _run_loop(self, total):
+    def _run_loop(self, total, pool, per_proxy):
         helper = Path(__file__).with_name("browser_helper.py")
         success = 0
         fail = 0
+        active_proxy_index = None
         for index in range(1, total + 1):
             if self.stop_event.is_set():
                 break
+            proxy_index = _proxy_index_for_account(
+                index, per_proxy, len(pool)
+            )
+            if proxy_index != active_proxy_index:
+                active_proxy_index = proxy_index
+                line = pool[proxy_index]
+                try:
+                    _write_active_proxy(line)
+                    note = ""
+                except OSError as error:
+                    note = f" (không ghi được proxy.txt: {error})"
+                self.events.put(
+                    (
+                        "log",
+                        f"Proxy #{proxy_index + 1}/{len(pool)}: "
+                        f"{_proxy_display(line)} — dùng cho các tài "
+                        f"khoản tiếp theo.{note}",
+                    )
+                )
             self.events.put(
                 (
                     "progress",
