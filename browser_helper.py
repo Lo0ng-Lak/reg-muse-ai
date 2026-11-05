@@ -329,6 +329,8 @@ def _in_muse_interface(page):
             "sign-up",
             "checkpoint",
             "age-verification",
+            "onboarding",
+            "welcome",
         )
     )
 
@@ -336,32 +338,50 @@ def _in_muse_interface(page):
 def _confirm_final_step(page, timeout_seconds=30):
     """Bấm nút xác nhận cuối sau bước thẻ để vào giao diện Muse.
 
-    Sau khi thẻ được chấp nhận, Muse.ai còn một màn hình xác nhận
-    với nút Confirm (đôi khi là Continue). Dò tối đa
-    timeout_seconds: thấy nút thì bấm; đã ở trong giao diện rồi —
-    hoặc hết giờ mà không thấy nút — thì thôi, bước lấy cookie
-    vẫn chạy tiếp.
+    Sau khi thẻ được chấp nhận, Muse.ai còn một màn hình nữa với
+    nút "Get started" (đôi khi là Confirm/Continue) — bấm nút đó
+    mới vào được giao diện. Nếu có nhiều màn hình nối nhau thì
+    bấm tiếp (tối đa 3 lần). Đã ở trong giao diện rồi — hoặc hết
+    giờ mà không thấy nút — thì thôi, bước lấy cookie vẫn chạy.
     """
     deadline = time.monotonic() + timeout_seconds
+    clicks = 0
+    last_click = None
     while time.monotonic() < deadline:
         if page.is_closed():
             return
-        if _in_muse_interface(page):
-            return
-        for name in ("Confirm", "Continue"):
+        clicked = False
+        for name in ("Get started", "Confirm", "Continue", "Bắt đầu"):
             button = page.get_by_role("button", name=name, exact=True)
             try:
-                if (
+                visible = (
                     button.count()
                     and button.first.is_visible()
                     and button.first.is_enabled()
-                ):
-                    _click_when_ready(page, button, name)
-                    _status("Đã bấm xác nhận cuối sau bước thẻ.")
-                    return
+                )
             except Exception:
-                pass
-        page.wait_for_timeout(1000)
+                visible = False
+            if not visible:
+                continue
+            url_before = page.url
+            if last_click == (name, url_before):
+                # Đã bấm đúng nút này ở đúng URL này mà nó vẫn còn
+                # nguyên: đó là nút cố định của giao diện (checklist,
+                # banner...), không phải cổng vào — dừng lại.
+                return
+            _click_when_ready(page, button, name)
+            last_click = (name, url_before)
+            clicks += 1
+            clicked = True
+            _status(
+                f"Đã bấm nút '{name}' sau bước thẻ ({clicks}/3)."
+            )
+            break
+        if clicks >= 3:
+            return
+        if not clicked and _in_muse_interface(page):
+            return
+        page.wait_for_timeout(1200 if clicked else 1000)
 
 
 def _wait_for_muse_interface(page, timeout_seconds=30):

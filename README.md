@@ -57,9 +57,10 @@ the app then, with no further clicks:
    appended to `accounts.xlsx` in the app's local Windows data folder;
    failed attempts are only written to the on-screen log, never to the
    sheet.
-6. After the card step there is one last confirmation screen: the tool
-   clicks its Confirm button, waits to land inside the Muse interface,
-   and reads the session cookies. A successful row in `accounts.xlsx`
+6. After the card step there is one last screen with a **Get started**
+   button (sometimes Confirm/Continue): the tool clicks it — repeatedly
+   if several such screens chain together — waits to land inside the
+   Muse interface, and reads the session cookies. A successful row in `accounts.xlsx`
    therefore carries: creation time, email, the Muse.ai password, the
    mail.tm mailbox password, the session cookie (JSON, captured from the
    browser — it is passed from the helper to the app out of band and is
