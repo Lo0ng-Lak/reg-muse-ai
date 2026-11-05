@@ -985,14 +985,30 @@ _SCRATCH_RECT_JS = """() => {
 }"""
 
 
+def _paint_slow(page, x_from, x_to, y):
+    """Quét chuột CHẬM từ x_from tới x_to trên hàng y.
+
+    Trang xử lý vị trí chuột theo từng khung hình (~60fps):
+    quét nhanh là giữa hai khung hình chuột nhảy cả trăm px,
+    cọ chỉ chấm được vài điểm rời — nhìn như tô mà lớp phủ
+    gần như nguyên vẹn. Mỗi đoạn ~10px nghỉ ~15ms thì khung
+    nào cũng bắt được điểm tô, như tay người tô thật.
+    """
+    distance = abs(x_to - x_from)
+    steps = max(1, int(distance // 10))
+    for index in range(1, steps + 1):
+        page.mouse.move(x_from + (x_to - x_from) * index / steps, y)
+        page.wait_for_timeout(15)
+
+
 def _paint_reveal(page, box):
     """Một lượt tô mở lớp phủ "Scratch to reveal".
 
     Đưa chuột vào ô, con trỏ đổi thành hình tròn như một cây
-    cọ; nhấn giữ rồi TÔ qua lại phủ kín cả ô — lớp phủ bị xoá
-    ở nơi cọ quét qua. Tô đủ thì mã mời hiện ra và nút Copy
-    referral link chuyển xanh, bấm được. Tô chậm và dày (hàng
-    cách ~6px, nhiều bước di chuyển) cho giống tay người.
+    cọ; nhấn giữ rồi TÔ phủ kín cả ô — ngang từng hàng chậm
+    rãi, rồi dọc từng cột phủ chéo. Lớp phủ bị xoá ở nơi cọ
+    quét qua; tô đủ thì mã mời hiện ra và nút Copy referral
+    link chuyển xanh, bấm được.
     """
     try:
         left = box["x"] + 4
@@ -1011,12 +1027,25 @@ def _paint_reveal(page, box):
             else:
                 y = (top + bottom) / 2
             if index % 2 == 0:
-                page.mouse.move(left, y, steps=8)
-                page.mouse.move(right, y, steps=60)
+                page.mouse.move(left, y)
+                _paint_slow(page, left, right, y)
             else:
-                page.mouse.move(right, y, steps=8)
-                page.mouse.move(left, y, steps=60)
-            page.wait_for_timeout(40)
+                page.mouse.move(right, y)
+                _paint_slow(page, right, left, y)
+        # Phủ chéo bằng các cột dọc để không sót vệt nào.
+        columns = max(3, int((right - left) // 60) + 1)
+        for index in range(columns):
+            if columns > 1:
+                x = left + (right - left) * index / (columns - 1)
+            else:
+                x = (left + right) / 2
+            page.mouse.move(x, top)
+            steps = max(1, int((bottom - top) // 10))
+            for step in range(1, steps + 1):
+                page.mouse.move(
+                    x, top + (bottom - top) * step / steps
+                )
+                page.wait_for_timeout(15)
         page.wait_for_timeout(200)
         page.mouse.up()
         page.wait_for_timeout(600)
@@ -1084,10 +1113,36 @@ def _reveal_by_painting(page):
             box = None
         if not box:
             return ""
+        # Cuộn ô cào vào giữa tầm nhìn trước khi tô — ô nằm
+        # lệch khỏi màn hình thì chuột tô vào hư không.
+        try:
+            page.evaluate(
+                """() => {
+                    const el = [...document.querySelectorAll(
+                        'div, span, button, canvas, section'
+                    )].find((e) =>
+                        /scratch to reveal|cào để/i.test(
+                            e.textContent || ''
+                        )
+                    );
+                    if (el) {
+                        el.scrollIntoView({
+                            block: 'center',
+                            inline: 'center',
+                        });
+                    }
+                }"""
+            )
+            page.wait_for_timeout(400)
+            box = page.evaluate(_SCRATCH_RECT_JS) or box
+        except Exception:
+            pass
         if not _paint_reveal(page, box):
             return ""
         _status(
-            f"Đã tô mở lớp phủ che mã mời (lần {attempt + 1})."
+            "Đã tô lớp phủ che mã mời "
+            f"(lần {attempt + 1}, ô {int(box['width'])}x"
+            f"{int(box['height'])})."
         )
         code = _scan_once(page)
         if code:
