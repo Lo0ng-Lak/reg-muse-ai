@@ -108,15 +108,30 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
     return "timeout"
 
 
-def _profile_form_visible(page, timeout_ms):
-    """True nếu form hồ sơ đã hiện ra trong thời gian chờ cho phép."""
-    try:
-        page.get_by_role(
-            "heading", name="Finish creating your account"
-        ).wait_for(state="visible", timeout=timeout_ms)
-        return True
-    except Exception:
-        return False
+def _wait_for_profile_form(page, timeout_ms):
+    """Chờ form hồ sơ xuất hiện — form này có HAI biến thể:
+
+    - "Finish creating your account": có cả ô tên và ngày sinh.
+    - "What's your birthday?": chỉ hỏi ngày sinh (ví dụ khi qua IP Mỹ).
+
+    Trả về True ngay khi một trong hai biến thể hiện ra.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        for name in (
+            "Finish creating your account",
+            "What's your birthday?",
+        ):
+            heading = page.get_by_role("heading", name=name)
+            try:
+                if heading.count() and heading.first.is_visible():
+                    return True
+            except Exception:
+                pass
+        page.wait_for_timeout(500)
+    return False
 
 
 def main():
@@ -198,18 +213,22 @@ def main():
         _fill_verification_code(page, code)
         page.wait_for_timeout(UI_SETTLE_MS)
         # Form mã của Muse.ai TỰ GỬI ngay khi nhập đủ số: trang tự nhảy
-        # sang bước hồ sơ mà không cần bấm Confirm. Nếu vẫn đi tìm nút
-        # "Confirm" lúc này, locator sẽ bám nhầm vào nút Confirm đang bị
-        # khóa của form hồ sơ và chờ nó bật — trong khi nút đó chỉ bật
-        # sau khi hồ sơ được điền xong: bế tắc tới hết thời gian chờ,
-        # trình duyệt đã qua bước mới mà log vẫn đứng ở bước điền mã.
-        # Vì vậy: chờ vài giây xem form hồ sơ có tự hiện không, chỉ bấm
-        # Confirm khi nó chưa hiện.
-        if not _profile_form_visible(page, 5000):
+        # sang bước hồ sơ mà không cần bấm Confirm. TUYỆT ĐỐI không bấm
+        # nút "Confirm" nào khi form hồ sơ đã hiện mà chưa điền: nút
+        # Confirm của form hồ sơ luôn bấm được, bấm ngay lúc này là gửi
+        # ngày sinh MẶC ĐỊNH (ngày hôm nay — tuổi 0) và bị chặn vì dưới
+        # 18 tuổi. Vì vậy: chờ form hồ sơ (cả hai biến thể) tự hiện
+        # trước; chỉ khi nó không hiện mới bấm Confirm của form mã rồi
+        # chờ tiếp.
+        if not _wait_for_profile_form(page, 15000):
             confirm_button = page.get_by_role(
                 "button", name="Confirm", exact=True
             )
             _click_when_ready(page, confirm_button, "Confirm")
+            if not _wait_for_profile_form(page, 15000):
+                raise RuntimeError(
+                    "Không thấy form hồ sơ sau khi xác nhận mã xác minh."
+                )
         _status("Mã đã xác nhận, đang điền hồ sơ...")
         _fill_profile(page)
         finish_button = page.get_by_role(
@@ -294,9 +313,10 @@ def _random_birth_date():
 
 
 def _fill_profile(page):
-    page.get_by_role(
-        "heading", name="Finish creating your account"
-    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    if not _wait_for_profile_form(page, BUTTON_TIMEOUT_MS):
+        raise RuntimeError(
+            "Không thấy form hồ sơ (cả hai biến thể tên/ngày sinh)."
+        )
     first_name = page.get_by_placeholder("First name", exact=True)
     last_name = page.get_by_placeholder("Last name", exact=True)
     try:
