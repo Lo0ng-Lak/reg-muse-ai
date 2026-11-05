@@ -342,6 +342,7 @@ class _ProxyRotation:
         self.per_proxy = per_proxy
         self.cursor = 0
         self.used = 0
+        self.cycles = 0
 
     def current(self):
         return self.cursor, self.pool[self.cursor]
@@ -349,8 +350,15 @@ class _ProxyRotation:
     def advance_after_account(self, burned=False):
         self.used += 1
         if burned or self.used >= self.per_proxy:
+            if self.cursor + 1 >= len(self.pool):
+                # Vừa dùng xong proxy cuối: đã đi hết một vòng kho.
+                self.cycles += 1
             self.cursor = (self.cursor + 1) % len(self.pool)
             self.used = 0
+
+    def pool_exhausted(self):
+        """Đã đi hết một vòng kho proxy (mỗi proxy hết lượt một lần)."""
+        return self.cycles >= 1
 
 
 def _write_active_proxy(line):
@@ -471,7 +479,7 @@ class MuseAIHelper(tk.Tk):
         ttk.Label(controls, text="Số tài khoản:").pack(side="left")
         self.count_var = tk.IntVar(value=5)
         self.count_spin = ttk.Spinbox(
-            controls, from_=1, to=100, width=5, textvariable=self.count_var
+            controls, from_=0, to=100, width=5, textvariable=self.count_var
         )
         self.count_spin.pack(side="left", padx=(6, 12))
         ttk.Label(controls, text="Tài khoản / proxy:").pack(side="left")
@@ -664,10 +672,12 @@ class MuseAIHelper(tk.Tk):
             total = int(self.count_var.get())
         except (tk.TclError, ValueError):
             total = 0
-        if total < 1 or total > 100:
+        if total < 0 or total > 100:
             messagebox.showwarning(
                 "Số tài khoản chưa hợp lệ",
-                "Nhập số tài khoản từ 1 đến 100.",
+                "Nhập số tài khoản từ 0 đến 100. "
+                "Để 0 là chạy liên tục tới khi dùng hết lượt của "
+                "toàn bộ proxy trong danh sách thì dừng.",
             )
             return
         try:
@@ -702,7 +712,17 @@ class MuseAIHelper(tk.Tk):
         self.running = True
         self.stop_event.clear()
         self._set_controls_running(True)
-        self._append_log(f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---")
+        if total == 0:
+            self._append_log(
+                "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
+                "khoản — chạy tới khi dùng hết lượt của toàn bộ "
+                "proxy trong danh sách (bấm Dừng để ngắt bất cứ "
+                "lúc nào) ---"
+            )
+        else:
+            self._append_log(
+                f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---"
+            )
         self._append_log(
             f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
             "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
@@ -742,9 +762,25 @@ class MuseAIHelper(tk.Tk):
         # khoản sau và được ghi đè vào invite.txt để nối chuỗi
         # sang cả lượt chạy sau.
         pending_code = (invite or "").strip().upper()
-        for index in range(1, total + 1):
-            if self.stop_event.is_set():
+        # total = 0 là chế độ không giới hạn: chạy mãi cho tới
+        # khi toàn bộ kho proxy đã dùng hết một vòng (mỗi proxy
+        # hết hạn mức hoặc bị chặn) thì tự dừng; nút Dừng vẫn
+        # ngắt được bất cứ lúc nào. Nhãn hiển thị là ∞.
+        label_total = total if total > 0 else "∞"
+        index = 0
+        while not self.stop_event.is_set():
+            if total > 0 and index >= total:
                 break
+            if total == 0 and index > 0 and rotation.pool_exhausted():
+                self.events.put(
+                    (
+                        "log",
+                        "Đã dùng hết lượt của toàn bộ proxy trong "
+                        "danh sách — dừng lượt chạy.",
+                    )
+                )
+                break
+            index += 1
             proxy_index, line = rotation.current()
             if proxy_index != written_proxy_index:
                 written_proxy_index = proxy_index
@@ -764,7 +800,7 @@ class MuseAIHelper(tk.Tk):
             self.events.put(
                 (
                     "progress",
-                    f"Tài khoản {index}/{total} · Thành công: {success} · "
+                    f"Tài khoản {index}/{label_total} · Thành công: {success} · "
                     f"Thất bại: {fail}",
                 )
             )
@@ -773,14 +809,14 @@ class MuseAIHelper(tk.Tk):
             except Exception as error:
                 fail += 1
                 self.events.put(
-                    ("log", f"[{index}/{total}] Tạo hộp thư thất bại: {error}")
+                    ("log", f"[{index}/{label_total}] Tạo hộp thư thất bại: {error}")
                 )
                 rotation.advance_after_account()
                 continue
             self.events.put(
                 (
                     "log",
-                    f"[{index}/{total}] Đã tạo mail {address} — bắt đầu đăng ký.",
+                    f"[{index}/{label_total}] Đã tạo mail {address} — bắt đầu đăng ký.",
                 )
             )
             try:
@@ -788,7 +824,7 @@ class MuseAIHelper(tk.Tk):
             except OSError:
                 pass
             helper_ok, burned, cookie, own_invite = self._run_helper(
-                helper, address, index, total
+                helper, address, index, label_total
             )
             if helper_ok:
                 try:
@@ -810,7 +846,7 @@ class MuseAIHelper(tk.Tk):
                     self.events.put(
                         (
                             "log",
-                            f"[{index}/{total}] ✔ Đăng ký thành công {address} "
+                            f"[{index}/{label_total}] ✔ Đăng ký thành công {address} "
                             "— đã lưu vào sheet Excel.",
                         )
                     )
@@ -819,7 +855,7 @@ class MuseAIHelper(tk.Tk):
                     self.events.put(
                         (
                             "log",
-                            f"[{index}/{total}] {address} đã đăng ký xong nhưng "
+                            f"[{index}/{label_total}] {address} đã đăng ký xong nhưng "
                             f"không ghi được sheet Excel: {error}",
                         )
                     )
@@ -827,13 +863,13 @@ class MuseAIHelper(tk.Tk):
                 fail += 1
                 if self.stop_event.is_set():
                     self.events.put(
-                        ("log", f"[{index}/{total}] Đã dừng theo yêu cầu.")
+                        ("log", f"[{index}/{label_total}] Đã dừng theo yêu cầu.")
                     )
                 else:
                     self.events.put(
                         (
                             "log",
-                            f"[{index}/{total}] ✘ Đăng ký thất bại cho {address} "
+                            f"[{index}/{label_total}] ✘ Đăng ký thất bại cho {address} "
                             "— lý do ở dòng RESULT phía trên.",
                         )
                     )
@@ -849,7 +885,7 @@ class MuseAIHelper(tk.Tk):
                 self.events.put(
                     (
                         "log",
-                        f"[{index}/{total}] Chuỗi mã mời: tài khoản "
+                        f"[{index}/{label_total}] Chuỗi mã mời: tài khoản "
                         f"tiếp theo sẽ quy đổi mã {own_invite} — mã "
                         "của tài khoản này.",
                     )
@@ -863,7 +899,7 @@ class MuseAIHelper(tk.Tk):
                     )
                 )
             rotation.advance_after_account(burned=burned)
-            if index < total and not self.stop_event.is_set():
+            if (total == 0 or index < total) and not self.stop_event.is_set():
                 time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
         self.events.put(
             ("finished", (success, fail, self.stop_event.is_set()))

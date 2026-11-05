@@ -32,7 +32,10 @@ times out, is logged as failed, and the batch moves on to the next address.
    ```
 
 Paste a proxy into the **Proxy** field (required — see below), set the
-number of accounts (1–100), and click **Bắt đầu đăng ký**. For each account
+number of accounts (1–100, or **0 to run until the proxy pool is used
+up** — every proxy in the list serves its per-proxy quota once, burned
+proxies included, then the run stops on its own), and click **Bắt đầu
+đăng ký**. For each account
 the app then, with no further clicks:
 
 1. Creates a random mail.tm address and saves the mailbox password to
