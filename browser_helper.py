@@ -522,9 +522,18 @@ def _load_redeem_code():
     return code if re.fullmatch(r"[A-Z0-9]{6}", code) else ""
 
 
+REDEEM_ROW_TEXTS = (
+    "Quy đổi mã lời mời",
+    "Redeem invite code",
+    "Redeem an invite code",
+    "Redeem invitation code",
+    "Redeem a code",
+)
+
+
 def _settings_open(page):
-    """Cửa sổ Cài đặt đã mở chưa (thấy hàng quy đổi mã là chắc chắn)."""
-    for text in ("Quy đổi mã lời mời", "Redeem invite code"):
+    """Cài đặt đã mở chưa — mục quy đổi nằm ngay tab Chung/General."""
+    for text in REDEEM_ROW_TEXTS:
         probe = page.get_by_text(text, exact=False)
         try:
             if probe.count():
@@ -537,22 +546,30 @@ def _settings_open(page):
 def _open_settings(page):
     """Mở Cài đặt: phím tắt Ctrl+, trước, menu góc trái dưới sau.
 
-    Menu của Muse ghi rõ Cài đặt = Ctrl+, — bấm phím tắt chắc
-    chắn hơn mò bấm menu. Trang nạp qua proxy khá chậm nên sau
-    mỗi cách mở đều CHỜ Cài đặt hiện thật vài giây (dò mục quy
-    đổi mã) thay vì ngó đúng một lần rồi bỏ cuộc.
+    Menu của Muse ghi rõ Cài đặt = Ctrl+, — và theo người
+    dùng, bấm chuột mở Cài đặt không ăn, phím tắt mới là đường
+    chính. Hai việc trước khi bấm phím: giành focus cho trang
+    (focus đang nằm ở ô nhập thì phím tắt rơi vào hư không),
+    và thử cả hai dạng tên phím. Sau mỗi lần bấm đều chờ xác
+    nhận Cài đặt đã mở thật mới đi tiếp.
     """
     try:
-        page.keyboard.press("Control+,")
+        page.mouse.click(200, 200)
+        page.wait_for_timeout(300)
     except Exception:
         pass
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if page.is_closed():
-            return False
-        if _settings_open(page):
-            return True
-        page.wait_for_timeout(500)
+    for keys in ("Control+,", "Control+Comma"):
+        try:
+            page.keyboard.press(keys)
+        except Exception:
+            pass
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if page.is_closed():
+                return False
+            if _settings_open(page):
+                return True
+            page.wait_for_timeout(500)
     for name in ("Cài đặt", "Settings"):
         item = page.get_by_text(name, exact=True)
         try:
@@ -610,11 +627,24 @@ def _open_settings(page):
 
 
 def _redeem_dialog_present(page):
-    for title in ("Quy đổi mã", "Redeem code"):
-        heading = page.get_by_text(title, exact=True)
+    """Hộp thoại nhập mã đã mở chưa.
+
+    Tiêu đề khớp một phần (tiếng Anh có thể là "Redeem invite
+    code", tiếng Việt "Quy đổi mã...") NHƯNG phải kèm ít nhất
+    một ô nhập đang hiện — mục quy đổi trong Cài đặt cũng chứa
+    các chữ đó, chỉ khác là nó không có ô nhập nào.
+    """
+    for title in (
+        "Quy đổi mã",
+        "Redeem invite code",
+        "Redeem a code",
+        "Redeem code",
+    ):
+        heading = page.get_by_text(title, exact=False)
         try:
             if heading.count() and heading.first.is_visible():
-                return True
+                if page.locator("input:visible").count() >= 1:
+                    return True
         except Exception:
             pass
     return False
@@ -700,11 +730,7 @@ def _redeem_invite_code(page, code):
         while row is None and time.monotonic() < deadline:
             if page.is_closed():
                 return False
-            for text in (
-                "Quy đổi mã lời mời",
-                "Redeem invite code",
-                "Redeem a code",
-            ):
+            for text in REDEEM_ROW_TEXTS:
                 candidate = page.get_by_text(text, exact=False)
                 try:
                     if candidate.count():
