@@ -1,4 +1,6 @@
-# Muse.ai Account Helper
+# reg-muse-ai
+
+## Muse.ai Account Helper
 
 A small Windows desktop helper for a single personal account. It creates a
 mail.tm inbox, opens Muse.ai in a dedicated browser, retrieves email
