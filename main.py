@@ -148,6 +148,7 @@ class MuseAIHelper(tk.Tk):
         self.minsize(640, 500)
         self.events = queue.Queue()
         self.busy = False
+        self.vpn_confirmed = False
         self.messages = []
 
         try:
@@ -175,7 +176,9 @@ class MuseAIHelper(tk.Tk):
             root,
             text=(
                 "Mail.tm cung cấp email tạm, không phải Gmail. Muse.ai có thể từ chối "
-                "email tạm; hãy tự hoàn tất đăng ký và xác minh trên trang Muse.ai."
+                "email tạm. Bấm 'Tạo mail & đăng ký' để tạo hộp thư mới và mở ngay "
+                "form đăng ký bằng email đó; CAPTCHA và các bước phát sinh vẫn do "
+                "bạn xử lý."
             ),
             wraplength=700,
         ).grid(row=1, column=0, sticky="ew", pady=(6, 14))
@@ -187,7 +190,7 @@ class MuseAIHelper(tk.Tk):
         self.mail_email = ttk.Entry(mailbox)
         self.mail_email.grid(row=0, column=1, sticky="ew", padx=8)
         self.create_button = ttk.Button(
-            mailbox, text="Tạo hộp thư", command=self._create_mailbox
+            mailbox, text="Tạo mail & đăng ký", command=self._create_mailbox
         )
         self.create_button.grid(row=0, column=2, padx=(0, 6))
         self.refresh_button = ttk.Button(
@@ -346,12 +349,17 @@ class MuseAIHelper(tk.Tk):
         return True
 
     def _confirm_surfshark_vpn(self):
-        return messagebox.askyesno(
+        if self.vpn_confirmed:
+            return True
+        confirmed = messagebox.askyesno(
             "Xác nhận Surfshark VPN",
             "Hãy kết nối Surfshark VPN trước khi tiếp tục.\n\n"
             "Chỉ chọn Có khi Surfshark hiển thị đã kết nối. "
             "Ứng dụng không thể tự xác minh VPN hoặc định tuyến mạng.",
         )
+        if confirmed:
+            self.vpn_confirmed = True
+        return confirmed
 
     def _create_mailbox(self):
         def task():
@@ -365,8 +373,10 @@ class MuseAIHelper(tk.Tk):
                 raise RuntimeError("mail.tm hiện không cung cấp domain khả dụng.")
 
             last_error = None
-            for _ in range(3):
-                address = f"muse{secrets.token_hex(5)}@{active_domains[0]}"
+            attempts = max(3, len(active_domains))
+            for attempt in range(attempts):
+                domain = active_domains[attempt % len(active_domains)]
+                address = f"muse{secrets.token_hex(5)}@{domain}"
                 mailbox_password = secrets.token_urlsafe(24)
                 try:
                     _request(
@@ -402,21 +412,32 @@ class MuseAIHelper(tk.Tk):
         self.accounts["mailbox_email"] = address
         self.accounts["muse_email"] = address
         self._persist_accounts()
+        spreadsheet_error = None
         try:
             _append_spreadsheet_row(address, muse_password)
+            self.open_sheet_button.configure(state="normal")
         except RuntimeError as error:
-            self.status.set("Đã tạo tài khoản nhưng không ghi được sheet Excel.")
-            messagebox.showerror("Lỗi ghi Excel", str(error))
-            return
-        self.open_sheet_button.configure(state="normal")
+            # Ghi Excel chỉ là nhật ký phụ; lỗi ở đây không được chặn
+            # luồng đăng ký chính. Cảnh báo được hiển thị sau khi mở
+            # trình duyệt để không ngắt quãng thao tác.
+            spreadsheet_error = error
         if not self._confirm_surfshark_vpn():
             self.status.set(
-                f"Đã lưu thông tin vào sheet: {SPREADSHEET_FILE}. "
-                "Chưa mở Muse.ai vì chưa xác nhận VPN."
+                "Đã tạo hộp thư nhưng chưa mở Muse.ai vì chưa xác nhận VPN. "
+                "Bấm 'Mở trang Muse.ai' để đăng ký khi đã sẵn sàng."
             )
+            if spreadsheet_error is not None:
+                messagebox.showerror("Lỗi ghi Excel", str(spreadsheet_error))
             return
-        if not self._launch_signup_browser(address):
-            self.status.set(f"Đã lưu thông tin vào sheet: {SPREADSHEET_FILE}")
+        launched = self._launch_signup_browser(address)
+        if spreadsheet_error is not None:
+            if launched:
+                self.status.set(
+                    "Đang đăng ký bằng hộp thư mới, nhưng không ghi được "
+                    "sheet Excel (thông tin vẫn còn trong ứng dụng và "
+                    "Windows Credential Manager)."
+                )
+            messagebox.showerror("Lỗi ghi Excel", str(spreadsheet_error))
 
     def _get_mail_token(self, address):
         password = keyring.get_password(MAIL_SERVICE, address)

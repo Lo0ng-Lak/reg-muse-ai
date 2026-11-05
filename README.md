@@ -28,10 +28,11 @@ keyring backend. CAPTCHA and any additional registration steps remain manual.
    py main.py
    ```
 
-Click **Tạo hộp thư** to generate a random mail.tm address and a random
-Muse.ai password. The app saves the mailbox password and Muse.ai password to
-Windows Credential Manager before showing the credentials. Before opening
-Muse.ai, the app asks you to confirm that Surfshark VPN is connected, then
+Click **Tạo mail & đăng ký** to generate a random mail.tm address and a random
+Muse.ai password in a single step. The app saves the mailbox password and
+Muse.ai password to
+Windows Credential Manager before showing the credentials. It then asks you to
+confirm that Surfshark VPN is connected (once per app session), and immediately
 opens a dedicated Chromium window and fills the email into the visible
 "Mobile number or email" field, then submits **Continue** to request a
 verification code. It checks mail.tm for a new message, fills the detected
