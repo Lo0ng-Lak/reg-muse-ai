@@ -85,14 +85,15 @@ the app then, with no further clicks:
    can still be redeemed manually within 48 hours). The account then
    opens the **Mời** panel and reads its *own* invite code, which is
    saved in its sheet row and becomes the code the next account
-   redeems. (Reading the code follows the real panel: a fresh
-   account's code sits behind a **Scratch to reveal** cover, so the
-   tool paints over it with the held mouse first — hovering turns
-   the cursor into a round brush, and painting the cover away
-   reveals the code and turns the copy button active — then clicks
-   **Copy referral link** and parses the code out of what was
-   copied. Fallback: scan the panel text.) The **Mã mời** field
-   in the
+   redeems. (Reading the code follows the real panel: the code
+   sits in the panel's DOM in a span whose `title` is the code
+   itself, under a **Scratch to reveal** canvas — the tool first
+   reads it straight from the DOM. If it is not there yet, it
+   paints the cover away with the held mouse — hovering turns
+   the cursor into a round brush, and painting reveals the code
+   and turns the copy button active — then clicks **Copy
+   referral link** and parses the code out of what was copied.)
+   The **Mã mời** field in the
    window is the chain's current
    head: whatever is there when a run starts (typically your own
    account's code) is redeemed by the run's first account, and the
