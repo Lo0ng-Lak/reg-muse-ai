@@ -5,3 +5,4 @@ venv/
 .vscode/settings.json
 proxy.txt
 proxies.txt
+invite.txt

@@ -57,6 +57,16 @@ the app then, with no further clicks:
    appended to `accounts.xlsx` in the app's local Windows data folder;
    failed attempts are only written to the on-screen log, never to the
    sheet.
+6. After the card step there is one last confirmation screen: the tool
+   clicks its Confirm button, waits to land inside the Muse interface,
+   and reads the session cookies. A successful row in `accounts.xlsx`
+   therefore carries: creation time, email, the Muse.ai password, the
+   mail.tm mailbox password, the session cookie (JSON, captured from the
+   browser — it is passed from the helper to the app out of band and is
+   never printed in the log), and the invite code from the **Mã mời**
+   field in the window (kept in a local `invite.txt`; leave it empty if
+   you do not use one). Older sheets with only the first three columns
+   gain the new headers automatically on the next successful row.
 
 The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the

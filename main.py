@@ -129,21 +129,46 @@ def _create_mailbox_account():
     raise last_error or RuntimeError("Không tạo được hộp thư mail.tm.")
 
 
-def _append_spreadsheet_row(email, password):
+SPREADSHEET_HEADERS = [
+    "Thời gian tạo",
+    "Email Muse.ai",
+    "Mật khẩu Muse.ai",
+    "Mật khẩu mail.tm",
+    "Cookie phiên đăng nhập",
+    "Mã mời",
+]
+
+
+def _append_spreadsheet_row(
+    email, password, mail_password="", cookie="", invite=""
+):
     temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
     try:
         SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
         if SPREADSHEET_FILE.exists():
             workbook = load_workbook(SPREADSHEET_FILE)
             sheet = workbook.active
+            # Sheet cũ chỉ có 3 cột: bổ sung tiêu đề cho các cột mới
+            # ở hàng đầu (chỉ ghi vào ô đang trống, không đè dữ liệu).
+            for column, header in enumerate(SPREADSHEET_HEADERS, start=1):
+                cell = sheet.cell(row=1, column=column)
+                if not cell.value:
+                    cell.value = header
         else:
             workbook = Workbook()
             sheet = workbook.active
             sheet.title = "Muse.ai"
-            sheet.append(["Thời gian tạo", "Email Muse.ai", "Mật khẩu Muse.ai"])
+            sheet.append(SPREADSHEET_HEADERS)
 
         sheet.append(
-            [datetime.now().astimezone().isoformat(timespec="seconds"), email, password]
+            [
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                email,
+                password,
+                mail_password,
+                cookie,
+                invite,
+            ]
         )
         workbook.save(temporary_file)
         temporary_file.replace(SPREADSHEET_FILE)
@@ -194,6 +219,18 @@ def _proxy_display(value):
 def _line_burns_proxy(line):
     """Dòng tín hiệu từ browser_helper: proxy đang dùng bị Meta chặn."""
     return line.startswith("PROXY_BURN")
+
+
+def _session_cookie_from_line(line):
+    """Tách cookie phiên từ dòng tín hiệu của helper (None nếu không phải).
+
+    Cookie là thông tin đăng nhập — dòng này bị chặn lại, không
+    cho hiện vào log của ứng dụng.
+    """
+    prefix = "SESSION_COOKIE:"
+    if line.startswith(prefix):
+        return line[len(prefix):].strip()
+    return None
 
 
 class _ProxyRotation:
@@ -349,6 +386,20 @@ class MuseAIHelper(tk.Tk):
             controls, from_=1, to=100, width=5, textvariable=self.per_proxy_var
         )
         self.per_proxy_spin.pack(side="left", padx=(6, 12))
+        ttk.Label(controls, text="Mã mời:").pack(side="left")
+        self.invite_entry = ttk.Entry(controls, width=10)
+        self.invite_entry.pack(side="left", padx=(6, 12))
+        try:
+            saved_invite = (
+                Path(__file__)
+                .with_name("invite.txt")
+                .read_text(encoding="utf-8")
+                .strip()
+            )
+        except OSError:
+            saved_invite = ""
+        if saved_invite:
+            self.invite_entry.insert(0, saved_invite.splitlines()[0].strip())
         self.start_button = ttk.Button(
             controls, text="Bắt đầu đăng ký", command=self._start_registration
         )
@@ -475,11 +526,25 @@ class MuseAIHelper(tk.Tk):
             raise RuntimeError(f"Không ghi được file proxy: {error}") from error
         return pool
 
+    def _sync_invite_code(self):
+        """Lưu mã mời (nếu có) vào invite.txt để lần sau tự điền lại."""
+        code = self.invite_entry.get().strip()
+        invite_file = Path(__file__).with_name("invite.txt")
+        try:
+            if code:
+                invite_file.write_text(code + "\n", encoding="utf-8")
+            elif invite_file.exists():
+                invite_file.unlink()
+        except OSError:
+            pass
+        return code
+
     def _set_controls_running(self, running):
         self.start_button.configure(state="disabled" if running else "normal")
         self.count_spin.configure(state="disabled" if running else "normal")
         self.proxy_text.configure(state="disabled" if running else "normal")
         self.per_proxy_spin.configure(state="disabled" if running else "normal")
+        self.invite_entry.configure(state="disabled" if running else "normal")
         for widget in (
             self.card_number_entry,
             self.card_expiry_entry,
@@ -529,6 +594,7 @@ class MuseAIHelper(tk.Tk):
                 "dạng host:port:user:pass) vào ô Proxy rồi bấm lại.",
             )
             return
+        invite = self._sync_invite_code()
         self.running = True
         self.stop_event.clear()
         self._set_controls_running(True)
@@ -539,7 +605,9 @@ class MuseAIHelper(tk.Tk):
             "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
         )
         threading.Thread(
-            target=self._run_loop, args=(total, pool, per_proxy), daemon=True
+            target=self._run_loop,
+            args=(total, pool, per_proxy, invite),
+            daemon=True,
         ).start()
 
     def _stop_registration(self):
@@ -558,7 +626,7 @@ class MuseAIHelper(tk.Tk):
                     pass
         self.destroy()
 
-    def _run_loop(self, total, pool, per_proxy):
+    def _run_loop(self, total, pool, per_proxy, invite):
         helper = Path(__file__).with_name("browser_helper.py")
         success = 0
         fail = 0
@@ -605,12 +673,26 @@ class MuseAIHelper(tk.Tk):
                     f"[{index}/{total}] Đã tạo mail {address} — bắt đầu đăng ký.",
                 )
             )
-            helper_ok, burned = self._run_helper(
+            helper_ok, burned, cookie = self._run_helper(
                 helper, address, index, total
             )
             if helper_ok:
                 try:
-                    _append_spreadsheet_row(address, muse_password)
+                    mail_password = ""
+                    try:
+                        mail_password = (
+                            keyring.get_password(MAIL_SERVICE, address)
+                            or ""
+                        )
+                    except Exception:
+                        mail_password = ""
+                    _append_spreadsheet_row(
+                        address,
+                        muse_password,
+                        mail_password=mail_password,
+                        cookie=cookie,
+                        invite=invite,
+                    )
                     success += 1
                     self.events.put(
                         (
@@ -672,9 +754,9 @@ class MuseAIHelper(tk.Tk):
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False
+            return False, False, ""
         self.helper_process = process
-        signals = {"burn": False}
+        signals = {"burn": False, "cookie": ""}
 
         def forward_output():
             for line in process.stdout:
@@ -682,6 +764,11 @@ class MuseAIHelper(tk.Tk):
                 if line:
                     if _line_burns_proxy(line):
                         signals["burn"] = True
+                    cookie = _session_cookie_from_line(line)
+                    if cookie is not None:
+                        # Cookie phiên chỉ đi vào sheet, không vào log.
+                        signals["cookie"] = cookie
+                        continue
                     self.events.put(("log", f"[{index}/{total}] {line}"))
 
         reader = threading.Thread(target=forward_output, daemon=True)
@@ -711,7 +798,7 @@ class MuseAIHelper(tk.Tk):
         self.helper_process = None
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"]
+        ), signals["burn"], signals["cookie"]
 
     def _process_events(self):
         try:

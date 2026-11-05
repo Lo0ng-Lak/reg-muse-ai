@@ -313,6 +313,96 @@ def _fill_card_form(page, card):
     _click_when_ready(page, confirm, "Confirm")
 
 
+def _in_muse_interface(page):
+    """Đã vào giao diện Muse chưa (URL rời khỏi luồng đăng ký/xác minh)."""
+    try:
+        url = page.url.lower()
+    except Exception:
+        return False
+    if "muse.ai" not in url:
+        return False
+    return not any(
+        part in url
+        for part in (
+            "verification",
+            "signup",
+            "sign-up",
+            "checkpoint",
+            "age-verification",
+        )
+    )
+
+
+def _confirm_final_step(page, timeout_seconds=30):
+    """Bấm nút xác nhận cuối sau bước thẻ để vào giao diện Muse.
+
+    Sau khi thẻ được chấp nhận, Muse.ai còn một màn hình xác nhận
+    với nút Confirm (đôi khi là Continue). Dò tối đa
+    timeout_seconds: thấy nút thì bấm; đã ở trong giao diện rồi —
+    hoặc hết giờ mà không thấy nút — thì thôi, bước lấy cookie
+    vẫn chạy tiếp.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return
+        if _in_muse_interface(page):
+            return
+        for name in ("Confirm", "Continue"):
+            button = page.get_by_role("button", name=name, exact=True)
+            try:
+                if (
+                    button.count()
+                    and button.first.is_visible()
+                    and button.first.is_enabled()
+                ):
+                    _click_when_ready(page, button, name)
+                    _status("Đã bấm xác nhận cuối sau bước thẻ.")
+                    return
+            except Exception:
+                pass
+        page.wait_for_timeout(1000)
+
+
+def _wait_for_muse_interface(page, timeout_seconds=30):
+    """Chờ URL rời khỏi luồng xác minh rồi thêm một nhịp ổn định."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return
+        if _in_muse_interface(page):
+            break
+        page.wait_for_timeout(1000)
+    page.wait_for_timeout(1500)
+
+
+def _session_cookie_json(page):
+    """Cookie phiên đăng nhập hiện tại, dạng JSON một dòng.
+
+    Chỉ lấy cookie thuộc muse.ai / meta.com (không có thì lấy tất
+    cả). Dòng SESSION_COOKIE được ứng dụng chính chặn lại để ghi
+    vào sheet — không hiển thị trong log.
+    """
+    try:
+        cookies = page.context.cookies()
+    except Exception:
+        return ""
+    selected = [
+        cookie
+        for cookie in cookies
+        if any(
+            domain in (cookie.get("domain") or "")
+            for domain in ("muse.ai", "meta.com")
+        )
+    ] or cookies
+    if not selected:
+        return ""
+    try:
+        return json.dumps(selected, ensure_ascii=True)
+    except (TypeError, ValueError):
+        return ""
+
+
 def _locator_visible(locator):
     try:
         return locator.count() > 0 and locator.first.is_visible()
@@ -544,7 +634,25 @@ def main():
                     f"(kết quả chờ: {card_outcome}) — tài khoản "
                     "không được lưu."
                 )
-            _status("Đã qua bước nhập thẻ — tài khoản được lưu.")
+            _status(
+                "Đã qua bước nhập thẻ — xử lý bước xác nhận cuối "
+                "để vào giao diện Muse..."
+            )
+            _confirm_final_step(page)
+            _wait_for_muse_interface(page)
+            cookie_json = _session_cookie_json(page)
+            if cookie_json:
+                _status(f"SESSION_COOKIE: {cookie_json}")
+                _status(
+                    "Đã vào giao diện Muse, đã lấy cookie phiên "
+                    "đăng nhập — tài khoản được lưu."
+                )
+            else:
+                _status(
+                    "Đã qua bước thẻ nhưng không lấy được cookie "
+                    "phiên đăng nhập nào — tài khoản vẫn được lưu, "
+                    "cột cookie sẽ trống."
+                )
             _status("RESULT: SUCCESS")
         else:
             page.wait_for_event("close")
