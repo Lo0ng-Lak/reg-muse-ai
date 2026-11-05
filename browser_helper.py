@@ -926,62 +926,111 @@ _SCRATCH_RECT_JS = """() => {
         );
     });
     if (!hits.length) return null;
-    hits.sort((a, b) => {
-        const ra = a.getBoundingClientRect();
-        const rb = b.getBoundingClientRect();
-        return ra.width * ra.height - rb.width * rb.height;
+    const rectOf = (el) => el.getBoundingClientRect();
+    // Ô cào thật là một thanh ngang (rộng 150-650, cao 24-90);
+    // phần tử khớp nhỏ nhất chỉ là mẩu chữ bên trong — cào
+    // đúng mẩu chữ thì phủ không đủ diện tích, mã không hiện.
+    const bars = hits.filter((el) => {
+        const r = rectOf(el);
+        return r.width >= 150 && r.width <= 650 &&
+            r.height >= 24 && r.height <= 90;
     });
-    const r = hits[0].getBoundingClientRect();
+    const pool = bars.length ? bars : hits;
+    pool.sort((a, b) => {
+        const ra = rectOf(a);
+        const rb = rectOf(b);
+        return bars.length
+            ? rb.width * rb.height - ra.width * ra.height
+            : ra.width * ra.height - rb.width * rb.height;
+    });
+    const r = rectOf(pool[0]);
     return {x: r.x, y: r.y, width: r.width, height: r.height};
 }"""
 
 
 def _scratch_box(page, box):
-    """Kéo chuột cào qua ô "Scratch to reveal" (vài đường ngang)."""
+    """Nhấn giữ chuột và quét zíc-zắc phủ kín ô cào, như tay người.
+
+    Lớp phủ chỉ bay khi đủ diện tích bị quét qua: nhấn xuống,
+    giữ một nhịp, rồi quét ngang từng hàng từ trên xuống dưới
+    (đổi chiều mỗi hàng), chậm rãi, sau đó mới nhả chuột.
+    """
     try:
-        left = box["x"] + 4
-        right = box["x"] + box["width"] - 4
-        for fraction in (0.5, 0.3, 0.7):
-            y = box["y"] + box["height"] * fraction
-            page.mouse.move(left, y)
-            page.mouse.down()
-            page.mouse.move(right, y, steps=20)
-            page.mouse.up()
-        page.wait_for_timeout(700)
+        left = box["x"] + 3
+        right = box["x"] + box["width"] - 3
+        top = box["y"] + 3
+        bottom = box["y"] + box["height"] - 3
+        rows = max(3, int((bottom - top) // 7) + 1)
+        page.mouse.move(left, (top + bottom) / 2)
+        page.mouse.down()
+        page.wait_for_timeout(150)
+        for index in range(rows):
+            if rows > 1:
+                y = top + (bottom - top) * index / (rows - 1)
+            else:
+                y = (top + bottom) / 2
+            if index % 2 == 0:
+                page.mouse.move(left, y, steps=5)
+                page.mouse.move(right, y, steps=30)
+            else:
+                page.mouse.move(right, y, steps=5)
+                page.mouse.move(left, y, steps=30)
+        page.wait_for_timeout(150)
+        page.mouse.up()
+        page.wait_for_timeout(600)
         return True
     except Exception:
         return False
 
 
+def _scan_once(page):
+    """Quét panel Mời một lần, trả mã 6 ký tự nếu thấy."""
+    try:
+        found = page.evaluate(_HARVEST_CODE_JS) or ""
+    except Exception:
+        found = ""
+    found = str(found).strip().upper()
+    return found if re.fullmatch(r"[A-Z0-9]{6}", found) else ""
+
+
 def _prepare_panel(page):
-    """Chờ panel Invite sẵn sàng, cào lớp phủ che mã nếu có.
+    """Chờ panel Invite sẵn sàng và cào sạch lớp phủ che mã.
 
     Thứ tự đúng theo giao diện thật: mã của tài khoản mới nằm
     sau lớp "Scratch to reveal" — phải cào xong mới bấm Copy
-    referral link lấy mã được. Trong lúc chờ lớp cào hiện (tối
-    đa 10 giây), nếu quét thấy mã luôn (tài khoản mã đã hiện
-    sẵn) thì trả mã ngay.
+    referral link lấy mã được. Mỗi lần cào xong đều quét lại
+    kiểm tra; mã chưa hiện thì cào tiếp (tối đa 3 lần). Tài
+    khoản mã đã hiện sẵn thì quét thấy ngay từ đầu.
     """
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 25
+    scratches = 0
     while time.monotonic() < deadline:
         if page.is_closed():
             return ""
-        try:
-            found = page.evaluate(_HARVEST_CODE_JS) or ""
-        except Exception:
-            found = ""
-        found = str(found).strip().upper()
-        if re.fullmatch(r"[A-Z0-9]{6}", found):
-            return found
+        code = _scan_once(page)
+        if code:
+            return code
         try:
             box = page.evaluate(_SCRATCH_RECT_JS)
         except Exception:
             box = None
-        if box:
-            if _scratch_box(page, box):
-                _status("Đã cào lớp phủ 'Scratch to reveal' che mã mời.")
+        if box is None:
+            if scratches:
+                # Lớp phủ đã biến mất: chờ chữ mã hiện hẳn rồi
+                # quét nốt một lần; phần còn lại để bước copy lo.
+                page.wait_for_timeout(800)
+                return _scan_once(page)
+            page.wait_for_timeout(700)
+            continue
+        if scratches >= 3:
             return ""
-        page.wait_for_timeout(700)
+        if _scratch_box(page, box):
+            scratches += 1
+            _status(
+                f"Đã quét cào lớp phủ che mã mời (lần {scratches})."
+            )
+        else:
+            page.wait_for_timeout(700)
     return ""
 
 
@@ -991,13 +1040,9 @@ def _scan_panel_code(page, seconds):
     while time.monotonic() < deadline:
         if page.is_closed():
             return ""
-        try:
-            found = page.evaluate(_HARVEST_CODE_JS) or ""
-        except Exception:
-            found = ""
-        found = str(found).strip().upper()
-        if re.fullmatch(r"[A-Z0-9]{6}", found):
-            return found
+        code = _scan_once(page)
+        if code:
+            return code
         page.wait_for_timeout(700)
     return ""
 
