@@ -23,6 +23,8 @@ SPREADSHEET_FILE = (
 )
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
 MUSE_SERVICE = "MuseAIHelper:muse.ai"
+CARD_SERVICE = "MuseAIHelper:card"
+CARD_FIELDS = ("number", "expiry", "cvv", "zip")
 HELPER_TIMEOUT_SECONDS = 900
 PAUSE_BETWEEN_ACCOUNTS_SECONDS = 3
 
@@ -152,6 +154,32 @@ def _append_spreadsheet_row(email, password):
             temporary_file.unlink()
 
 
+def _load_card_from_keyring():
+    """Thẻ người dùng đã lưu (nếu có) — chỉ đọc từ Credential Manager."""
+    card = {}
+    for field in CARD_FIELDS:
+        try:
+            value = keyring.get_password(CARD_SERVICE, field)
+        except Exception:
+            value = None
+        if value:
+            card[field] = value
+    return card if card.get("number") else {}
+
+
+def _save_card_to_keyring(card):
+    for field in CARD_FIELDS:
+        keyring.set_password(CARD_SERVICE, field, card[field])
+
+
+def _delete_card_from_keyring():
+    for field in CARD_FIELDS:
+        try:
+            keyring.delete_password(CARD_SERVICE, field)
+        except Exception:
+            pass
+
+
 class MuseAIHelper(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -170,12 +198,16 @@ class MuseAIHelper(tk.Tk):
             "Sẵn sàng. Nhập số tài khoản rồi bấm 'Bắt đầu đăng ký'. "
             "Chỉ tài khoản đăng ký thành công mới được lưu vào sheet Excel."
         )
+        if _load_card_from_keyring():
+            self._append_log(
+                "Đã có thẻ lưu sẵn — tool sẽ tự điền ở bước xác minh thẻ."
+            )
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(4, weight=1)
+        root.rowconfigure(5, weight=1)
 
         ttk.Label(
             root,
@@ -215,8 +247,39 @@ class MuseAIHelper(tk.Tk):
         if saved_proxy:
             self.proxy_entry.insert(0, saved_proxy.splitlines()[0].strip())
 
+        card_row = ttk.Frame(root)
+        card_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(card_row, text="Thẻ:").pack(side="left")
+        self.card_number_entry = ttk.Entry(card_row, width=24)
+        self.card_number_entry.pack(side="left", padx=(6, 8))
+        ttk.Label(card_row, text="Hạn:").pack(side="left")
+        self.card_expiry_entry = ttk.Entry(card_row, width=7)
+        self.card_expiry_entry.pack(side="left", padx=(4, 8))
+        ttk.Label(card_row, text="CVV:").pack(side="left")
+        self.card_cvv_entry = ttk.Entry(card_row, width=5)
+        self.card_cvv_entry.pack(side="left", padx=(4, 8))
+        ttk.Label(card_row, text="ZIP:").pack(side="left")
+        self.card_zip_entry = ttk.Entry(card_row, width=7)
+        self.card_zip_entry.pack(side="left", padx=(4, 10))
+        self.save_card_button = ttk.Button(
+            card_row, text="Lưu thẻ", command=self._save_card
+        )
+        self.save_card_button.pack(side="left")
+        self.delete_card_button = ttk.Button(
+            card_row, text="Xoá thẻ", command=self._delete_card
+        )
+        self.delete_card_button.pack(side="left", padx=(6, 0))
+        saved_card = _load_card_from_keyring()
+        if saved_card:
+            self.card_number_entry.insert(0, saved_card.get("number", ""))
+            self.card_expiry_entry.insert(0, saved_card.get("expiry", ""))
+            self.card_cvv_entry.insert(0, saved_card.get("cvv", ""))
+            self.card_zip_entry.insert(0, saved_card.get("zip", ""))
+        else:
+            self.card_zip_entry.insert(0, "10001")
+
         controls = ttk.Frame(root)
-        controls.grid(row=3, column=0, sticky="ew")
+        controls.grid(row=4, column=0, sticky="ew")
         ttk.Label(controls, text="Số tài khoản:").pack(side="left")
         self.count_var = tk.IntVar(value=5)
         self.count_spin = ttk.Spinbox(
@@ -243,7 +306,7 @@ class MuseAIHelper(tk.Tk):
         self.open_sheet_button.pack(side="right")
 
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=5, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -256,7 +319,69 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=5, column=0, sticky="ew", pady=(10, 0)
+            row=6, column=0, sticky="ew", pady=(10, 0)
+        )
+
+    def _save_card(self):
+        """Lưu thẻ vào Windows Credential Manager (không ghi ra file).
+
+        Chỉ giữ trong khoá bảo mật của Windows, cùng chỗ với mật
+        khẩu mail.tm; không chữ số nào của thẻ được in ra log.
+        """
+        def digits(text):
+            return "".join(ch for ch in text if ch.isdigit())
+
+        number = digits(self.card_number_entry.get())
+        expiry_digits = digits(self.card_expiry_entry.get())
+        cvv = digits(self.card_cvv_entry.get())
+        zip_code = digits(self.card_zip_entry.get()) or "10001"
+        valid = (
+            12 <= len(number) <= 19
+            and len(expiry_digits) == 4
+            and 1 <= int(expiry_digits[:2]) <= 12
+            and len(cvv) in (3, 4)
+            and len(zip_code) == 5
+        )
+        if not valid:
+            messagebox.showwarning(
+                "Thẻ chưa hợp lệ",
+                "Kiểm tra lại: số thẻ 12–19 chữ số, hạn dạng MM/YY, "
+                "CVV 3–4 chữ số, ZIP 5 chữ số.",
+            )
+            return
+        card = {
+            "number": number,
+            "expiry": f"{expiry_digits[:2]}/{expiry_digits[2:]}",
+            "cvv": cvv,
+            "zip": zip_code,
+        }
+        try:
+            _save_card_to_keyring(card)
+        except Exception as error:
+            messagebox.showerror(
+                "Không lưu được thẻ",
+                f"Không ghi được vào Windows Credential Manager: {error}",
+            )
+            return
+        self.card_zip_entry.delete(0, "end")
+        self.card_zip_entry.insert(0, zip_code)
+        self._append_log(
+            "Đã lưu thẻ vào Windows Credential Manager — tool sẽ tự "
+            "điền ở bước xác minh thẻ, không cần gõ lại."
+        )
+
+    def _delete_card(self):
+        _delete_card_from_keyring()
+        for entry in (
+            self.card_number_entry,
+            self.card_expiry_entry,
+            self.card_cvv_entry,
+            self.card_zip_entry,
+        ):
+            entry.delete(0, "end")
+        self.card_zip_entry.insert(0, "10001")
+        self._append_log(
+            "Đã xoá thẻ đã lưu — bước thẻ sẽ chờ bạn nhập tay."
         )
 
     def _sync_proxy_file(self):
@@ -289,6 +414,15 @@ class MuseAIHelper(tk.Tk):
         self.start_button.configure(state="disabled" if running else "normal")
         self.count_spin.configure(state="disabled" if running else "normal")
         self.proxy_entry.configure(state="disabled" if running else "normal")
+        for widget in (
+            self.card_number_entry,
+            self.card_expiry_entry,
+            self.card_cvv_entry,
+            self.card_zip_entry,
+            self.save_card_button,
+            self.delete_card_button,
+        ):
+            widget.configure(state="disabled" if running else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
         self.open_sheet_button.configure(
             state=(

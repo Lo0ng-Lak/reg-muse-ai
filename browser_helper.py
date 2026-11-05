@@ -29,6 +29,7 @@ for _stream in (sys.stdout, sys.stderr):
 SIGNUP_URL = "https://muse.ai/"
 API_BASE = "https://api.mail.tm"
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
+CARD_SERVICE = "MuseAIHelper:card"
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
 BUTTON_TIMEOUT_MS = 90000
@@ -325,6 +326,61 @@ def _ensure_profile_form(page):
         )
 
 
+def _saved_card():
+    """Thẻ người dùng đã lưu trong ứng dụng (Windows Credential Manager)."""
+    card = {}
+    for field in ("number", "expiry", "cvv", "zip"):
+        try:
+            value = keyring.get_password(CARD_SERVICE, field)
+        except Exception:
+            value = None
+        if value:
+            card[field] = value
+    return card if card.get("number") else {}
+
+
+def _fill_card_form(page, card):
+    """Điền thẻ đã lưu vào form "Confirm your age" rồi bấm Confirm.
+
+    Không chữ số nào của thẻ được in ra log. Điền xong đọc lại số
+    thẻ trong form để đối chiếu (form tự chèn khoảng trắng khi
+    format); lệch là dừng, không bấm Confirm.
+    """
+    def digits(text):
+        return re.sub(r"\D", "", str(text or ""))
+
+    number = digits(card.get("number"))
+    expiry_digits = digits(card.get("expiry"))
+    expiry = (
+        f"{expiry_digits[:2]}/{expiry_digits[2:]}"
+        if len(expiry_digits) == 4
+        else str(card.get("expiry", "")).strip()
+    )
+    cvv = digits(card.get("cvv"))
+    zip_code = digits(card.get("zip")) or "10001"
+    if not number or not expiry or not cvv:
+        raise RuntimeError("Thẻ đã lưu thiếu thông tin.")
+    _status("Đã tới bước thẻ — đang điền thẻ đã lưu...")
+    for placeholder, value in (
+        ("Card number", number),
+        ("MM/YY", expiry),
+        ("CVV", cvv),
+        ("ZIP code", zip_code),
+    ):
+        field = page.get_by_placeholder(placeholder).first
+        field.wait_for(state="visible", timeout=15000)
+        field.fill(value)
+        page.wait_for_timeout(400)
+    entered = digits(
+        page.get_by_placeholder("Card number").first.input_value()
+    )
+    if entered != number:
+        raise RuntimeError("Số thẻ trong form không khớp với thẻ đã lưu.")
+    _status("Đã điền thẻ — bấm Confirm.")
+    confirm = page.get_by_role("button", name="Confirm", exact=True)
+    _click_when_ready(page, confirm, "Confirm")
+
+
 def _locator_visible(locator):
     try:
         return locator.count() > 0 and locator.first.is_visible()
@@ -488,8 +544,8 @@ def main():
             if outcome == "waitlist":
                 raise RuntimeError(
                     "Ra màn hình 'Join the waitlist' — Muse chưa khả "
-                    "dụng ở khu vực của IP hiện tại. Hãy chọn location "
-                    "VPN ở nước được hỗ trợ (ví dụ Mỹ) rồi chạy lại."
+                    "dụng ở IP thoát hiện tại. Hãy đổi sang proxy US "
+                    "khác rồi chạy lại."
                 )
             if outcome != "card":
                 raise RuntimeError(
@@ -497,12 +553,29 @@ def main():
                     "waitlist — bước tiếp theo chưa rõ, hãy chụp màn "
                     "hình gửi lại để bổ sung vào tool."
                 )
-            _status(
-                "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US trong "
-                "cửa sổ Chromium. Tool chờ tối đa 4 phút; thẻ được "
-                "chấp nhận thì mới lưu tài khoản."
-            )
-            card_outcome = _wait_for_card_step_done(page)
+            card = _saved_card()
+            auto_filled = False
+            if card:
+                try:
+                    _fill_card_form(page, card)
+                    auto_filled = True
+                except Exception as error:
+                    _status(
+                        "Tự điền thẻ không xong ("
+                        + _short_error(error)
+                        + ") — chuyển sang chờ bạn nhập tay."
+                    )
+            if auto_filled:
+                card_outcome = _wait_for_card_step_done(
+                    page, timeout_seconds=120
+                )
+            else:
+                _status(
+                    "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US "
+                    "trong cửa sổ Chromium. Tool chờ tối đa 4 phút; "
+                    "thẻ được chấp nhận thì mới lưu tài khoản."
+                )
+                card_outcome = _wait_for_card_step_done(page)
             if card_outcome != "done":
                 raise RuntimeError(
                     "Chưa hoàn tất bước nhập thẻ "

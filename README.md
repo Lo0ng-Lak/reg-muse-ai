@@ -49,12 +49,14 @@ the app then, with no further clicks:
    random birthday with an age always over 18, then clicks **Confirm**.
 5. Watches the screen after the profile form. A "Join the waitlist" screen
    means Muse is unavailable in the proxy exit's region and the attempt
-   fails. On the card-entry screen the batch pauses for up to four minutes:
-   you enter the card and a US ZIP in the Chromium window yourself — the
-   tool never receives, stores, or types card details. Only after the card
-   step is accepted are the account's email and password appended to
-   `accounts.xlsx` in the app's local Windows data folder; failed attempts
-   are only written to the on-screen log, never to the sheet.
+   fails. On the card-entry screen ("Confirm your age"), if you have saved
+   your card in the app (see below) the tool fills the card form and
+   confirms for you; otherwise the batch pauses for up to four minutes for
+   you to type the card and a US ZIP in the Chromium window yourself. Only
+   after the card step is accepted are the account's email and password
+   appended to `accounts.xlsx` in the app's local Windows data folder;
+   failed attempts are only written to the on-screen log, never to the
+   sheet.
 
 The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
@@ -74,6 +76,18 @@ because rotating proxies can hand out a different exit for each session.
 mail.tm traffic stays on the machine's direct connection. The log only ever
 shows the proxy's host:port, never its password. `proxy.txt` is listed in
 `.gitignore`, so it is never committed — keep it that way.
+
+### Your card: entered once, kept in Windows Credential Manager
+
+The **Thẻ** row in the window takes a card number, expiry (MM/YY), CVV and
+ZIP. **Lưu thẻ** stores them in Windows Credential Manager — the same
+OS-protected store the app already uses for its passwords. The card is
+never written to a file, never added to the Excel sheet, and no digit of
+it ever appears in the on-screen log. At the card step the signup browser
+reads it back from Credential Manager, fills the form, verifies the number
+landed intact, and clicks Confirm; if the fill fails for any reason, the
+run falls back to waiting for manual entry. **Xoá thẻ** removes the saved
+card. Leave the ZIP empty to use 10001.
 
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
 The Excel sheet contains the Muse.ai passwords in readable form, so protect
