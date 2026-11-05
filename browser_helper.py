@@ -856,10 +856,11 @@ def _invite_code_from_text(text):
 def _harvest_via_copy_link(page):
     """Bấm "Copy referral link" rồi bóc mã khỏi nội dung vừa copy.
 
-    Đây là đường lấy mã chính: bấm Invite xong bấm nút copy là
-    nội dung copy chứa mã (tin chia sẻ "Mã: XXXXXX" hoặc link
-    chứa mã). Panel mở chậm nên chờ nút copy xuất hiện tới 10
-    giây thay vì thử đúng một lần.
+    Đường lấy mã chính — nhưng chỉ sau khi đã cào lớp phủ
+    "Scratch to reveal" (chưa cào thì copy không ra mã). Nội
+    dung copy chứa mã trong tin chia sẻ "Mã: XXXXXX" hoặc
+    trong link. Panel mở chậm nên chờ nút copy xuất hiện tới
+    10 giây thay vì thử đúng một lần.
     """
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -909,19 +910,8 @@ _SCRATCH_RECT_JS = """() => {
 }"""
 
 
-def _scratch_to_reveal(page):
-    """Cào lớp phủ "Scratch to reveal" che mã mời bằng chuột thật.
-
-    Panel Invite của tài khoản mới che mã sau một lớp phải kéo
-    chuột qua mới hiện — y như người dùng cào tay. Kéo vài
-    đường ngang qua ô đó; cào xong mã hiện thành chữ thường.
-    """
-    try:
-        box = page.evaluate(_SCRATCH_RECT_JS)
-    except Exception:
-        box = None
-    if not box:
-        return False
+def _scratch_box(page, box):
+    """Kéo chuột cào qua ô "Scratch to reveal" (vài đường ngang)."""
     try:
         left = box["x"] + 4
         right = box["x"] + box["width"] - 4
@@ -935,6 +925,38 @@ def _scratch_to_reveal(page):
         return True
     except Exception:
         return False
+
+
+def _prepare_panel(page):
+    """Chờ panel Invite sẵn sàng, cào lớp phủ che mã nếu có.
+
+    Thứ tự đúng theo giao diện thật: mã của tài khoản mới nằm
+    sau lớp "Scratch to reveal" — phải cào xong mới bấm Copy
+    referral link lấy mã được. Trong lúc chờ lớp cào hiện (tối
+    đa 10 giây), nếu quét thấy mã luôn (tài khoản mã đã hiện
+    sẵn) thì trả mã ngay.
+    """
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return ""
+        try:
+            found = page.evaluate(_HARVEST_CODE_JS) or ""
+        except Exception:
+            found = ""
+        found = str(found).strip().upper()
+        if re.fullmatch(r"[A-Z0-9]{6}", found):
+            return found
+        try:
+            box = page.evaluate(_SCRATCH_RECT_JS)
+        except Exception:
+            box = None
+        if box:
+            if _scratch_box(page, box):
+                _status("Đã cào lớp phủ 'Scratch to reveal' che mã mời.")
+            return ""
+        page.wait_for_timeout(700)
+    return ""
 
 
 def _scan_panel_code(page, seconds):
@@ -957,10 +979,10 @@ def _scan_panel_code(page, seconds):
 def _harvest_invite_code(page):
     """Lấy mã mời của chính tài khoản này từ panel "Mời bạn bè".
 
-    Bấm nút Mời/Invite ở góc phải trên, rồi bấm "Copy referral
-    link" và bóc mã khỏi nội dung copy — đó là đường chính.
-    Dự phòng khi copy không ra mã: quét chữ trong panel, và
-    cào lớp "Scratch to reveal" rồi quét lại. Không lấy được
+    Bấm nút Mời/Invite ở góc phải trên → cào lớp "Scratch to
+    reveal" che mã (bắt buộc trước, chưa cào thì copy không
+    ra mã) → bấm "Copy referral link" và bóc mã khỏi nội dung
+    copy. Dự phòng cuối: quét chữ trong panel. Không lấy được
     thì trả "" — tài khoản vẫn được lưu bình thường.
     """
     code = ""
@@ -991,15 +1013,12 @@ def _harvest_invite_code(page):
         if button is None:
             return ""
         button.click(timeout=5000)
-        # Đường chính theo đúng thao tác tay: bấm Copy referral
-        # link là ra mã, không cần bôi chọn gì cả.
-        code = _harvest_via_copy_link(page)
+        # Cào lớp phủ trước (hoặc nhận mã ngay nếu đã hiện sẵn),
+        # rồi mới copy — chưa cào thì copy không ra mã.
+        code = _prepare_panel(page)
         if not code:
-            code = _scan_panel_code(page, 4)
-        if not code and _scratch_to_reveal(page):
-            # Mã bị che sau lớp "Scratch to reveal": cào xong mã
-            # hiện thành chữ — quét lại panel.
-            _status("Mã mời bị che — đã cào lớp phủ, quét lại panel.")
+            code = _harvest_via_copy_link(page)
+        if not code:
             code = _scan_panel_code(page, 6)
     except Exception:
         return ""
