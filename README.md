@@ -35,8 +35,9 @@ Paste a proxy into the **Proxy** field (required — see below), set the
 number of accounts (1–100), and click **Bắt đầu đăng ký**. For each account
 the app then, with no further clicks:
 
-1. Creates a random mail.tm address and a random Muse.ai password, and saves
-   both passwords to Windows Credential Manager.
+1. Creates a random mail.tm address and saves the mailbox password to
+   Windows Credential Manager. (There is no Muse.ai password — signup
+   is email plus a one-time code.)
 2. Opens a dedicated Chromium window **through the proxy**, first checks the
    exit IP it actually got, and only continues if that IP is in the US.
    It then fills the email into the visible "Mobile number or email" field
@@ -61,12 +62,15 @@ the app then, with no further clicks:
    button (sometimes Confirm/Continue): the tool clicks it — repeatedly
    if several such screens chain together — waits to land inside the
    Muse interface, and reads the session cookies. A successful row in `accounts.xlsx`
-   therefore carries: creation time, email, the Muse.ai password, the
-   mail.tm mailbox password, the session cookie (JSON, captured from the
-   browser — it is passed from the helper to the app out of band and is
-   never printed in the log), and the account's own invite code (below).
-   Older sheets with only the first three columns gain the new headers
-   automatically on the next successful row.
+   therefore carries: creation time, email, the mail.tm mailbox
+   password (the only password there is), the session cookie in the
+   browser's header form (`name=value; name=value; …`, covering the
+   muse.ai, meta.com and facebook.com cookies — passed from the helper
+   to the app out of band and never printed in the log), and the
+   account's own invite code (below). Sheets written by older versions
+   are migrated on the next successful row: a fictional "Muse.ai
+   password" column, if present, is dropped and the remaining columns
+   shifted left; missing headers are filled in.
 7. Invite codes form a chain. Once inside the Muse interface, each
    account first redeems the *previous* account's invite code — the app
    passes it to the helper in `redeem.txt`, and the helper follows the
@@ -128,8 +132,7 @@ run falls back to waiting for manual entry. **Xoá thẻ** removes the saved
 card. Leave the ZIP empty to use 10001.
 
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
-The Excel sheet contains the Muse.ai passwords in readable form, so protect
-the file and do not share or sync it to an untrusted location. The Muse.ai
-password is not automatically entered because the current Muse.ai form only
-asks for a phone number or email. The app does not bypass CAPTCHA or other
+The Excel sheet contains mailbox passwords and live session cookies in
+readable form, so protect the file and do not share or sync it to an
+untrusted location. The app does not bypass CAPTCHA or other
 site controls.

@@ -22,25 +22,10 @@ SPREADSHEET_FILE = (
     Path.home() / "AppData" / "Local" / "MuseAIHelper" / "accounts.xlsx"
 )
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
-MUSE_SERVICE = "MuseAIHelper:muse.ai"
 CARD_SERVICE = "MuseAIHelper:card"
 CARD_FIELDS = ("number", "expiry", "cvv", "zip")
 HELPER_TIMEOUT_SECONDS = 900
 PAUSE_BETWEEN_ACCOUNTS_SECONDS = 1
-
-
-def _generate_password():
-    groups = (
-        "abcdefghijklmnopqrstuvwxyz",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "0123456789",
-        "!@#$%_-",
-    )
-    characters = [secrets.choice(group) for group in groups]
-    alphabet = "".join(groups)
-    characters.extend(secrets.choice(alphabet) for _ in range(20 - len(characters)))
-    secrets.SystemRandom().shuffle(characters)
-    return "".join(characters)
 
 
 def _request(method, path, payload=None, token=None):
@@ -75,10 +60,12 @@ def _request(method, path, payload=None, token=None):
 
 
 def _create_mailbox_account():
-    """Tạo một hộp thư mail.tm mới và lưu cả hai mật khẩu vào keyring.
+    """Tạo một hộp thư mail.tm mới và lưu mật khẩu hộp thư vào keyring.
 
-    Trả về (address, muse_password). Mật khẩu hộp thư chỉ sống trong
-    keyring — browser_helper.py tự lấy lại từ đó khi chạy.
+    Đăng ký Muse.ai bằng mail tạm + mã OTP — không hề có mật
+    khẩu Muse. Mật khẩu duy nhất là của hộp thư mail.tm; nó chỉ
+    sống trong keyring, browser_helper.py tự lấy lại khi chạy.
+    Trả về địa chỉ hộp thư.
     """
     domains = []
     last_error = None
@@ -116,40 +103,53 @@ def _create_mailbox_account():
         except RuntimeError as error:
             last_error = error
             continue
-        muse_password = _generate_password()
         try:
             keyring.set_password(MAIL_SERVICE, address, mailbox_password)
-            keyring.set_password(MUSE_SERVICE, address, muse_password)
         except Exception as error:
             raise RuntimeError(
                 "Hộp thư đã tạo nhưng không lưu được mật khẩu vào "
                 f"Windows Credential Manager: {error}"
             ) from error
-        return address, muse_password
+        return address
     raise last_error or RuntimeError("Không tạo được hộp thư mail.tm.")
 
 
 SPREADSHEET_HEADERS = [
     "Thời gian tạo",
     "Email Muse.ai",
-    "Mật khẩu Muse.ai",
     "Mật khẩu mail.tm",
     "Cookie phiên đăng nhập",
     "Mã mời",
 ]
 
 
-def _append_spreadsheet_row(
-    email, password, mail_password="", cookie="", invite=""
-):
+def _migrate_legacy_sheet(sheet):
+    """Bỏ cột "Mật khẩu Muse.ai" khỏi sheet cũ.
+
+    Cột đó là mật khẩu bịa từ thiết kế đầu — đăng ký bằng mail
+    tạm + OTP nên không tồn tại mật khẩu Muse. Nếu hàng tiêu
+    đề còn cột này ở vị trí 3, xoá nó khỏi cả tiêu đề lẫn mọi
+    dòng dữ liệu (các cột sau dịch trái một ô).
+    """
+    if sheet.cell(row=1, column=3).value != "Mật khẩu Muse.ai":
+        return
+    for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row):
+        values = [cell.value for cell in row]
+        migrated = values[:2] + values[3:]
+        for index, cell in enumerate(row):
+            cell.value = migrated[index] if index < len(migrated) else None
+
+
+def _append_spreadsheet_row(email, mail_password="", cookie="", invite=""):
     temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
     try:
         SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
         if SPREADSHEET_FILE.exists():
             workbook = load_workbook(SPREADSHEET_FILE)
             sheet = workbook.active
-            # Sheet cũ chỉ có 3 cột: bổ sung tiêu đề cho các cột mới
-            # ở hàng đầu (chỉ ghi vào ô đang trống, không đè dữ liệu).
+            _migrate_legacy_sheet(sheet)
+            # Bổ sung tiêu đề cho các cột còn thiếu (sheet đời đầu
+            # ít cột hơn) — chỉ ghi vào ô đang trống.
             for column, header in enumerate(SPREADSHEET_HEADERS, start=1):
                 cell = sheet.cell(row=1, column=column)
                 if not cell.value:
@@ -164,7 +164,6 @@ def _append_spreadsheet_row(
             [
                 datetime.now().astimezone().isoformat(timespec="seconds"),
                 email,
-                password,
                 mail_password,
                 cookie,
                 invite,
@@ -682,7 +681,7 @@ class MuseAIHelper(tk.Tk):
                 )
             )
             try:
-                address, muse_password = _create_mailbox_account()
+                address = _create_mailbox_account()
             except Exception as error:
                 fail += 1
                 self.events.put(
@@ -715,7 +714,6 @@ class MuseAIHelper(tk.Tk):
                         mail_password = ""
                     _append_spreadsheet_row(
                         address,
-                        muse_password,
                         mail_password=mail_password,
                         cookie=cookie,
                         invite=own_invite,

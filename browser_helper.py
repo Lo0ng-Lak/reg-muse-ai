@@ -400,31 +400,32 @@ def _wait_for_muse_interface(page, timeout_seconds=30):
     page.wait_for_timeout(1500)
 
 
-def _session_cookie_json(page):
-    """Cookie phiên đăng nhập hiện tại, dạng JSON một dòng.
+def _session_cookie_header(page):
+    """Cookie phiên đăng nhập, dạng chuỗi "name=value; name=value".
 
-    Chỉ lấy cookie thuộc muse.ai / meta.com (không có thì lấy tất
-    cả). Dòng SESSION_COOKIE được ứng dụng chính chặn lại để ghi
-    vào sheet — không hiển thị trong log.
+    Đúng định dạng Cookie header như trình duyệt hiển thị — dán
+    thẳng vào cookie editor hay HTTP client là dùng được. Chỉ
+    lấy cookie thuộc muse.ai / meta.com / facebook.com (phiên
+    đăng nhập Meta rải trên cả ba). Dòng SESSION_COOKIE được
+    ứng dụng chính chặn lại để ghi vào sheet — không hiển thị
+    trong log.
     """
     try:
         cookies = page.context.cookies()
     except Exception:
         return ""
-    selected = [
-        cookie
-        for cookie in cookies
-        if any(
-            domain in (cookie.get("domain") or "")
-            for domain in ("muse.ai", "meta.com")
-        )
-    ] or cookies
-    if not selected:
-        return ""
-    try:
-        return json.dumps(selected, ensure_ascii=True)
-    except (TypeError, ValueError):
-        return ""
+    parts = []
+    for cookie in cookies:
+        domain = cookie.get("domain") or ""
+        if not any(
+            host in domain
+            for host in ("muse.ai", "meta.com", "facebook.com")
+        ):
+            continue
+        name = cookie.get("name") or ""
+        if name:
+            parts.append(f"{name}={cookie.get('value') or ''}")
+    return "; ".join(parts)
 
 
 def _load_redeem_code():
@@ -1078,9 +1079,9 @@ def main():
                     "Không lấy được mã mời của tài khoản này — "
                     "tài khoản sau sẽ dùng tiếp mã đang chờ hiện tại."
                 )
-            cookie_json = _session_cookie_json(page)
-            if cookie_json:
-                _status(f"SESSION_COOKIE: {cookie_json}")
+            cookie_header = _session_cookie_header(page)
+            if cookie_header:
+                _status(f"SESSION_COOKIE: {cookie_header}")
                 _status(
                     "Đã vào giao diện Muse, đã lấy cookie phiên "
                     "đăng nhập — tài khoản được lưu."
