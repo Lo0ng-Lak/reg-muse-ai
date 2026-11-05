@@ -325,6 +325,67 @@ def _ensure_profile_form(page):
         )
 
 
+def _locator_visible(locator):
+    try:
+        return locator.count() > 0 and locator.first.is_visible()
+    except Exception:
+        return False
+
+
+def _open_signup_and_submit_email(page, email):
+    """Mở trang đăng ký, chờ form HIỆN HẲN rồi mới điền email.
+
+    Không điền ngay khi DOM vừa có ô nhập: trang qua proxy nạp
+    chậm, form có thể hiện từng phần hoặc bị render lại ngay sau
+    đó — điền sớm là email bị nuốt hoặc form bị thay giữa chừng.
+    Điều kiện để điền: ô email VÀ nút Continue đều đã hiển thị,
+    cộng thêm một nhịp chờ cho form ổn định. Điền xong còn kiểm
+    tra lại giá trị; bị mất thì điền lại một lần, vẫn mất mới báo
+    lỗi. Trả về nút Continue để main() bấm sau khi chụp mốc thư cũ.
+    """
+    page.goto(
+        SIGNUP_URL,
+        wait_until="domcontentloaded",
+        timeout=PAGE_TIMEOUT_MS,
+    )
+    _status("Đã mở trang Muse.ai — chờ form hiển thị đầy đủ...")
+    email_field = page.get_by_role(
+        "textbox", name="Mobile number or email"
+    )
+    login_button = page.get_by_role("button", name="Log in")
+    continue_button = page.get_by_role(
+        "button", name="Continue", exact=True
+    )
+    deadline = time.monotonic() + PAGE_TIMEOUT_MS / 1000
+    while not _locator_visible(email_field):
+        if page.is_closed():
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi form hiện."
+            )
+        if _locator_visible(login_button):
+            _click_when_ready(page, login_button, "Log in")
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Chờ mãi không thấy form nhập email của Muse.ai."
+            )
+        page.wait_for_timeout(500)
+    email_field.wait_for(state="visible", timeout=PAGE_TIMEOUT_MS)
+    # Nút Continue phải HIỂN THỊ rồi mới được điền email.
+    continue_button.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    page.wait_for_timeout(UI_SETTLE_MS)
+    email_field.wait_for(state="visible", timeout=PAGE_TIMEOUT_MS)
+    _status(f"Form đã hiển thị đầy đủ — đang điền email {email}...")
+    for _ in range(2):
+        email_field.fill(email)
+        page.wait_for_timeout(800)
+        if email_field.input_value() == email:
+            return continue_button
+    raise RuntimeError(
+        "Email chưa được giữ trong form Muse.ai; chưa bấm Continue."
+    )
+
+
 def main():
     if len(sys.argv) not in (2, 3):
         raise ValueError("Thiếu địa chỉ email cần điền.")
@@ -392,35 +453,7 @@ def main():
                 "tài khoản không được lưu."
             )
         _status("Đã xác nhận IP thoát thuộc US — bắt đầu đăng ký.")
-        page.goto(
-            SIGNUP_URL,
-            wait_until="domcontentloaded",
-            timeout=PAGE_TIMEOUT_MS,
-        )
-        page.wait_for_timeout(UI_SETTLE_MS)
-        _status(f"Đã mở trang Muse.ai, đang điền email {email}...")
-
-        email_field = page.get_by_role(
-            "textbox", name="Mobile number or email"
-        )
-        try:
-            email_field.wait_for(state="visible", timeout=5000)
-        except PlaywrightTimeoutError:
-            login_button = page.get_by_role("button", name="Log in")
-            _click_when_ready(page, login_button, "Log in")
-            email_field.wait_for(state="visible", timeout=PAGE_TIMEOUT_MS)
-
-        continue_button = page.get_by_role(
-            "button", name="Continue", exact=True
-        )
-        continue_button.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
-        email_field.fill(email)
-        email_field.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
-        if email_field.input_value() != email:
-            raise RuntimeError(
-                "Email chưa được giữ trong form Muse.ai; chưa bấm Continue."
-            )
-        page.wait_for_timeout(UI_SETTLE_MS)
+        continue_button = _open_signup_and_submit_email(page, email)
         try:
             existing_ids = _get_message_ids(token)
         except Exception:
