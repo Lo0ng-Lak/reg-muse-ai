@@ -23,7 +23,7 @@ SPREADSHEET_FILE = (
 )
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
 MUSE_SERVICE = "MuseAIHelper:muse.ai"
-HELPER_TIMEOUT_SECONDS = 600
+HELPER_TIMEOUT_SECONDS = 900
 PAUSE_BETWEEN_ACCOUNTS_SECONDS = 3
 WG_EXE = r"C:\Program Files\WireGuard\wireguard.exe"
 WG_CONFIG_DIR = Path.home() / "AppData" / "Local" / "MuseAIHelper" / "wg"

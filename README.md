@@ -46,8 +46,12 @@ Chromium. For each account the app then, with no further clicks:
    **Confirm** on the code form.
 4. On the final profile form, fills the first and last name as "Long" and
    "long" and the birthday 21 November 2001, then clicks **Confirm**.
-5. Counts the account as registered only when the profile form disappears
-   afterwards. Only then are its email and password appended to
+5. Watches the screen after the profile form. A "Join the waitlist" screen
+   means Muse is unavailable in the VPN location's region and the attempt
+   fails. On the card-entry screen the batch pauses for up to four minutes:
+   you enter the card and a US ZIP in the Chromium window yourself — the
+   tool never receives, stores, or types card details. Only after the card
+   step is accepted are the account's email and password appended to
    `accounts.xlsx` in the app's local Windows data folder; failed attempts
    are only written to the on-screen log, never to the sheet.
 

@@ -43,8 +43,8 @@ def _classify_after_profile(page, timeout_seconds=45):
     Trả về:
     - "waitlist": màn hình "Join the waitlist" — Muse chưa khả dụng ở
       khu vực của IP hiện tại, đăng ký coi như THẤT BẠI.
-    - "card": màn hình nhập thẻ — đăng ký đi đúng hướng, coi như
-      THÀNH CÔNG (theo định nghĩa của người dùng).
+    - "card": màn hình nhập thẻ — đăng ký đi đúng hướng; phải hoàn
+      tất bước nhập thẻ nữa mới tính là THÀNH CÔNG.
     - "unknown": hết thời gian chờ mà không thấy hai màn hình trên.
     """
     waitlist_markers = ("join the waitlist", "available in your country")
@@ -69,6 +69,43 @@ def _classify_after_profile(page, timeout_seconds=45):
             return "card"
         page.wait_for_timeout(2000)
     return "unknown"
+
+
+def _wait_for_card_step_done(page, timeout_seconds=240):
+    """Chờ người dùng tự nhập thẻ + ZIP US trong cửa sổ Chromium.
+
+    Tool không nhận và không tự điền thông tin thẻ. Bước thẻ coi như
+    xong khi các dấu hiệu của form thẻ biến mất khỏi trang qua hai lần
+    kiểm tra liên tiếp (tránh tính nhầm lúc trang đang chuyển cảnh).
+    Trả về "done", "waitlist", "closed" hoặc "timeout".
+    """
+    waitlist_markers = ("join the waitlist", "available in your country")
+    card_markers = (
+        "card number",
+        "card details",
+        "enter your card",
+        "add a card",
+        "payment method",
+    )
+    deadline = time.monotonic() + timeout_seconds
+    clear_polls = 0
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return "closed"
+        try:
+            text = page.locator("body").inner_text(timeout=3000).lower()
+        except Exception:
+            text = ""
+        if any(marker in text for marker in waitlist_markers):
+            return "waitlist"
+        if text and not any(marker in text for marker in card_markers):
+            clear_polls += 1
+            if clear_polls >= 2:
+                return "done"
+        else:
+            clear_polls = 0
+        page.wait_for_timeout(2000)
+    return "timeout"
 
 
 def _profile_form_visible(page, timeout_ms):
@@ -195,8 +232,18 @@ def main():
                     "hình gửi lại để bổ sung vào tool."
                 )
             _status(
-                "Đã tới bước nhập thẻ — tài khoản được tính là đăng ký đúng."
+                "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US trong "
+                "cửa sổ Chromium. Tool chờ tối đa 4 phút; thẻ được "
+                "chấp nhận thì mới lưu tài khoản."
             )
+            card_outcome = _wait_for_card_step_done(page)
+            if card_outcome != "done":
+                raise RuntimeError(
+                    "Chưa hoàn tất bước nhập thẻ "
+                    f"(kết quả chờ: {card_outcome}) — tài khoản "
+                    "không được lưu."
+                )
+            _status("Đã qua bước nhập thẻ — tài khoản được lưu.")
             _status("RESULT: SUCCESS")
         else:
             page.wait_for_event("close")
