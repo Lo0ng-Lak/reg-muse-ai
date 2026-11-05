@@ -2,10 +2,13 @@
 
 ## Muse.ai Account Helper
 
-A small Windows desktop helper for a single personal account. It creates a
-mail.tm inbox, opens Muse.ai in a dedicated browser, retrieves email
-verification codes, and stores mailbox and Muse.ai passwords using the Windows
-keyring backend. CAPTCHA and any additional registration steps remain manual.
+A small Windows desktop helper that registers Muse.ai accounts in a batch.
+For each account it creates a mail.tm inbox, opens Muse.ai in a dedicated
+browser, retrieves the email verification code, fills the profile form, and —
+only when the signup actually completes — saves the account to a local Excel
+sheet. The window shows nothing but the live process log. CAPTCHA and any
+additional registration steps remain manual; an account that stalls on one
+times out, is logged as failed, and the batch moves on to the next address.
 
 > mail.tm addresses are temporary email addresses, not Gmail. Muse.ai may
 > reject temporary email addresses, and losing access to the mailbox can make
@@ -28,34 +31,33 @@ keyring backend. CAPTCHA and any additional registration steps remain manual.
    py main.py
    ```
 
-Click **Tạo mail & đăng ký** to generate a random mail.tm address and a random
-Muse.ai password in a single step. The app saves the mailbox password and
-Muse.ai password to
-Windows Credential Manager before showing the credentials. It then asks you to
-confirm that Surfshark VPN is connected (once per app session), and immediately
-opens a dedicated Chromium window and fills the email into the visible
-"Mobile number or email" field, then submits **Continue** to request a
-verification code. It checks mail.tm for a new message, fills the detected
-code, and submits **Confirm** on the code form. Leave the
-Chromium window open while it waits (up to three minutes); it waits up to
-90 seconds for a form button to become ready on a slow connection. CAPTCHA and any
-additional steps are left to you. On the final profile form, it fills the
-first and last name as "Long" and "long", and the supplied birthday
-21 November 2001, then clicks **Confirm** when the button is enabled. If an
-error occurs, Chromium stays
-open so you can inspect the form; close its window when finished. The app does not
-verify VPN status or
-control network routing, so make sure Surfshark is connected and that split
-tunneling does not exclude Chromium. Click
-**Lấy thư** to read the verification email; double-click a message to view it
-and copy a detected verification code. **Sao chép email + mật khẩu** copies
-the generated account credentials to the clipboard. Each generated Muse.ai
-email and password is also appended to `accounts.xlsx` in the app's local
-Windows data folder; click **Mở sheet Excel** to open it.
+Set the number of accounts (1–100) and click **Bắt đầu đăng ký**. Before the
+run, the app asks you to confirm that Surfshark VPN is connected (once per app
+session); the app does not verify VPN status or control network routing, so
+make sure Surfshark is connected and that split tunneling does not exclude
+Chromium. For each account the app then, with no further clicks:
+
+1. Creates a random mail.tm address and a random Muse.ai password, and saves
+   both passwords to Windows Credential Manager.
+2. Opens a dedicated Chromium window, fills the email into the visible
+   "Mobile number or email" field, and submits **Continue** to request a
+   verification code.
+3. Polls mail.tm for the code (up to three minutes), fills it, and submits
+   **Confirm** on the code form.
+4. On the final profile form, fills the first and last name as "Long" and
+   "long" and the birthday 21 November 2001, then clicks **Confirm**.
+5. Counts the account as registered only when the profile form disappears
+   afterwards. Only then are its email and password appended to
+   `accounts.xlsx` in the app's local Windows data folder; failed attempts
+   are only written to the on-screen log, never to the sheet.
+
+The batch continues with the next address until the target count is reached
+or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
+successfully registered accounts.
 
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
-The Excel sheet contains the Muse.ai password in readable form, so protect
-the file and do not share or sync it to an untrusted location. The app's
-roaming data file contains email addresses only. The Muse.ai password is not
-automatically entered because the current Muse.ai form only asks for a phone
-number or email. The app does not bypass CAPTCHA or other site controls.
+The Excel sheet contains the Muse.ai passwords in readable form, so protect
+the file and do not share or sync it to an untrusted location. The Muse.ai
+password is not automatically entered because the current Muse.ai form only
+asks for a phone number or email. The app does not bypass CAPTCHA or other
+site controls.

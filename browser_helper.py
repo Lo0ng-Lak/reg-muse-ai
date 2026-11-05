@@ -23,30 +23,53 @@ UI_SETTLE_MS = 1500
 BIRTH_DATE = date(2001, 11, 21)
 
 
+def _status(message):
+    print(message, flush=True)
+
+
+def _wait_for_signup_completion(page):
+    """Đăng ký coi như xong khi form hồ sơ biến mất khỏi trang."""
+    heading = page.get_by_role(
+        "heading", name="Finish creating your account"
+    )
+    try:
+        heading.wait_for(state="hidden", timeout=45000)
+        return True
+    except Exception:
+        return heading.count() == 0
+
+
 def main():
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         raise ValueError("Thiếu địa chỉ email cần điền.")
     email = sys.argv[1]
+    auto = len(sys.argv) == 3 and sys.argv[2] == "--auto"
     mailbox_password = keyring.get_password(MAIL_SERVICE, email)
     if not mailbox_password:
-        _show_error(
-            "Không tìm thấy hộp thư",
+        detail = (
             "Không có mật khẩu mail.tm trong Windows Credential Manager cho "
-            f"{email}. Hãy tạo lại hộp thư bằng ứng dụng.",
+            f"{email}. Hãy tạo lại hộp thư bằng ứng dụng."
         )
+        if auto:
+            _status(f"RESULT: FAIL {detail}")
+            sys.exit(1)
+        _show_error("Không tìm thấy hộp thư", detail)
         return
 
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except ImportError as error:
-        _show_error(
-            "Thiếu Playwright",
+        detail = (
             "Cài các gói phụ thuộc và Chromium bằng lệnh:\n"
             "`py -m pip install -r requirements.txt`\n"
             "`py -m playwright install chromium`\n\n"
-            f"{error}",
+            f"{error}"
         )
+        if auto:
+            _status(f"RESULT: FAIL Thiếu Playwright. {error}")
+            sys.exit(1)
+        _show_error("Thiếu Playwright", detail)
         return
 
     playwright = sync_playwright().start()
@@ -63,6 +86,7 @@ def main():
             timeout=PAGE_TIMEOUT_MS,
         )
         page.wait_for_timeout(UI_SETTLE_MS)
+        _status(f"Đã mở trang Muse.ai, đang điền email {email}...")
 
         email_field = page.get_by_role(
             "textbox", name="Mobile number or email"
@@ -87,29 +111,49 @@ def main():
         page.wait_for_timeout(UI_SETTLE_MS)
         existing_ids = _get_message_ids(token)
         _click_when_ready(page, continue_button, "Continue")
+        _status("Đã gửi email, đang chờ mã xác minh từ mail.tm...")
 
         code = _wait_for_verification_code(page, token, existing_ids)
+        _status("Đã nhận mã xác minh, đang điền mã...")
         _fill_verification_code(page, code)
         page.wait_for_timeout(UI_SETTLE_MS)
         confirm_button = page.get_by_role(
             "button", name="Confirm", exact=True
         )
         _click_when_ready(page, confirm_button, "Confirm")
+        _status("Mã đã xác nhận, đang điền hồ sơ...")
         _fill_profile_name(page)
         finish_button = page.get_by_role(
             "button", name="Confirm", exact=True
         )
         _click_when_ready(page, finish_button, "Confirm")
-        page.wait_for_event("close")
+        if auto:
+            if not _wait_for_signup_completion(page):
+                raise RuntimeError(
+                    "Đã bấm Confirm nhưng form tạo tài khoản vẫn còn hiển "
+                    "thị sau thời gian chờ — có thể có CAPTCHA hoặc lỗi form."
+                )
+            _status("RESULT: SUCCESS")
+        else:
+            page.wait_for_event("close")
     except PlaywrightTimeoutError as error:
+        detail = (
+            "Trang Muse.ai chưa phản hồi đúng thời gian, hoặc form đã "
+            f"thay đổi. {error}"
+        )
+        if auto:
+            _status(f"RESULT: FAIL {detail}")
+            sys.exit(1)
         _show_error(
             "Không hoàn tất được bước trình duyệt",
-            "Trang Muse.ai chưa phản hồi đúng thời gian, hoặc form đã thay đổi. "
-            "Cửa sổ Chromium vẫn được giữ nguyên để bạn kiểm tra/thử lại.\n\n"
-            f"{error}",
+            detail
+            + "\n\nCửa sổ Chromium vẫn được giữ nguyên để bạn kiểm tra/thử lại.",
         )
         _wait_for_browser_close(page)
     except Exception as error:
+        if auto:
+            _status(f"RESULT: FAIL {error}")
+            sys.exit(1)
         _show_error(
             "Không hoàn tất được bước trình duyệt",
             "Cửa sổ Chromium vẫn được giữ nguyên để bạn kiểm tra/thử lại.\n\n"
