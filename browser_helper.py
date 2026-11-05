@@ -6,8 +6,10 @@ import sys
 import time
 import tkinter as tk
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date
+from pathlib import Path
 from tkinter import messagebox
 from html.parser import HTMLParser
 
@@ -35,6 +37,46 @@ UI_SETTLE_MS = 1500
 
 def _status(message):
     print(message, flush=True)
+
+
+def _load_proxy():
+    """Đọc proxy tuỳ chọn từ file proxy.txt nằm cạnh script.
+
+    Một dòng duy nhất, một trong hai dạng:
+    host:port:username:password  hoặc  http://username:password@host:port
+    Không có file (hoặc file trống) → None, trình duyệt đi thẳng bằng
+    kết nối hiện tại của máy (ví dụ Surfshark). Chỉ lưu lượng Chromium
+    (muse.ai) đi qua proxy; mail.tm vẫn đi thẳng.
+    """
+    try:
+        raw = Path(__file__).with_name("proxy.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    line = raw.splitlines()[0].strip()
+    if line.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(line)
+        if not parsed.hostname or not parsed.port:
+            return None
+        proxy = {
+            "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+        }
+        if parsed.username:
+            proxy["username"] = urllib.parse.unquote(parsed.username)
+        if parsed.password:
+            proxy["password"] = urllib.parse.unquote(parsed.password)
+        return proxy
+    parts = line.split(":")
+    if len(parts) < 2:
+        return None
+    proxy = {"server": f"http://{parts[0]}:{parts[1]}"}
+    if len(parts) >= 4:
+        proxy["username"] = parts[2]
+        proxy["password"] = ":".join(parts[3:])
+    return proxy
 
 
 def _classify_after_profile(page, timeout_seconds=45):
@@ -172,9 +214,29 @@ def main():
     page = None
     try:
         token = _get_mail_token(email, mailbox_password)
-        browser = playwright.chromium.launch(headless=False)
+        proxy = _load_proxy()
+        launch_options = {"headless": False}
+        if proxy:
+            launch_options["proxy"] = proxy
+            _status("Đang dùng proxy từ file proxy.txt cho trình duyệt.")
+        browser = playwright.chromium.launch(**launch_options)
         page = browser.new_page()
         page.set_default_timeout(PAGE_TIMEOUT_MS)
+        if proxy:
+            try:
+                page.goto(
+                    "https://api.ipify.org",
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+                exit_ip = page.locator("body").inner_text(
+                    timeout=5000
+                ).strip()
+                _status(f"IP thoát qua proxy: {exit_ip}")
+            except Exception:
+                _status(
+                    "Không kiểm tra được IP thoát qua proxy — vẫn tiếp tục."
+                )
         page.goto(
             SIGNUP_URL,
             wait_until="domcontentloaded",

@@ -297,6 +297,10 @@ class MuseAIHelper(tk.Tk):
     def _confirm_surfshark_vpn(self):
         if self.vpn_confirmed:
             return True
+        if Path(__file__).with_name("proxy.txt").exists():
+            # Đang dùng proxy riêng cho trình duyệt — không cần VPN.
+            self.vpn_confirmed = True
+            return True
         confirmed = messagebox.askyesno(
             "Xác nhận Surfshark VPN",
             "Hãy kết nối Surfshark VPN trước khi tiếp tục.\n\n"

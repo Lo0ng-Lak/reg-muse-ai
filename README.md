@@ -61,6 +61,16 @@ The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
 
+### Optional: use a proxy instead of Surfshark
+
+Create a `proxy.txt` file next to the scripts with a single line —
+`host:port:username:password` (or a full `http://username:password@host:port`
+URL). The Chromium signup browser then runs through that proxy and logs the
+exit IP it actually gets before starting; mail.tm traffic stays on the
+machine's direct connection. When `proxy.txt` exists, the app skips the
+Surfshark confirmation. `proxy.txt` contains a password: it is listed in
+`.gitignore`, so it is never committed — keep it that way.
+
 ### Optional: rotate the Surfshark IP during a run
 
 The Surfshark app itself has no interface the helper can drive, so rotation
