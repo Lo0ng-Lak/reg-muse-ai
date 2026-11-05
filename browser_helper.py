@@ -350,6 +350,10 @@ def _confirm_final_step(page, timeout_seconds=30):
     while time.monotonic() < deadline:
         if page.is_closed():
             return
+        if clicks >= 1 and _in_muse_interface(page):
+            # Đã bấm qua cổng và đã ở trong giao diện: phần còn
+            # lại là giao diện thật, không bấm thêm gì nữa.
+            return
         clicked = False
         for name in ("Get started", "Confirm", "Continue", "Bắt đầu"):
             button = page.get_by_role("button", name=name, exact=True)
