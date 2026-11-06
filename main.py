@@ -504,6 +504,7 @@ class MuseAIHelper(tk.Tk):
         self._process_lock = threading.Lock()
         self._bad_lock = threading.Lock()
         self._bad_proxies = _load_bad_proxies()
+        self._lane_progress = {}
         self._lane_local = threading.local()
 
         self._build_ui()
@@ -958,6 +959,7 @@ class MuseAIHelper(tk.Tk):
                     "cuối trong sheet làm đầu chuỗi."
                 )
         self.running = True
+        self._lane_progress = {}
         self.stop_event.clear()
         self._set_controls_running(True)
         if total == 0:
@@ -1184,19 +1186,20 @@ class MuseAIHelper(tk.Tk):
                 card_note = (
                     f" · Thẻ: {c_now}/{card_limit}" if card_tracked else ""
                 )
-                if multi:
-                    progress_text = (
-                        f"Luồng {lane_no}: {index}/{label_total} · "
-                        f"Tổng thành công: {s_now} · Thất bại: {f_now}"
-                        f"{card_note}"
+                self.events.put(
+                    (
+                        "progress",
+                        (
+                            lane_no,
+                            index,
+                            label_total,
+                            s_now,
+                            f_now,
+                            card_note,
+                            multi,
+                        ),
                     )
-                else:
-                    progress_text = (
-                        f"Tài khoản {index}/{label_total} · "
-                        f"Thành công: {s_now} · Thất bại: {f_now}"
-                        f"{card_note}"
-                    )
-                self.events.put(("progress", progress_text))
+                )
                 try:
                     address = _create_mailbox_account()
                 except Exception as error:
@@ -1451,7 +1454,34 @@ class MuseAIHelper(tk.Tk):
                     if self.running:
                         self.invite_entry.configure(state="disabled")
                 elif kind == "progress":
-                    self.progress.set(payload)
+                    (
+                        lane_no,
+                        done,
+                        label_total,
+                        s_now,
+                        f_now,
+                        card_note,
+                        multi,
+                    ) = payload
+                    if not multi:
+                        self.progress.set(
+                            f"Tài khoản {done}/{label_total} · "
+                            f"Thành công: {s_now} · Thất bại: {f_now}"
+                            f"{card_note}"
+                        )
+                    else:
+                        self._lane_progress[lane_no] = done
+                        suffix = "/∞" if label_total == "∞" else ""
+                        tally = " · ".join(
+                            f"Luồng {k}: {v}{suffix}"
+                            for k, v in sorted(
+                                self._lane_progress.items()
+                            )
+                        )
+                        self.progress.set(
+                            f"{tally} · Tổng thành công: {s_now} · "
+                            f"Thất bại: {f_now}{card_note}"
+                        )
                 elif kind == "finished":
                     success, fail, stopped = payload
                     self.running = False
