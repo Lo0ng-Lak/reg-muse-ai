@@ -3,14 +3,14 @@
 ## Muse.ai Account Helper
 
 A small Windows desktop helper that registers Muse.ai accounts in a batch.
-For each account it creates a mail.tm inbox, opens Muse.ai in a dedicated
+For each account it creates a tempmail.plus inbox, opens Muse.ai in a dedicated
 browser, retrieves the email verification code, fills the profile form, and —
 only when the signup actually completes — saves the account to a local Excel
 sheet. The window shows nothing but the live process log. CAPTCHA and any
 additional registration steps remain manual; an account that stalls on one
 times out, is logged as failed, and the batch moves on to the next address.
 
-> mail.tm addresses are temporary email addresses, not Gmail. Muse.ai may
+> tempmail.plus addresses are temporary email addresses, not Gmail. Muse.ai may
 > reject temporary email addresses, and losing access to the mailbox can make
 > password recovery impossible. Check Muse.ai's terms and use an email address
 > you control for any account you need to keep.
@@ -38,14 +38,14 @@ proxies included, then the run stops on its own), and click **Bắt đầu
 đăng ký**. For each account
 the app then, with no further clicks:
 
-1. Creates a random mail.tm address and saves the mailbox password to
+1. Creates a random tempmail.plus address and saves the mailbox password to
    Windows Credential Manager. (There is no Muse.ai password — signup
    is email plus a one-time code.)
 2. Opens a dedicated Chromium window **through the proxy**, first checks the
    exit IP it actually got, and only continues if that IP is in the US.
    It then fills the email into the visible "Mobile number or email" field
    and submits **Continue** to request a verification code.
-3. Polls mail.tm for the code (up to three minutes), fills it, and submits
+3. Polls tempmail.plus for the code (up to three minutes), fills it, and submits
    **Confirm** on the code form.
 4. On the final profile form, fills the first and last name as "Long" and
    "long" when the form asks for them (some regions, such as US IPs, only
@@ -65,7 +65,7 @@ the app then, with no further clicks:
    button (sometimes Confirm/Continue): the tool clicks it — repeatedly
    if several such screens chain together — waits to land inside the
    Muse interface, and reads the session cookies. A successful row in `accounts.xlsx`
-   therefore carries: creation time, email, the mail.tm mailbox
+   therefore carries: creation time, email, the tempmail.plus mailbox
    password (the only password there is), the session cookie in the
    browser's header form (`name=value; name=value; …`, covering the
    muse.ai, meta.com and facebook.com cookies — passed from the helper
@@ -130,7 +130,7 @@ be US proxies supplied by you: **the tool does not verify exit IPs** (that
 check cost several page loads per account and was removed for speed at the
 owner's direction). The backstop is the post-profile classification — if
 an exit lands in an unsupported region, the "Join the waitlist" screen
-still fails that account. mail.tm traffic stays on the machine's direct
+still fails that account. tempmail.plus traffic stays on the machine's direct
 connection. The log only ever shows each proxy's host:port, never its
 password. `proxies.txt` and `proxy.txt` are listed in `.gitignore`, so
 they are never committed — keep it that way.

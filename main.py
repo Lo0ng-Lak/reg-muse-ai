@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +19,18 @@ import keyring
 from openpyxl import Workbook, load_workbook
 
 
-API_BASE = "https://api.mail.tm"
+API_BASE = "https://tempmail.plus"
+# Domain hộp thư của tempmail.plus (đọc từ trang chủ của họ,
+# 2026-11-06). Dịch vụ không có API liệt kê domain nên danh
+# sách nằm tại đây; "tạo hộp thư" thử lần lượt từng domain.
+TEMPMAIL_DOMAINS = [
+    "mailto.plus",
+    "fexpost.com",
+    "fexbox.org",
+    "fextemp.com",
+    "merepost.com",
+    "rover.info",
+]
 SPREADSHEET_FILE = (
     Path.home() / "AppData" / "Local" / "MuseAIHelper" / "accounts.xlsx"
 )
@@ -31,7 +43,14 @@ PAUSE_BETWEEN_ACCOUNTS_SECONDS = 1
 
 
 def _request(method, path, payload=None, token=None):
-    headers = {"Accept": "application/ld+json"}
+    headers = {
+        "Accept": "application/ld+json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.0.0 Safari/537.36"
+        ),
+    }
     data = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -52,9 +71,9 @@ def _request(method, path, payload=None, token=None):
             detail = parsed.get("hydra:description") or parsed.get("detail") or detail
         except (json.JSONDecodeError, AttributeError):
             pass
-        raise RuntimeError(f"mail.tm trả lỗi HTTP {error.code}: {detail}") from error
+        raise RuntimeError(f"tempmail.plus trả lỗi HTTP {error.code}: {detail}") from error
     except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError(f"Không kết nối được mail.tm: {error}") from error
+        raise RuntimeError(f"Không kết nối được tempmail.plus: {error}") from error
 
     if not body:
         return {}
@@ -62,64 +81,48 @@ def _request(method, path, payload=None, token=None):
 
 
 def _create_mailbox_account():
-    """Tạo một hộp thư mail.tm mới và lưu mật khẩu hộp thư vào keyring.
+    """Tạo một địa chỉ hộp thư tempmail.plus mới.
 
-    Đăng ký Muse.ai bằng mail tạm + mã OTP — không hề có mật
-    khẩu Muse. Mật khẩu duy nhất là của hộp thư mail.tm; nó chỉ
-    sống trong keyring, browser_helper.py tự lấy lại khi chạy.
-    Trả về địa chỉ hộp thư.
+    tempmail.plus không cần đăng ký hộp thư và không có mật
+    khẩu: mọi địa chỉ thuộc các domain của họ đều nhận thư
+    ngay, và API đọc thư bằng chính địa chỉ đó. "Tạo" ở đây
+    là sinh địa chỉ ngẫu nhiên rồi gọi API một lần để chắc
+    chắn dịch vụ đang trả lời cho domain đó. Trả về địa chỉ.
     """
-    domains = []
     last_error = None
-    for _ in range(3):
-        try:
-            domains = _request("GET", "/domains?page=1").get(
-                "hydra:member", []
-            )
-            break
-        except RuntimeError as error:
-            last_error = error
-            time.sleep(2)
-    else:
-        raise last_error
-    active_domains = [
-        domain["domain"]
-        for domain in domains
-        if domain.get("isActive") and not domain.get("isPrivate")
-    ]
-    if not active_domains:
-        raise RuntimeError("mail.tm hiện không cung cấp domain khả dụng.")
-
-    last_error = None
-    attempts = max(3, len(active_domains))
-    for attempt in range(attempts):
-        domain = active_domains[attempt % len(active_domains)]
+    # Bắt đầu từ một domain ngẫu nhiên mỗi lần: các tài khoản
+    # tản đều trên cả 6 domain thay vì dồn hết vào domain đầu,
+    # và nếu Meta chê một domain nào đó thì chỉ phần tài khoản
+    # rơi vào domain đó bị ảnh hưởng.
+    start = secrets.randbelow(len(TEMPMAIL_DOMAINS))
+    ordered = TEMPMAIL_DOMAINS[start:] + TEMPMAIL_DOMAINS[:start]
+    for domain in ordered:
         address = f"muse{secrets.token_hex(5)}@{domain}"
-        mailbox_password = secrets.token_urlsafe(24)
         try:
-            _request(
-                "POST",
-                "/accounts",
-                {"address": address, "password": mailbox_password},
+            response = _request(
+                "GET",
+                "/api/mails?email="
+                + urllib.parse.quote(address)
+                + "&limit=1",
             )
         except RuntimeError as error:
             last_error = error
             continue
-        try:
-            keyring.set_password(MAIL_SERVICE, address, mailbox_password)
-        except Exception as error:
-            raise RuntimeError(
-                "Hộp thư đã tạo nhưng không lưu được mật khẩu vào "
-                f"Windows Credential Manager: {error}"
-            ) from error
+        if response.get("result") is False:
+            last_error = RuntimeError(
+                "tempmail.plus từ chối địa chỉ hộp thư."
+            )
+            continue
         return address
-    raise last_error or RuntimeError("Không tạo được hộp thư mail.tm.")
+    raise last_error or RuntimeError(
+        "Không tạo được hộp thư tempmail.plus."
+    )
 
 
 SPREADSHEET_HEADERS = [
     "Thời gian tạo",
     "Email Muse.ai",
-    "Mật khẩu mail.tm",
+    "Mật khẩu hộp thư",
     "Cookie phiên đăng nhập",
     "Mã mời",
 ]
@@ -274,6 +277,33 @@ def _save_card_to_keyring(card):
         keyring.set_password(CARD_SERVICE, field, card[field])
 
 
+CARD_SUCCESS_COUNT_FIELD = "card_success_count"
+
+
+def _load_card_success_count():
+    """Số tài khoản thành công đã dùng thẻ đang lưu (0 nếu chưa có).
+
+    Chỉ là một con số đếm, không chứa chữ số nào của thẻ.
+    """
+    try:
+        value = keyring.get_password(CARD_SERVICE, CARD_SUCCESS_COUNT_FIELD)
+    except Exception:
+        value = None
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _save_card_success_count(count):
+    try:
+        keyring.set_password(
+            CARD_SERVICE, CARD_SUCCESS_COUNT_FIELD, str(max(0, int(count)))
+        )
+    except Exception:
+        pass
+
+
 def _delete_card_from_keyring():
     for field in CARD_FIELDS:
         try:
@@ -388,7 +418,9 @@ class MuseAIHelper(tk.Tk):
         )
         if _load_card_from_keyring():
             self._append_log(
-                "Đã có thẻ lưu sẵn — tool sẽ tự điền ở bước xác minh thẻ."
+                "Đã có thẻ lưu sẵn — tool sẽ tự điền ở bước xác minh thẻ. "
+                f"Thẻ này đã dùng cho {_load_card_success_count()} tài khoản "
+                "thành công (xem / đổi ở ô 'Giới hạn / thẻ:')."
             )
 
     def _build_ui(self):
@@ -488,6 +520,12 @@ class MuseAIHelper(tk.Tk):
             controls, from_=1, to=100, width=5, textvariable=self.per_proxy_var
         )
         self.per_proxy_spin.pack(side="left", padx=(6, 12))
+        ttk.Label(controls, text="Giới hạn / thẻ:").pack(side="left")
+        self.card_limit_var = tk.IntVar(value=10)
+        self.card_limit_spin = ttk.Spinbox(
+            controls, from_=0, to=100, width=5, textvariable=self.card_limit_var
+        )
+        self.card_limit_spin.pack(side="left", padx=(6, 12))
         ttk.Label(controls, text="Mã mời:").pack(side="left")
         self.invite_entry = ttk.Entry(controls, width=10)
         self.invite_entry.pack(side="left", padx=(6, 12))
@@ -541,8 +579,8 @@ class MuseAIHelper(tk.Tk):
     def _save_card(self):
         """Lưu thẻ vào Windows Credential Manager (không ghi ra file).
 
-        Chỉ giữ trong khoá bảo mật của Windows, cùng chỗ với mật
-        khẩu mail.tm; không chữ số nào của thẻ được in ra log.
+        Chỉ giữ trong khoá bảo mật của Windows; không chữ số
+        nào của thẻ được in ra log.
         """
         def digits(text):
             return "".join(ch for ch in text if ch.isdigit())
@@ -571,6 +609,7 @@ class MuseAIHelper(tk.Tk):
             "cvv": cvv,
             "zip": zip_code,
         }
+        old_card = _load_card_from_keyring()
         try:
             _save_card_to_keyring(card)
         except Exception as error:
@@ -579,6 +618,10 @@ class MuseAIHelper(tk.Tk):
                 f"Không ghi được vào Windows Credential Manager: {error}",
             )
             return
+        if old_card.get("number") != number:
+            # Đổi sang thẻ khác: giới hạn tính theo từng thẻ nên
+            # bộ đếm tài khoản thành công của thẻ cũ reset về 0.
+            _save_card_success_count(0)
         self.card_zip_entry.delete(0, "end")
         self.card_zip_entry.insert(0, zip_code)
         self._append_log(
@@ -588,6 +631,7 @@ class MuseAIHelper(tk.Tk):
 
     def _delete_card(self):
         _delete_card_from_keyring()
+        _save_card_success_count(0)
         for entry in (
             self.card_number_entry,
             self.card_expiry_entry,
@@ -646,6 +690,7 @@ class MuseAIHelper(tk.Tk):
         self.count_spin.configure(state="disabled" if running else "normal")
         self.proxy_text.configure(state="disabled" if running else "normal")
         self.per_proxy_spin.configure(state="disabled" if running else "normal")
+        self.card_limit_spin.configure(state="disabled" if running else "normal")
         self.invite_entry.configure(state="disabled" if running else "normal")
         for widget in (
             self.card_number_entry,
@@ -685,6 +730,26 @@ class MuseAIHelper(tk.Tk):
         except (tk.TclError, ValueError):
             per_proxy = 5
         per_proxy = max(1, min(per_proxy, 100))
+        try:
+            card_limit = int(self.card_limit_var.get())
+        except (tk.TclError, ValueError):
+            card_limit = 10
+        card_limit = max(0, min(card_limit, 100))
+        # Giới hạn tính theo thẻ ĐANG LƯU (một thẻ duy nhất): chỉ
+        # đếm khi có thẻ lưu sẵn; không có thẻ lưu thì bước thẻ là
+        # nhập tay nên giới hạn này không áp dụng. Để 0 là không
+        # giới hạn.
+        saved_card = _load_card_from_keyring()
+        card_tracked = bool(saved_card) and card_limit > 0
+        card_used = _load_card_success_count() if card_tracked else 0
+        if card_tracked and card_used >= card_limit:
+            messagebox.showwarning(
+                "Thẻ đã đủ giới hạn",
+                f"Thẻ đang lưu đã dùng cho {card_used} tài khoản thành "
+                f"công (giới hạn {card_limit} / thẻ). Đổi thẻ ở hàng "
+                "Thẻ rồi bấm Lưu thẻ để bộ đếm reset về 0, rồi chạy lại.",
+            )
+            return
         try:
             pool = self._sync_proxy_pool()
         except RuntimeError as error:
@@ -728,9 +793,15 @@ class MuseAIHelper(tk.Tk):
             "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
             "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
         )
+        if card_tracked:
+            self._append_log(
+                f"Giới hạn thẻ đang lưu: {card_used}/{card_limit} tài "
+                "khoản thành công — đủ giới hạn là lượt chạy tự dừng, "
+                "không tự đổi thẻ."
+            )
         threading.Thread(
             target=self._run_loop,
-            args=(total, pool, per_proxy, invite),
+            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked),
             daemon=True,
         ).start()
 
@@ -750,7 +821,10 @@ class MuseAIHelper(tk.Tk):
                     pass
         self.destroy()
 
-    def _run_loop(self, total, pool, per_proxy, invite):
+    def _run_loop(
+        self, total, pool, per_proxy, invite,
+        card_limit=0, card_used=0, card_tracked=False,
+    ):
         helper = Path(__file__).with_name("browser_helper.py")
         success = 0
         fail = 0
@@ -780,6 +854,17 @@ class MuseAIHelper(tk.Tk):
                     )
                 )
                 break
+            if card_tracked and card_limit > 0 and card_used >= card_limit:
+                self.events.put(
+                    (
+                        "log",
+                        f"Thẻ đang lưu đã đủ {card_limit} tài khoản "
+                        "thành công — dừng lượt chạy. Muốn chạy tiếp "
+                        "thì đổi thẻ ở hàng Thẻ rồi bấm Lưu thẻ (bộ "
+                        "đếm reset về 0).",
+                    )
+                )
+                break
             index += 1
             proxy_index, line = rotation.current()
             if proxy_index != written_proxy_index:
@@ -797,11 +882,14 @@ class MuseAIHelper(tk.Tk):
                         f"khoản tiếp theo.{note}",
                     )
                 )
+            card_note = (
+                f" · Thẻ: {card_used}/{card_limit}" if card_tracked else ""
+            )
             self.events.put(
                 (
                     "progress",
                     f"Tài khoản {index}/{label_total} · Thành công: {success} · "
-                    f"Thất bại: {fail}",
+                    f"Thất bại: {fail}{card_note}",
                 )
             )
             try:
@@ -843,6 +931,11 @@ class MuseAIHelper(tk.Tk):
                         invite=own_invite,
                     )
                     success += 1
+                    if card_tracked:
+                        # Tài khoản chỉ được lưu sau khi qua bước thẻ,
+                        # nên đây đúng là 1 lượt dùng thẻ đang lưu.
+                        card_used += 1
+                        _save_card_success_count(card_used)
                     self.events.put(
                         (
                             "log",

@@ -27,8 +27,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 SIGNUP_URL = "https://muse.ai/"
-API_BASE = "https://api.mail.tm"
-MAIL_SERVICE = "MuseAIHelper:mail.tm"
+API_BASE = "https://tempmail.plus"
 CARD_SERVICE = "MuseAIHelper:card"
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
@@ -48,7 +47,7 @@ def _load_proxy():
     host:port:username:password  hoặc  http://username:password@host:port
     Không có file (hoặc file trống) → None, và main() sẽ huỷ lượt chạy
     vì đăng ký bắt buộc phải qua proxy. Chỉ lưu lượng Chromium
-    (muse.ai) đi qua proxy; mail.tm vẫn đi thẳng.
+    (muse.ai) đi qua proxy; tempmail.plus vẫn đi thẳng.
     """
     try:
         raw = Path(__file__).with_name("proxy.txt").read_text(
@@ -950,11 +949,36 @@ def _harvest_via_copy_link(page):
 
 
 _SCRATCH_RECT_JS = """() => {
-    // Ô phủ là một thẻ <canvas> phủ kín thanh mã (theo HTML
-    // thật người dùng gửi): nó mang aria-label "Hiển thị mã
-    // lời mời" ở mọi trạng thái. Dòng chữ "Scratch to reveal"
-    // có thể được VẼ trên canvas chứ không có trong DOM —
-    // tìm theo chữ là không bao giờ thấy ô, tô cũng vô ích.
+    const rectOf = (el) => {
+        const r = el.getBoundingClientRect();
+        return {x: r.x, y: r.y, width: r.width, height: r.height};
+    };
+    const isCode = (s) => /^[A-Z0-9]{6}$/.test((s || '').trim());
+    // 1. Theo cau truc, khong theo ngon ngu: canvas nam cung
+    // container voi span mang ma (title == chu hien thi).
+    for (const el of document.querySelectorAll('[title]')) {
+        const t = (el.getAttribute('title') || '').trim();
+        if (!isCode(t)) continue;
+        let node = el;
+        for (let i = 0; i < 4 && node; i++) {
+            const c = node.querySelector
+                ? node.querySelector('canvas')
+                : null;
+            if (c) {
+                const r = c.getBoundingClientRect();
+                if (r.width > 0) return rectOf(c);
+            }
+            node = node.parentElement;
+        }
+    }
+    // 2. Canvas dong vai tro nut trong panel Moi (role=button,
+    // phu kin thanh ma) — dung cau truc HTML that nguoi dung gui.
+    for (const c of document.querySelectorAll('canvas[role="button"]')) {
+        const r = c.getBoundingClientRect();
+        if (r.width > 0 && r.height >= 8) return rectOf(c);
+    }
+    // 3. Theo aria-label (ban b2338133) — nhan tieng Anh co the
+    // khac tieng Viet nen chi la duong du phong.
     for (const c of document.querySelectorAll('canvas')) {
         if (
             /mã lời mời|invite code/i.test(
@@ -962,12 +986,7 @@ _SCRATCH_RECT_JS = """() => {
             )
         ) {
             const r = c.getBoundingClientRect();
-            if (r.width > 0) {
-                return {
-                    x: r.x, y: r.y,
-                    width: r.width, height: r.height,
-                };
-            }
+            if (r.width > 0) return rectOf(c);
         }
     }
     const hits = [
@@ -983,26 +1002,27 @@ _SCRATCH_RECT_JS = """() => {
         );
     });
     if (!hits.length) return null;
-    const rectOf = (el) => el.getBoundingClientRect();
-    // Ô cào thật là một thanh ngang (rộng 150-650, cao 24-90);
-    // phần tử khớp nhỏ nhất chỉ là mẩu chữ bên trong — cào
-    // đúng mẩu chữ thì phủ không đủ diện tích, mã không hiện.
+    const rectOfEl = (el) => el.getBoundingClientRect();
+    // O cao that la mot thanh ngang (rong 150-650, cao 24-90);
+    // phan tu khop nho nhat chi la mau chu ben trong — cao
+    // dung mau chu thi phu khong du dien tich, ma khong hien.
     const bars = hits.filter((el) => {
-        const r = rectOf(el);
+        const r = rectOfEl(el);
         return r.width >= 150 && r.width <= 650 &&
             r.height >= 24 && r.height <= 90;
     });
     const pool = bars.length ? bars : hits;
     pool.sort((a, b) => {
-        const ra = rectOf(a);
-        const rb = rectOf(b);
+        const ra = rectOfEl(a);
+        const rb = rectOfEl(b);
         return bars.length
             ? rb.width * rb.height - ra.width * ra.height
             : ra.width * ra.height - rb.width * rb.height;
     });
-    const r = rectOf(pool[0]);
+    const r = rectOfEl(pool[0]);
     return {x: r.x, y: r.y, width: r.width, height: r.height};
-}"""
+}
+"""
 
 
 def _paint_slow(page, x_from, x_to, y):
@@ -1186,22 +1206,9 @@ def _reveal_by_painting(page):
         # lệch khỏi màn hình thì chuột tô vào hư không.
         try:
             page.evaluate(
-                """() => {
-                    const canvas = [...document
-                        .querySelectorAll('canvas')
-                    ].find((c) =>
-                        /mã lời mời|invite code/i.test(
-                            c.getAttribute('aria-label') || ''
-                        )
-                    );
-                    const el = canvas || [...document
-                        .querySelectorAll(
-                            'div, span, button, canvas, section'
-                        )
-                    ].find((e) =>
-                        /scratch to reveal|cào để/i.test(
-                            e.textContent || ''
-                        )
+                """(pt) => {
+                    const el = document.elementFromPoint(
+                        pt.x, pt.y
                     );
                     if (el) {
                         el.scrollIntoView({
@@ -1209,7 +1216,11 @@ def _reveal_by_painting(page):
                             inline: 'center',
                         });
                     }
-                }"""
+                }""",
+                {
+                    "x": box["x"] + box["width"] / 2,
+                    "y": box["y"] + box["height"] / 2,
+                },
             )
             page.wait_for_timeout(400)
             box = page.evaluate(_SCRATCH_RECT_JS) or box
@@ -1250,15 +1261,30 @@ _INVITE_DEBUG_JS = """() => {
         (c) => /mã lời mời|invite code/i.test(
             c.getAttribute('aria-label') || ''
         )
-    );
+    ) || [...document.querySelectorAll('canvas[role="button"]')][0];
     info.canvas_found = !!canvas;
     let node = canvas;
     for (let i = 0; i < 4 && node && node.parentElement; i++) {
         node = node.parentElement;
     }
+    if (!node) {
+        const anchor = [...document.querySelectorAll('button')].find(
+            (b) => /copy referral link|sao chép liên kết/i.test(
+                b.textContent || ''
+            )
+        ) || [...document.querySelectorAll('*')].find(
+            (e) => e.childElementCount <= 3 &&
+                /invite friends|mời bạn bè/i.test(e.textContent || '')
+        );
+        node = anchor;
+        for (let i = 0; i < 6 && node && node.parentElement; i++) {
+            node = node.parentElement;
+        }
+    }
     info.panel_html = node ? node.outerHTML.slice(0, 20000) : '';
     return JSON.stringify(info);
-}"""
+}
+"""
 
 
 def _dump_invite_debug(page):
@@ -1445,18 +1471,6 @@ def main():
         raise ValueError("Thiếu địa chỉ email cần điền.")
     email = sys.argv[1]
     auto = len(sys.argv) == 3 and sys.argv[2] == "--auto"
-    mailbox_password = keyring.get_password(MAIL_SERVICE, email)
-    if not mailbox_password:
-        detail = (
-            "Không có mật khẩu mail.tm trong Windows Credential Manager cho "
-            f"{email}. Hãy tạo lại hộp thư bằng ứng dụng."
-        )
-        if auto:
-            _status(f"RESULT: FAIL {detail}")
-            sys.exit(1)
-        _show_error("Không tìm thấy hộp thư", detail)
-        return
-
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -1489,7 +1503,6 @@ def main():
     browser = None
     page = None
     try:
-        token = _get_mail_token(email, mailbox_password)
         browser = playwright.chromium.launch(
             headless=False, proxy=proxy
         )
@@ -1500,15 +1513,15 @@ def main():
         # khu vực, màn hình waitlist sau bước hồ sơ vẫn chặn lại.
         continue_button = _open_signup_and_submit_email(page, email)
         try:
-            existing_ids = _get_message_ids(token)
+            existing_ids = _get_message_ids(email)
         except Exception:
             # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
             # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
             existing_ids = set()
         _click_when_ready(page, continue_button, "Continue")
-        _status("Đã gửi email, đang chờ mã xác minh từ mail.tm...")
+        _status("Đã gửi email, đang chờ mã xác minh từ tempmail.plus...")
 
-        code = _wait_for_verification_code(page, token, existing_ids)
+        code = _wait_for_verification_code(page, email, existing_ids)
         _status("Đã nhận mã xác minh, đang điền mã...")
         _fill_verification_code(page, code)
         page.wait_for_timeout(UI_SETTLE_MS)
@@ -1822,53 +1835,54 @@ def _click_when_ready(page, locator, label):
     locator.click(timeout=BUTTON_TIMEOUT_MS)
 
 
-def _mail_request(method, path, payload=None, token=None):
-    headers = {"Accept": "application/ld+json"}
-    data = None
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(payload).encode("utf-8")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
+def _mail_request(path):
+    """Gọi API tempmail.plus (chỉ GET, không cần token/mật khẩu)."""
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/130.0.0.0 Safari/537.36"
+        ),
+    }
     request = urllib.request.Request(
-        f"{API_BASE}{path}", data=data, headers=headers, method=method
+        f"{API_BASE}{path}", headers=headers, method="GET"
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             body = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"mail.tm trả lỗi HTTP {error.code}: {detail}") from error
+        raise RuntimeError(
+            f"tempmail.plus trả lỗi HTTP {error.code}: {detail}"
+        ) from error
     except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError(f"Không kết nối được mail.tm: {error}") from error
+        raise RuntimeError(
+            f"Không kết nối được tempmail.plus: {error}"
+        ) from error
 
     return json.loads(body.decode("utf-8")) if body else {}
 
 
-def _get_mail_token(email, password):
-    last_error = None
-    for _ in range(3):
-        try:
-            response = _mail_request(
-                "POST", "/token", {"address": email, "password": password}
-            )
-        except Exception as error:
-            last_error = error
-            time.sleep(2)
-            continue
-        token = response.get("token")
-        if not token:
-            raise RuntimeError("mail.tm không trả về token truy cập.")
-        return token
-    raise last_error
-
-
-def _get_message_ids(token):
-    messages = _mail_request("GET", "/messages?page=1", token=token).get(
-        "hydra:member", []
+def _mail_list(email):
+    response = _mail_request(
+        "/api/mails?email=" + urllib.parse.quote(email) + "&limit=20"
     )
-    return {message["id"] for message in messages if message.get("id")}
+    return response.get("mail_list") or []
+
+
+def _message_id(message):
+    return message.get("mail_id") or message.get("id")
+
+
+def _get_message_ids(email):
+    return {
+        message_id
+        for message_id in (
+            _message_id(message) for message in _mail_list(email)
+        )
+        if message_id
+    }
 
 
 def _message_text(detail):
@@ -1894,21 +1908,53 @@ class _HtmlTextExtractor(HTMLParser):
             self.parts.append(value)
 
 
-def _verification_code_from_new_messages(token, existing_ids):
-    messages = _mail_request("GET", "/messages?page=1", token=token).get(
-        "hydra:member", []
-    )
-    for message in messages:
-        message_id = message.get("id")
+def _detail_text(detail):
+    """Bóc toàn bộ chữ đọc được trong chi tiết thư tempmail.plus.
+
+    Ưu tiên các trường quen thuộc (text/html/intro) qua
+    _message_text; nếu vẫn rỗng thì gom mọi chuỗi trong JSON
+    (bỏ qua các trường id để không nhặt nhầm số id làm mã).
+    """
+    text = _message_text(detail)
+    if text:
+        return text
+    parts = []
+
+    def collect(value):
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if "id" in key.lower():
+                    continue
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(detail)
+    return "\n".join(parts)
+
+
+def _verification_code_from_new_messages(email, existing_ids):
+    for message in _mail_list(email):
+        message_id = _message_id(message)
         if not message_id or message_id in existing_ids:
             continue
+        subject = message.get("subject") or ""
+        codes = re.findall(r"(?<!\d)\d{4,8}(?!\d)", subject)
+        if codes:
+            return codes[0]
         try:
             detail = _mail_request(
-                "GET", f"/messages/{message_id}", token=token
+                f"/api/mails/{message_id}?email="
+                + urllib.parse.quote(email)
             )
         except Exception:
             continue
-        codes = re.findall(r"(?<!\d)\d{4,8}(?!\d)", _message_text(detail))
+        codes = re.findall(
+            r"(?<!\d)\d{4,8}(?!\d)", _detail_text(detail)
+        )
         if codes:
             return codes[0]
     return None
@@ -1938,7 +1984,7 @@ def _verification_input(page):
     return None
 
 
-def _wait_for_verification_code(page, token, existing_ids):
+def _wait_for_verification_code(page, email, existing_ids):
     deadline = time.monotonic() + CODE_TIMEOUT_SECONDS
     code = None
     warned = False
@@ -1948,12 +1994,12 @@ def _wait_for_verification_code(page, token, existing_ids):
         if code is None:
             try:
                 code = _verification_code_from_new_messages(
-                    token, existing_ids
+                    email, existing_ids
                 )
             except Exception:
-                # Mạng qua VPN hay chập chờn: một lần rớt kết nối tới
-                # mail.tm không được giết cả tài khoản — bỏ qua lượt
-                # kiểm tra này và thử lại ở vòng chờ tiếp theo.
+                # Một lần rớt kết nối tới tempmail.plus không
+                # được giết cả tài khoản — bỏ qua lượt kiểm tra
+                # này và thử lại ở vòng chờ tiếp theo.
                 if not warned:
                     _status(
                         "Kiểm tra hộp thư bị rớt kết nối — đang thử lại..."
@@ -1962,9 +2008,9 @@ def _wait_for_verification_code(page, token, existing_ids):
         fields = _verification_input(page)
         if code and fields:
             return code
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(4000)
     raise TimeoutError(
-        f"Không tìm thấy mã xác minh mới trong mail.tm sau "
+        f"Không tìm thấy mã xác minh mới trong tempmail.plus sau "
         f"{CODE_TIMEOUT_SECONDS} giây."
     )
 
