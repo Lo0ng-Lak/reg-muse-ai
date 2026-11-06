@@ -893,7 +893,7 @@ class MuseAIHelper(tk.Tk):
         try:
             card_limit = int(self.card_limit_var.get())
         except (tk.TclError, ValueError):
-            card_limit = 10
+            card_limit = 0
         card_limit = max(0, min(card_limit, 100))
         try:
             lanes = int(self.lanes_var.get())
