@@ -639,7 +639,7 @@ class MuseAIHelper(tk.Tk):
         )
         self.per_proxy_spin.pack(side="left", padx=(6, 12))
         ttk.Label(controls, text="Giới hạn / thẻ:").pack(side="left")
-        self.card_limit_var = tk.IntVar(value=10)
+        self.card_limit_var = tk.IntVar(value=0)
         self.card_limit_spin = ttk.Spinbox(
             controls, from_=0, to=100, width=5, textvariable=self.card_limit_var
         )
