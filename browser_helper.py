@@ -40,6 +40,18 @@ def _status(message):
     print(message, flush=True)
 
 
+def _short_error(error):
+    """Dòng lỗi NGẮN một dòng cho log.
+
+    Lỗi Playwright mang theo cả một "Call log" nhiều dòng; in
+    nguyên văn là lý do thật bị chôn ở cuối và người dùng copy
+    log không thấy được. Chỉ lấy dòng đầu tiên, cắt 200 ký tự.
+    """
+    text = str(error).strip()
+    first = text.splitlines()[0] if text else repr(error)
+    return first[:200]
+
+
 def _load_proxy():
     """Đọc proxy tuỳ chọn từ file proxy.txt nằm cạnh script.
 
@@ -1402,11 +1414,21 @@ def _open_signup_and_submit_email(page, email):
     lần, vẫn mất mới báo lỗi. Trả về nút Continue để main() bấm
     sau khi chụp mốc thư cũ.
     """
-    page.goto(
-        SIGNUP_URL,
-        wait_until="domcontentloaded",
-        timeout=PAGE_TIMEOUT_MS,
-    )
+    try:
+        page.goto(
+            SIGNUP_URL,
+            wait_until="domcontentloaded",
+            timeout=PAGE_TIMEOUT_MS,
+        )
+    except Exception as error:
+        # Mọi lỗi ở riêng bước mở trang đều có nghĩa là proxy
+        # hiện tại không tải nổi muse.ai (quá chậm, đã chết,
+        # hoặc từ chối kết nối). Dịch sang một câu ngắn gọn để
+        # dòng RESULT đọc được ngay, kèm dòng lỗi gốc đầu tiên.
+        raise RuntimeError(
+            "Không tải được trang muse.ai qua proxy — proxy quá "
+            f"chậm hoặc đã chết. ({_short_error(error)})"
+        ) from error
     _status("Đã mở trang Muse.ai — chờ form hiển thị đầy đủ...")
     email_field = page.get_by_role(
         "textbox", name="Mobile number or email"
@@ -1644,7 +1666,7 @@ def main():
     except PlaywrightTimeoutError as error:
         detail = (
             "Trang Muse.ai chưa phản hồi đúng thời gian, hoặc form đã "
-            f"thay đổi. {error}"
+            f"thay đổi. {_short_error(error)}"
         )
         if auto:
             _status(f"RESULT: FAIL {detail}")
@@ -1657,7 +1679,7 @@ def main():
         _wait_for_browser_close(page)
     except Exception as error:
         if auto:
-            _status(f"RESULT: FAIL {error}")
+            _status(f"RESULT: FAIL {_short_error(error)}")
             sys.exit(1)
         _show_error(
             "Không hoàn tất được bước trình duyệt",
