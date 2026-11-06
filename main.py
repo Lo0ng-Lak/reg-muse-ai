@@ -697,7 +697,7 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=6, column=0, sticky="ew", pady=(10, 0)
+            row=7, column=0, sticky="ew", pady=(10, 0)
         )
 
     def _save_card(self):
