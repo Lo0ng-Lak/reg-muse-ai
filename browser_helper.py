@@ -28,6 +28,11 @@ for _stream in (sys.stdout, sys.stderr):
 
 SIGNUP_URL = "https://muse.ai/"
 API_BASE = "https://tempmail.plus"
+# Hậu tố file riêng của luồng song song: "" = luồng duy
+# nhất/luồng 1 (proxy.txt, redeem.txt như cũ); "-2".."-5"
+# khi app chính chạy nhiều luồng (proxy-2.txt, ...).
+# main() gán từ tham số dòng lệnh thứ 4.
+LANE_SUFFIX = ""
 CARD_SERVICE = "MuseAIHelper:card"
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
@@ -62,7 +67,7 @@ def _load_proxy():
     (muse.ai) đi qua proxy; tempmail.plus vẫn đi thẳng.
     """
     try:
-        raw = Path(__file__).with_name("proxy.txt").read_text(
+        raw = Path(__file__).with_name(f"proxy{LANE_SUFFIX}.txt").read_text(
             encoding="utf-8"
         ).strip()
     except OSError:
@@ -524,7 +529,7 @@ def _load_redeem_code():
     try:
         text = (
             Path(__file__)
-            .with_name("redeem.txt")
+            .with_name(f"redeem{LANE_SUFFIX}.txt")
             .read_text(encoding="utf-8")
         )
     except OSError:
@@ -1489,10 +1494,14 @@ def _open_signup_and_submit_email(page, email):
 
 
 def main():
-    if len(sys.argv) not in (2, 3):
+    global LANE_SUFFIX
+    if len(sys.argv) not in (2, 3, 4):
         raise ValueError("Thiếu địa chỉ email cần điền.")
     email = sys.argv[1]
-    auto = len(sys.argv) == 3 and sys.argv[2] == "--auto"
+    auto = len(sys.argv) >= 3 and sys.argv[2] == "--auto"
+    if len(sys.argv) == 4 and sys.argv[3].isdigit():
+        # Luồng song song: đọc đúng file proxy/redeem của luồng này.
+        LANE_SUFFIX = "-" + sys.argv[3]
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright

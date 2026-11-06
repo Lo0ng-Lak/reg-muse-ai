@@ -348,9 +348,14 @@ def _invite_from_line(line):
     return None
 
 
-def _write_redeem_code(code):
-    """Ghi mã mời cần quy đổi cho tài khoản sắp chạy vào redeem.txt."""
-    redeem_file = Path(__file__).with_name("redeem.txt")
+def _write_redeem_code(code, suffix=""):
+    """Ghi mã mời cần quy đổi cho tài khoản sắp chạy vào redeem.txt.
+
+    suffix là hậu tố riêng của luồng song song ("", "-2", ...):
+    mỗi luồng có file redeem riêng để các chuỗi mã mời không
+    giẫm lên nhau.
+    """
+    redeem_file = Path(__file__).with_name(f"redeem{suffix}.txt")
     if code:
         redeem_file.write_text(code + "\n", encoding="utf-8")
     elif redeem_file.exists():
@@ -391,9 +396,12 @@ class _ProxyRotation:
         return self.cycles >= 1
 
 
-def _write_active_proxy(line):
-    """Ghi proxy đang dùng cho nhóm hiện tại vào proxy.txt (helper đọc)."""
-    Path(__file__).with_name("proxy.txt").write_text(
+def _write_active_proxy(line, suffix=""):
+    """Ghi proxy đang dùng cho nhóm hiện tại vào proxy.txt (helper đọc).
+
+    suffix là hậu tố riêng của luồng song song ("", "-2", ...).
+    """
+    Path(__file__).with_name(f"proxy{suffix}.txt").write_text(
         line + "\n", encoding="utf-8"
     )
 
@@ -408,6 +416,9 @@ class MuseAIHelper(tk.Tk):
         self.running = False
         self.stop_event = threading.Event()
         self.helper_process = None
+        self.helper_processes = set()
+        self._process_lock = threading.Lock()
+        self._lane_local = threading.local()
 
         self._build_ui()
         self.after(100, self._process_events)
@@ -526,6 +537,12 @@ class MuseAIHelper(tk.Tk):
             controls, from_=0, to=100, width=5, textvariable=self.card_limit_var
         )
         self.card_limit_spin.pack(side="left", padx=(6, 12))
+        ttk.Label(controls, text="Số luồng:").pack(side="left")
+        self.lanes_var = tk.IntVar(value=1)
+        self.lanes_spin = ttk.Spinbox(
+            controls, from_=1, to=5, width=5, textvariable=self.lanes_var
+        )
+        self.lanes_spin.pack(side="left", padx=(6, 12))
         ttk.Label(controls, text="Mã mời:").pack(side="left")
         self.invite_entry = ttk.Entry(controls, width=10)
         self.invite_entry.pack(side="left", padx=(6, 12))
@@ -691,6 +708,7 @@ class MuseAIHelper(tk.Tk):
         self.proxy_text.configure(state="disabled" if running else "normal")
         self.per_proxy_spin.configure(state="disabled" if running else "normal")
         self.card_limit_spin.configure(state="disabled" if running else "normal")
+        self.lanes_spin.configure(state="disabled" if running else "normal")
         self.invite_entry.configure(state="disabled" if running else "normal")
         for widget in (
             self.card_number_entry,
@@ -735,6 +753,11 @@ class MuseAIHelper(tk.Tk):
         except (tk.TclError, ValueError):
             card_limit = 10
         card_limit = max(0, min(card_limit, 100))
+        try:
+            lanes = int(self.lanes_var.get())
+        except (tk.TclError, ValueError):
+            lanes = 1
+        lanes = max(1, min(lanes, 5))
         # Giới hạn tính theo thẻ ĐANG LƯU (một thẻ duy nhất): chỉ
         # đếm khi có thẻ lưu sẵn; không có thẻ lưu thì bước thẻ là
         # nhập tay nên giới hạn này không áp dụng. Để 0 là không
@@ -801,7 +824,7 @@ class MuseAIHelper(tk.Tk):
             )
         threading.Thread(
             target=self._run_loop,
-            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked),
+            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes),
             daemon=True,
         ).start()
 
@@ -814,194 +837,322 @@ class MuseAIHelper(tk.Tk):
     def _on_close(self):
         if self.running:
             self.stop_event.set()
+            with self._process_lock:
+                processes = list(self.helper_processes)
             if self.helper_process is not None:
+                processes.append(self.helper_process)
+            for process in processes:
                 try:
-                    self.helper_process.terminate()
+                    process.terminate()
                 except OSError:
                     pass
         self.destroy()
 
     def _run_loop(
         self, total, pool, per_proxy, invite,
-        card_limit=0, card_used=0, card_tracked=False,
+        card_limit=0, card_used=0, card_tracked=False, lanes=1,
     ):
-        helper = Path(__file__).with_name("browser_helper.py")
-        success = 0
-        fail = 0
-        rotation = _ProxyRotation(pool, per_proxy)
-        written_proxy_index = None
-        # Chuỗi mã mời: tài khoản sắp chạy sẽ quy đổi pending_code
-        # (mã của tài khoản trước, mở đầu bằng mã trong ô Mã mời);
-        # mã mời nó tự lấy được sẽ thành pending_code cho tài
-        # khoản sau và được ghi đè vào invite.txt để nối chuỗi
-        # sang cả lượt chạy sau.
-        pending_code = (invite or "").strip().upper()
-        # total = 0 là chế độ không giới hạn: chạy mãi cho tới
-        # khi toàn bộ kho proxy đã dùng hết một vòng (mỗi proxy
-        # hết hạn mức hoặc bị chặn) thì tự dừng; nút Dừng vẫn
-        # ngắt được bất cứ lúc nào. Nhãn hiển thị là ∞.
-        label_total = total if total > 0 else "∞"
-        index = 0
-        while not self.stop_event.is_set():
-            if total > 0 and index >= total:
-                break
-            if total == 0 and index > 0 and rotation.pool_exhausted():
-                self.events.put(
-                    (
-                        "log",
-                        "Đã dùng hết lượt của toàn bộ proxy trong "
-                        "danh sách — dừng lượt chạy.",
-                    )
-                )
-                break
-            if card_tracked and card_limit > 0 and card_used >= card_limit:
-                self.events.put(
-                    (
-                        "log",
-                        f"Thẻ đang lưu đã đủ {card_limit} tài khoản "
-                        "thành công — dừng lượt chạy. Muốn chạy tiếp "
-                        "thì đổi thẻ ở hàng Thẻ rồi bấm Lưu thẻ (bộ "
-                        "đếm reset về 0).",
-                    )
-                )
-                break
-            index += 1
-            proxy_index, line = rotation.current()
-            if proxy_index != written_proxy_index:
-                written_proxy_index = proxy_index
-                try:
-                    _write_active_proxy(line)
-                    note = ""
-                except OSError as error:
-                    note = f" (không ghi được proxy.txt: {error})"
-                self.events.put(
-                    (
-                        "log",
-                        f"Proxy #{proxy_index + 1}/{len(pool)}: "
-                        f"{_proxy_display(line)} — dùng cho các tài "
-                        f"khoản tiếp theo.{note}",
-                    )
-                )
-            card_note = (
-                f" · Thẻ: {card_used}/{card_limit}" if card_tracked else ""
-            )
-            self.events.put(
-                (
-                    "progress",
-                    f"Tài khoản {index}/{label_total} · Thành công: {success} · "
-                    f"Thất bại: {fail}{card_note}",
-                )
-            )
-            try:
-                address = _create_mailbox_account()
-            except Exception as error:
-                fail += 1
-                self.events.put(
-                    ("log", f"[{index}/{label_total}] Tạo hộp thư thất bại: {error}")
-                )
-                rotation.advance_after_account()
-                continue
+        # Điều phối các luồng chạy song song. Kho proxy được
+        # CHIA theo bước nhảy: luồng k dùng các proxy ở vị trí
+        # k, k+lanes, k+2*lanes, ... — không hai luồng nào dùng
+        # chung một proxy tại cùng thời điểm, và mỗi luồng xoay
+        # vòng trong phần kho của riêng nó (proxy bị chặn cũng
+        # chỉ ảnh hưởng luồng đó). Mỗi luồng có CHUỖI MÃ MỜI
+        # RIÊNG: luồng 1 nối tiếp mã trong ô Mã mời, các luồng
+        # khác tự mở chuỗi mới từ tài khoản đầu của chúng. Thẻ
+        # thì cả các luồng dùng CHUNG một thẻ đã lưu; bộ đếm
+        # giới hạn thẻ tính gộp toàn cục (đếm cả số tài khoản
+        # đang chạy dở để không vượt giới hạn).
+        lanes = max(1, min(int(lanes), 5, len(pool)))
+        if total > 0:
+            lanes = min(lanes, total)
+        shared = {
+            "success": 0,
+            "fail": 0,
+            "card_used": card_used,
+            "in_flight": 0,
+            "card_stop_logged": False,
+        }
+        shared_lock = threading.Lock()
+        if lanes > 1:
             self.events.put(
                 (
                     "log",
-                    f"[{index}/{label_total}] Đã tạo mail {address} — bắt đầu đăng ký.",
+                    f"Chạy {lanes} luồng song song — mỗi luồng "
+                    "một phần kho proxy riêng, một chuỗi mã mời "
+                    "riêng; dùng chung thẻ đã lưu, giới hạn thẻ "
+                    "tính gộp trên tất cả các luồng.",
                 )
             )
-            try:
-                _write_redeem_code(pending_code)
-            except OSError:
-                pass
-            helper_ok, burned, cookie, own_invite = self._run_helper(
-                helper, address, index, label_total
-            )
-            if helper_ok:
-                try:
-                    mail_password = ""
-                    try:
-                        mail_password = (
-                            keyring.get_password(MAIL_SERVICE, address)
-                            or ""
-                        )
-                    except Exception:
-                        mail_password = ""
-                    _append_spreadsheet_row(
-                        address,
-                        mail_password=mail_password,
-                        cookie=cookie,
-                        invite=own_invite,
-                    )
-                    success += 1
-                    if card_tracked:
-                        # Tài khoản chỉ được lưu sau khi qua bước thẻ,
-                        # nên đây đúng là 1 lượt dùng thẻ đang lưu.
-                        card_used += 1
-                        _save_card_success_count(card_used)
-                    self.events.put(
-                        (
-                            "log",
-                            f"[{index}/{label_total}] ✔ Đăng ký thành công {address} "
-                            "— đã lưu vào sheet Excel.",
-                        )
-                    )
-                except RuntimeError as error:
-                    fail += 1
-                    self.events.put(
-                        (
-                            "log",
-                            f"[{index}/{label_total}] {address} đã đăng ký xong nhưng "
-                            f"không ghi được sheet Excel: {error}",
-                        )
-                    )
+        threads = []
+        for lane_no in range(1, lanes + 1):
+            subset = pool[lane_no - 1::lanes]
+            if total > 0:
+                share = total // lanes + (
+                    1 if lane_no <= total % lanes else 0
+                )
             else:
-                fail += 1
-                if self.stop_event.is_set():
-                    self.events.put(
-                        ("log", f"[{index}/{label_total}] Đã dừng theo yêu cầu.")
-                    )
-                else:
-                    self.events.put(
-                        (
-                            "log",
-                            f"[{index}/{label_total}] ✘ Đăng ký thất bại cho {address} "
-                            "— lý do ở dòng RESULT phía trên.",
-                        )
-                    )
-            if helper_ok and own_invite:
-                pending_code = own_invite
-                try:
-                    Path(__file__).with_name("invite.txt").write_text(
-                        own_invite + "\n", encoding="utf-8"
-                    )
-                except OSError:
-                    pass
-                self.events.put(("invite", own_invite))
-                self.events.put(
-                    (
-                        "log",
-                        f"[{index}/{label_total}] Chuỗi mã mời: tài khoản "
-                        f"tiếp theo sẽ quy đổi mã {own_invite} — mã "
-                        "của tài khoản này.",
-                    )
+                share = 0
+            seed = invite if lane_no == 1 else ""
+            lane_args = (
+                lane_no, lanes, share, subset, per_proxy, seed,
+                card_limit, card_tracked, shared, shared_lock,
+            )
+            if lanes == 1:
+                self._run_lane(*lane_args)
+            else:
+                thread = threading.Thread(
+                    target=self._run_lane,
+                    args=lane_args,
+                    name=f"lane-{lane_no}",
+                    daemon=True,
                 )
-            if burned:
-                self.events.put(
-                    (
-                        "log",
-                        f"Proxy #{proxy_index + 1} bị Meta chặn — "
-                        "đổi sang proxy kế từ tài khoản sau.",
-                    )
-                )
-            rotation.advance_after_account(burned=burned)
-            if (total == 0 or index < total) and not self.stop_event.is_set():
-                time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
+                thread.start()
+                threads.append(thread)
+        for thread in threads:
+            thread.join()
         self.events.put(
-            ("finished", (success, fail, self.stop_event.is_set()))
+            (
+                "finished",
+                (
+                    shared["success"],
+                    shared["fail"],
+                    self.stop_event.is_set(),
+                ),
+            )
         )
 
+    def _run_lane(
+        self, lane_no, lanes, share, subset, per_proxy, seed,
+        card_limit, card_tracked, shared, shared_lock,
+    ):
+        helper = Path(__file__).with_name("browser_helper.py")
+        suffix = "" if lane_no == 1 else f"-{lane_no}"
+        self._lane_local.suffix = suffix
+        multi = lanes > 1
+        lane_tag = f"[Luồng {lane_no}] " if multi else ""
+        rotation = _ProxyRotation(subset, per_proxy)
+        written_proxy_index = None
+        # Chuỗi mã mời CỦA LUỒNG NÀY: tài khoản sắp chạy sẽ quy
+        # đổi pending_code (mã của tài khoản trước cùng luồng);
+        # mã nó tự lấy được thành pending_code cho tài khoản sau
+        # cùng luồng và được ghi đè vào invite.txt để lượt chạy
+        # sau có một đầu chuỗi mà nối tiếp.
+        pending_code = (seed or "").strip().upper()
+        # share = 0 là chế độ không giới hạn: luồng chạy tới khi
+        # phần kho proxy của nó dùng hết một vòng thì dừng.
+        label_total = share if share > 0 else "∞"
+        index = 0
+        while not self.stop_event.is_set():
+            if share > 0 and index >= share:
+                break
+            if share == 0 and index > 0 and rotation.pool_exhausted():
+                if multi:
+                    message = (
+                        f"{lane_tag}Đã dùng hết lượt của phần "
+                        "proxy của luồng — luồng dừng."
+                    )
+                else:
+                    message = (
+                        "Đã dùng hết lượt của toàn bộ proxy trong "
+                        "danh sách — dừng lượt chạy."
+                    )
+                self.events.put(("log", message))
+                break
+            with shared_lock:
+                card_hit = (
+                    card_tracked
+                    and card_limit > 0
+                    and shared["card_used"] + shared["in_flight"]
+                    >= card_limit
+                )
+                log_card_stop = (
+                    card_hit and not shared["card_stop_logged"]
+                )
+                if log_card_stop:
+                    shared["card_stop_logged"] = True
+                if not card_hit:
+                    # Giữ chỗ ngay trong cùng một khóa với phép
+                    # kiểm tra: hai luồng không thể cùng thấy
+                    # "còn chỗ" rồi cùng chạy vượt giới hạn thẻ.
+                    # Chỗ được trả lại ở finally cuối vòng lặp.
+                    shared["in_flight"] += 1
+            if card_hit:
+                if log_card_stop:
+                    self.events.put(
+                        (
+                            "log",
+                            f"Thẻ đang lưu đã đủ {card_limit} tài "
+                            "khoản thành công — dừng lượt chạy. "
+                            "Muốn chạy tiếp thì đổi thẻ ở hàng Thẻ "
+                            "rồi bấm Lưu thẻ (bộ đếm reset về 0).",
+                        )
+                    )
+                break
+            try:
+                index += 1
+                display = f"L{lane_no} · {index}" if multi else index
+                proxy_index, line = rotation.current()
+                if proxy_index != written_proxy_index:
+                    written_proxy_index = proxy_index
+                    try:
+                        _write_active_proxy(line, suffix)
+                        note = ""
+                    except OSError as error:
+                        note = f" (không ghi được proxy{suffix}.txt: {error})"
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1}/{len(subset)}: "
+                            f"{_proxy_display(line)} — dùng cho các tài "
+                            f"khoản tiếp theo.{note}",
+                        )
+                    )
+                with shared_lock:
+                    s_now = shared["success"]
+                    f_now = shared["fail"]
+                    c_now = shared["card_used"]
+                card_note = (
+                    f" · Thẻ: {c_now}/{card_limit}" if card_tracked else ""
+                )
+                if multi:
+                    progress_text = (
+                        f"Luồng {lane_no}: {index}/{label_total} · "
+                        f"Tổng thành công: {s_now} · Thất bại: {f_now}"
+                        f"{card_note}"
+                    )
+                else:
+                    progress_text = (
+                        f"Tài khoản {index}/{label_total} · "
+                        f"Thành công: {s_now} · Thất bại: {f_now}"
+                        f"{card_note}"
+                    )
+                self.events.put(("progress", progress_text))
+                try:
+                    address = _create_mailbox_account()
+                except Exception as error:
+                    with shared_lock:
+                        shared["fail"] += 1
+                    self.events.put(
+                        ("log", f"[{display}/{label_total}] Tạo hộp thư thất bại: {error}")
+                    )
+                    rotation.advance_after_account()
+                    continue
+                self.events.put(
+                    (
+                        "log",
+                        f"[{display}/{label_total}] Đã tạo mail {address} — bắt đầu đăng ký.",
+                    )
+                )
+                try:
+                    _write_redeem_code(pending_code, suffix)
+                except OSError:
+                    pass
+                helper_ok, burned, cookie, own_invite = self._run_helper(
+                    helper, address, display, label_total
+                )
+                if helper_ok:
+                    saved = False
+                    save_error = None
+                    with shared_lock:
+                        try:
+                            mail_password = ""
+                            try:
+                                mail_password = (
+                                    keyring.get_password(MAIL_SERVICE, address)
+                                    or ""
+                                )
+                            except Exception:
+                                mail_password = ""
+                            _append_spreadsheet_row(
+                                address,
+                                mail_password=mail_password,
+                                cookie=cookie,
+                                invite=own_invite,
+                            )
+                            saved = True
+                            shared["success"] += 1
+                            if card_tracked:
+                                # Tài khoản chỉ được lưu sau khi qua
+                                # bước thẻ, nên đây đúng là 1 lượt
+                                # dùng thẻ đang lưu.
+                                shared["card_used"] += 1
+                                _save_card_success_count(shared["card_used"])
+                        except RuntimeError as error:
+                            shared["fail"] += 1
+                            save_error = error
+                    if saved:
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] ✔ Đăng ký thành công {address} "
+                                "— đã lưu vào sheet Excel.",
+                            )
+                        )
+                    else:
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] {address} đã đăng ký xong nhưng "
+                                f"không ghi được sheet Excel: {save_error}",
+                            )
+                        )
+                else:
+                    with shared_lock:
+                        shared["fail"] += 1
+                    if self.stop_event.is_set():
+                        self.events.put(
+                            ("log", f"[{display}/{label_total}] Đã dừng theo yêu cầu.")
+                        )
+                    else:
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] ✘ Đăng ký thất bại cho {address} "
+                                "— lý do ở dòng RESULT phía trên.",
+                            )
+                        )
+                if helper_ok and own_invite:
+                    pending_code = own_invite
+                    try:
+                        Path(__file__).with_name("invite.txt").write_text(
+                            own_invite + "\n", encoding="utf-8"
+                        )
+                    except OSError:
+                        pass
+                    self.events.put(("invite", own_invite))
+                    self.events.put(
+                        (
+                            "log",
+                            f"[{display}/{label_total}] Chuỗi mã mời: tài khoản "
+                            f"tiếp theo sẽ quy đổi mã {own_invite} — mã "
+                            "của tài khoản này.",
+                        )
+                    )
+                if burned:
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1} bị Meta chặn — "
+                            "đổi sang proxy kế từ tài khoản sau.",
+                        )
+                    )
+                rotation.advance_after_account(burned=burned)
+                if (share == 0 or index < share) and not self.stop_event.is_set():
+                    time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
+            finally:
+                with shared_lock:
+                    shared["in_flight"] -= 1
+
+
     def _run_helper(self, helper, address, index, total):
+        suffix = getattr(self._lane_local, "suffix", "")
+        command = [sys.executable, str(helper), address, "--auto"]
+        if suffix:
+            command.append(suffix.lstrip("-"))
         try:
             process = subprocess.Popen(
-                [sys.executable, str(helper), address, "--auto"],
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1015,6 +1166,8 @@ class MuseAIHelper(tk.Tk):
             )
             return False, False, "", ""
         self.helper_process = process
+        with self._process_lock:
+            self.helper_processes.add(process)
         signals = {"burn": False, "cookie": "", "invite": ""}
 
         def forward_output():
@@ -1059,6 +1212,8 @@ class MuseAIHelper(tk.Tk):
             process.kill()
         reader.join(timeout=2)
         self.helper_process = None
+        with self._process_lock:
+            self.helper_processes.discard(process)
         return (
             process.returncode == 0 and not self.stop_event.is_set()
         ), signals["burn"], signals["cookie"], signals["invite"]

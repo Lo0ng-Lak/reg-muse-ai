@@ -38,9 +38,10 @@ proxies included, then the run stops on its own), and click **Bắt đầu
 đăng ký**. For each account
 the app then, with no further clicks:
 
-1. Creates a random tempmail.plus address and saves the mailbox password to
-   Windows Credential Manager. (There is no Muse.ai password — signup
-   is email plus a one-time code.)
+1. Creates a random tempmail.plus address. tempmail.plus inboxes have no
+   password — the address itself is the inbox key, so nothing is stored.
+   (There is no Muse.ai password either — signup is email plus a
+   one-time code.)
 2. Opens a dedicated Chromium window **through the proxy**, first checks the
    exit IP it actually got, and only continues if that IP is in the US.
    It then fills the email into the visible "Mobile number or email" field
@@ -134,6 +135,21 @@ still fails that account. tempmail.plus traffic stays on the machine's direct
 connection. The log only ever shows each proxy's host:port, never its
 password. `proxies.txt` and `proxy.txt` are listed in `.gitignore`, so
 they are never committed — keep it that way.
+
+**Số luồng** (1–5, default 1) runs that many registration lanes in
+parallel. The proxy pool is split by stride — lane k uses the proxies at
+positions k, k+lanes, k+2·lanes, … — so no two lanes ever share a proxy
+at the same time, and each lane rotates (and burns) within its own
+slice. Each lane keeps its **own invite chain**: lane 1 continues the
+code in the Mã mời field, the other lanes start fresh chains from their
+first account, and within a lane each account redeems the previous
+account's code exactly as in single-lane mode. All lanes share the **one
+saved card**, and the per-card success limit counts globally across
+lanes (slots are reserved atomically, so the limit is never overshot).
+Lanes need at least as many proxies as lanes; with fewer proxies the
+lane count is reduced to the pool size. Per-lane state lives in
+`proxy-<n>.txt` / `redeem-<n>.txt` next to the scripts (also gitignored);
+the spreadsheet is written under a lock so lanes cannot corrupt it.
 
 ### Your card: entered once, kept in Windows Credential Manager
 
