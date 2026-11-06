@@ -337,12 +337,30 @@ BAD_PROXIES_FILE = Path(__file__).with_name("bad-proxies.txt")
 
 
 def _proxy_key(value):
-    """Khoá định danh một proxy = host:port (không gồm tài khoản).
+    """Khoá định danh một proxy = nguyên dòng proxy (gồm cả
+    user/password), chuẩn hoá khoảng trắng và chữ hoa/thường.
 
-    Proxy bị loại theo đầu endpoint: cùng host:port thì dù dòng
-    proxy có thay user/password vẫn là một đầu ra đã hỏng.
+    Các dòng proxy có thể dùng chung một cổng host:port (kiểu
+    cổng xoay vòng) mà mỗi user/password là một phiên/IP thoát
+    riêng — định danh theo host:port sẽ gộp chúng thành một và
+    phá kho. Chỉ gộp khi hai dòng giống hệt nhau.
     """
-    return _proxy_display(value).strip().lower()
+    return value.strip().lower()
+
+
+def _prepare_pool(pool, bad_keys):
+    """Lọc kho proxy cho một đợt chạy: bỏ các dòng nằm trong kho
+    lỗi (khớp theo nguyên dòng qua _proxy_key) và bỏ dòng trùng
+    hệt nhau (giữ dòng đầu tiên)."""
+    seen = set()
+    result = []
+    for line in pool:
+        key = _proxy_key(line)
+        if key in bad_keys or key in seen:
+            continue
+        seen.add(key)
+        result.append(line)
+    return result
 
 
 def _load_bad_proxies():
@@ -911,32 +929,23 @@ class MuseAIHelper(tk.Tk):
             return
         bad_keys = self._sync_bad_proxies()
         if bad_keys:
-            kept = [
-                line for line in pool if _proxy_key(line) not in bad_keys
-            ]
-            excluded = len(pool) - len(kept)
-            pool = kept
+            excluded = sum(
+                1 for line in pool if _proxy_key(line) in bad_keys
+            )
             if excluded:
                 self._append_log(
                     f"Đã loại {excluded} proxy trong ô Proxy lỗi "
                     "khỏi kho cho đợt chạy này."
                 )
-            if not pool:
-                messagebox.showwarning(
-                    "Toàn bộ proxy đều nằm trong kho lỗi",
-                    "Mọi proxy trong ô Proxy đều đã bị đánh dấu "
-                    "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
-                    "lại, hoặc dán proxy mới vào ô Proxy.",
-                )
-                return
-        seen_keys = set()
-        deduped = []
-        for line in pool:
-            key = _proxy_key(line)
-            if key not in seen_keys:
-                seen_keys.add(key)
-                deduped.append(line)
-        pool = deduped
+        pool = _prepare_pool(pool, bad_keys)
+        if bad_keys and not pool:
+            messagebox.showwarning(
+                "Toàn bộ proxy đều nằm trong kho lỗi",
+                "Mọi proxy trong ô Proxy đều đã bị đánh dấu "
+                "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
+                "lại, hoặc dán proxy mới vào ô Proxy.",
+            )
+            return
         invite = self._sync_invite_code()
         if not invite:
             seed = _last_invite_from_sheet()
