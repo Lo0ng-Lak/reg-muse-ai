@@ -6,3 +6,4 @@ venv/
 proxy*.txt
 invite.txt
 redeem*.txt
+bad-proxies.txt

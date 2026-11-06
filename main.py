@@ -328,6 +328,49 @@ def _line_burns_proxy(line):
     return line.startswith("PROXY_BURN")
 
 
+def _line_flags_waitlist(line):
+    """Dòng tín hiệu từ browser_helper: IP thoát bị Join the waitlist."""
+    return line.startswith("WAITLIST:")
+
+
+BAD_PROXIES_FILE = Path(__file__).with_name("bad-proxies.txt")
+
+
+def _proxy_key(value):
+    """Khoá định danh một proxy = host:port (không gồm tài khoản).
+
+    Proxy bị loại theo đầu endpoint: cùng host:port thì dù dòng
+    proxy có thay user/password vẫn là một đầu ra đã hỏng.
+    """
+    return _proxy_display(value).strip().lower()
+
+
+def _load_bad_proxies():
+    """Đọc kho proxy lỗi từ bad-proxies.txt → dict khoá → dòng gốc."""
+    result = {}
+    try:
+        text = BAD_PROXIES_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return result
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            result[_proxy_key(line)] = line
+    return result
+
+
+def _save_bad_proxies(mapping):
+    try:
+        if mapping:
+            BAD_PROXIES_FILE.write_text(
+                "\n".join(mapping.values()) + "\n", encoding="utf-8"
+            )
+        elif BAD_PROXIES_FILE.exists():
+            BAD_PROXIES_FILE.unlink()
+    except OSError:
+        pass
+
+
 def _session_cookie_from_line(line):
     """Tách cookie phiên từ dòng tín hiệu của helper (None nếu không phải).
 
@@ -378,22 +421,45 @@ class _ProxyRotation:
         self.cursor = 0
         self.used = 0
         self.cycles = 0
+        self.retired = set()
 
     def current(self):
         return self.cursor, self.pool[self.cursor]
 
+    def _step(self):
+        if self.cursor + 1 >= len(self.pool):
+            # Vừa dùng xong proxy cuối: đã đi hết một vòng kho.
+            self.cycles += 1
+        self.cursor = (self.cursor + 1) % len(self.pool)
+
+    def _skip_retired(self):
+        guard = 0
+        while self.cursor in self.retired and guard < len(self.pool):
+            self._step()
+            guard += 1
+
     def advance_after_account(self, burned=False):
         self.used += 1
         if burned or self.used >= self.per_proxy:
-            if self.cursor + 1 >= len(self.pool):
-                # Vừa dùng xong proxy cuối: đã đi hết một vòng kho.
-                self.cycles += 1
-            self.cursor = (self.cursor + 1) % len(self.pool)
+            self._step()
             self.used = 0
+            self._skip_retired()
+
+    def retire_current(self):
+        """Loại hẳn proxy hiện tại: bỏ phần hạn mức còn lại và
+        không bao giờ quay lại proxy này, kể cả khi xoay vòng."""
+        self.retired.add(self.cursor)
+        self._step()
+        self.used = 0
+        self._skip_retired()
+
+    def all_retired(self):
+        return len(self.retired) >= len(self.pool)
 
     def pool_exhausted(self):
-        """Đã đi hết một vòng kho proxy (mỗi proxy hết lượt một lần)."""
-        return self.cycles >= 1
+        """Đã đi hết một vòng kho proxy (mỗi proxy hết lượt một lần),
+        hoặc mọi proxy đều đã bị loại vào kho lỗi."""
+        return self.cycles >= 1 or self.all_retired()
 
 
 def _write_active_proxy(line, suffix=""):
@@ -418,6 +484,8 @@ class MuseAIHelper(tk.Tk):
         self.helper_process = None
         self.helper_processes = set()
         self._process_lock = threading.Lock()
+        self._bad_lock = threading.Lock()
+        self._bad_proxies = _load_bad_proxies()
         self._lane_local = threading.local()
 
         self._build_ui()
@@ -438,7 +506,7 @@ class MuseAIHelper(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(5, weight=1)
+        root.rowconfigure(6, weight=1)
 
         ttk.Label(
             root,
@@ -448,7 +516,7 @@ class MuseAIHelper(tk.Tk):
         ttk.Label(
             root,
             text=(
-                "Mail.tm cung cấp email tạm, không phải Gmail, và Muse.ai có thể "
+                "tempmail.plus cung cấp email tạm, không phải Gmail, và Muse.ai có thể "
                 "từ chối email tạm. Mỗi tài khoản: tạo mail → mở form đăng ký → "
                 "tự lấy mã xác minh → điền hồ sơ → thành công mới lưu lại, rồi "
                 "tự chuyển sang tài khoản tiếp theo."
@@ -486,8 +554,28 @@ class MuseAIHelper(tk.Tk):
         if saved_pool:
             self.proxy_text.insert("1.0", saved_pool)
 
+        bad_row = ttk.Frame(root)
+        bad_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        bad_row.columnconfigure(1, weight=1)
+        ttk.Label(bad_row, text="Proxy lỗi:").grid(row=0, column=0, sticky="nw")
+        self.bad_proxy_text = tk.Text(bad_row, height=3, width=52)
+        self.bad_proxy_text.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        ttk.Label(
+            bad_row,
+            text=(
+                "proxy bị 'Join the waitlist' hoặc bị Meta chặn sẽ "
+                "tự vào đây và không được dùng lại ở mọi đợt chạy "
+                "sau — xoá một dòng là cho dùng lại proxy đó"
+            ),
+            wraplength=190,
+        ).grid(row=0, column=2, sticky="w")
+        if self._bad_proxies:
+            self.bad_proxy_text.insert(
+                "1.0", "\n".join(self._bad_proxies.values())
+            )
+
         card_row = ttk.Frame(root)
-        card_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        card_row.grid(row=4, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(card_row, text="Thẻ:").pack(side="left")
         self.card_number_entry = ttk.Entry(card_row, width=24)
         self.card_number_entry.pack(side="left", padx=(6, 8))
@@ -518,7 +606,7 @@ class MuseAIHelper(tk.Tk):
             self.card_zip_entry.insert(0, "10001")
 
         controls = ttk.Frame(root)
-        controls.grid(row=4, column=0, sticky="ew")
+        controls.grid(row=5, column=0, sticky="ew")
         ttk.Label(controls, text="Số tài khoản:").pack(side="left")
         self.count_var = tk.IntVar(value=5)
         self.count_spin = ttk.Spinbox(
@@ -577,7 +665,7 @@ class MuseAIHelper(tk.Tk):
         self.open_sheet_button.pack(side="right")
 
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=5, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=6, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -689,6 +777,40 @@ class MuseAIHelper(tk.Tk):
             raise RuntimeError(f"Không ghi được file proxy: {error}") from error
         return pool
 
+    def _sync_bad_proxies(self):
+        """Đồng bộ ô Proxy lỗi thành kho loại trừ cho lượt chạy.
+
+        Nội dung ô là nguồn sự thật: dòng nào còn trong ô thì
+        proxy đó bị loại; xoá dòng khỏi ô là cho dùng lại. Kho
+        được lưu vào bad-proxies.txt để giữ qua các lần mở app.
+        Trả về tập khoá host:port bị loại.
+        """
+        raw = self.bad_proxy_text.get("1.0", "end")
+        mapping = {}
+        for line in raw.splitlines():
+            line = line.strip()
+            if line:
+                mapping[_proxy_key(line)] = line
+        self._bad_proxies = mapping
+        _save_bad_proxies(mapping)
+        return set(mapping)
+
+    def _mark_proxy_bad(self, line):
+        """Đưa một proxy vào kho lỗi (thread-safe, gọi từ các luồng).
+
+        Ghi ngay xuống bad-proxies.txt và báo cho giao diện thêm
+        dòng vào ô Proxy lỗi. Trả về True nếu đây là lần đầu
+        proxy này bị đánh dấu.
+        """
+        key = _proxy_key(line)
+        with self._bad_lock:
+            if key in self._bad_proxies:
+                return False
+            self._bad_proxies[key] = line
+            _save_bad_proxies(self._bad_proxies)
+        self.events.put(("bad_proxy", line))
+        return True
+
     def _sync_invite_code(self):
         """Lưu mã mời (nếu có) vào invite.txt để lần sau tự điền lại."""
         code = self.invite_entry.get().strip()
@@ -706,6 +828,7 @@ class MuseAIHelper(tk.Tk):
         self.start_button.configure(state="disabled" if running else "normal")
         self.count_spin.configure(state="disabled" if running else "normal")
         self.proxy_text.configure(state="disabled" if running else "normal")
+        self.bad_proxy_text.configure(state="disabled" if running else "normal")
         self.per_proxy_spin.configure(state="disabled" if running else "normal")
         self.card_limit_spin.configure(state="disabled" if running else "normal")
         self.lanes_spin.configure(state="disabled" if running else "normal")
@@ -786,6 +909,34 @@ class MuseAIHelper(tk.Tk):
                 "dạng host:port:user:pass) vào ô Proxy rồi bấm lại.",
             )
             return
+        bad_keys = self._sync_bad_proxies()
+        if bad_keys:
+            kept = [
+                line for line in pool if _proxy_key(line) not in bad_keys
+            ]
+            excluded = len(pool) - len(kept)
+            pool = kept
+            if excluded:
+                self._append_log(
+                    f"Đã loại {excluded} proxy trong ô Proxy lỗi "
+                    "khỏi kho cho đợt chạy này."
+                )
+            if not pool:
+                messagebox.showwarning(
+                    "Toàn bộ proxy đều nằm trong kho lỗi",
+                    "Mọi proxy trong ô Proxy đều đã bị đánh dấu "
+                    "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
+                    "lại, hoặc dán proxy mới vào ô Proxy.",
+                )
+                return
+        seen_keys = set()
+        deduped = []
+        for line in pool:
+            key = _proxy_key(line)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(line)
+        pool = deduped
         invite = self._sync_invite_code()
         if not invite:
             seed = _last_invite_from_sheet()
@@ -959,6 +1110,15 @@ class MuseAIHelper(tk.Tk):
                     )
                 self.events.put(("log", message))
                 break
+            if rotation.all_retired():
+                self.events.put(
+                    (
+                        "log",
+                        f"{lane_tag}Toàn bộ proxy của luồng đã bị "
+                        "đưa vào kho proxy lỗi — luồng dừng.",
+                    )
+                )
+                break
             with shared_lock:
                 card_hit = (
                     card_tracked
@@ -1048,7 +1208,7 @@ class MuseAIHelper(tk.Tk):
                     _write_redeem_code(pending_code, suffix)
                 except OSError:
                     pass
-                helper_ok, burned, cookie, own_invite = self._run_helper(
+                helper_ok, burned, waitlisted, cookie, own_invite = self._run_helper(
                     helper, address, display, label_total
                 )
                 if helper_ok:
@@ -1137,7 +1297,31 @@ class MuseAIHelper(tk.Tk):
                             "đổi sang proxy kế từ tài khoản sau.",
                         )
                     )
-                rotation.advance_after_account(burned=burned)
+                if burned or waitlisted:
+                    # Proxy này hỏng ở cấp IP: Meta chặn tạo tài
+                    # khoản, hoặc IP thoát rơi vào khu vực chưa
+                    # hỗ trợ (waitlist). Đưa vào kho proxy lỗi để
+                    # loại khỏi mọi đợt chạy sau, và loại ngay
+                    # trong đợt này (kể cả khi xoay vòng quay lại).
+                    reason = (
+                        "bị Meta chặn tạo tài khoản"
+                        if burned
+                        else "bị 'Join the waitlist' (khu vực "
+                        "không hỗ trợ)"
+                    )
+                    if self._mark_proxy_bad(line):
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] Proxy "
+                                f"{_proxy_display(line)} {reason} — "
+                                "đã đưa vào ô Proxy lỗi, không dùng "
+                                "lại ở các đợt sau.",
+                            )
+                        )
+                    rotation.retire_current()
+                else:
+                    rotation.advance_after_account(burned=burned)
                 if (share == 0 or index < share) and not self.stop_event.is_set():
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
             finally:
@@ -1164,11 +1348,11 @@ class MuseAIHelper(tk.Tk):
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False, "", ""
+            return False, False, False, "", ""
         self.helper_process = process
         with self._process_lock:
             self.helper_processes.add(process)
-        signals = {"burn": False, "cookie": "", "invite": ""}
+        signals = {"burn": False, "waitlist": False, "cookie": "", "invite": ""}
 
         def forward_output():
             for line in process.stdout:
@@ -1176,6 +1360,8 @@ class MuseAIHelper(tk.Tk):
                 if line:
                     if _line_burns_proxy(line):
                         signals["burn"] = True
+                    if _line_flags_waitlist(line):
+                        signals["waitlist"] = True
                     cookie = _session_cookie_from_line(line)
                     if cookie is not None:
                         # Cookie phiên chỉ đi vào sheet, không vào log.
@@ -1216,7 +1402,7 @@ class MuseAIHelper(tk.Tk):
             self.helper_processes.discard(process)
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"], signals["cookie"], signals["invite"]
+        ), signals["burn"], signals["waitlist"], signals["cookie"], signals["invite"]
 
     def _process_events(self):
         try:
@@ -1224,6 +1410,28 @@ class MuseAIHelper(tk.Tk):
                 kind, payload = self.events.get_nowait()
                 if kind == "log":
                     self._append_log(payload)
+                elif kind == "bad_proxy":
+                    existing = {
+                        _proxy_key(line)
+                        for line in self.bad_proxy_text.get(
+                            "1.0", "end"
+                        ).splitlines()
+                        if line.strip()
+                    }
+                    if _proxy_key(payload) not in existing:
+                        if self.running:
+                            self.bad_proxy_text.configure(state="normal")
+                        current = self.bad_proxy_text.get(
+                            "1.0", "end"
+                        ).strip()
+                        self.bad_proxy_text.delete("1.0", "end")
+                        self.bad_proxy_text.insert(
+                            "1.0",
+                            (current + "\n" if current else "")
+                            + payload,
+                        )
+                        if self.running:
+                            self.bad_proxy_text.configure(state="disabled")
                 elif kind == "invite":
                     # Ô Mã mời luôn phản ánh đầu chuỗi hiện tại: mã
                     # của tài khoản thành công gần nhất.

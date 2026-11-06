@@ -1584,6 +1584,10 @@ def main():
                     "của proxy đang dùng đã bị chặn; đổi proxy khác."
                 )
             if outcome == "waitlist":
+                _status(
+                    "WAITLIST: IP thoát rơi vào khu vực chưa được "
+                    "hỗ trợ ('Join the waitlist')."
+                )
                 raise RuntimeError(
                     "Ra màn hình 'Join the waitlist' — Muse chưa khả "
                     "dụng ở IP thoát hiện tại. Hãy đổi sang proxy US "
