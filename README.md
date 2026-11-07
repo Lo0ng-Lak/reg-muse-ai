@@ -140,10 +140,11 @@ they are never committed — keep it that way.
 parallel. The proxy pool is split by stride — lane k uses the proxies at
 positions k, k+lanes, k+2·lanes, … — so no two lanes ever share a proxy
 at the same time, and each lane rotates (and burns) within its own
-slice. Each lane keeps its **own invite chain**: lane 1 continues the
-code in the Mã mời field, the other lanes start fresh chains from their
-first account, and within a lane each account redeems the previous
-account's code exactly as in single-lane mode. All lanes share the **one
+slice. Each lane keeps its **own invite chain** with one shared start:
+the **first account of every lane** redeems the code in the Mã mời
+field (the code you set in the tool); from the second account on, each
+lane continues with the codes its own accounts harvest, exactly as in
+single-lane mode. All lanes share the **one
 saved card**, and the per-card success limit counts globally across
 lanes (slots are reserved atomically, so the limit is never overshot).
 Lanes need at least as many proxies as lanes; with fewer proxies the

@@ -1020,8 +1020,10 @@ class MuseAIHelper(tk.Tk):
         # chung một proxy tại cùng thời điểm, và mỗi luồng xoay
         # vòng trong phần kho của riêng nó (proxy bị chặn cũng
         # chỉ ảnh hưởng luồng đó). Mỗi luồng có CHUỖI MÃ MỜI
-        # RIÊNG: luồng 1 nối tiếp mã trong ô Mã mời, các luồng
-        # khác tự mở chuỗi mới từ tài khoản đầu của chúng. Thẻ
+        # RIÊNG, nhưng tài khoản ĐẦU TIÊN của mọi luồng đều
+        # quy đổi mã trong ô Mã mời (mã chủ tool cài đặt); từ
+        # tài khoản thứ hai, mỗi luồng nối tiếp mã do tài khoản
+        # trước trong chính luồng đó lấy được. Thẻ
         # thì cả các luồng dùng CHUNG một thẻ đã lưu; bộ đếm
         # giới hạn thẻ tính gộp toàn cục (đếm cả số tài khoản
         # đang chạy dở để không vượt giới hạn).
@@ -1042,8 +1044,10 @@ class MuseAIHelper(tk.Tk):
                     "log",
                     f"Chạy {lanes} luồng song song — mỗi luồng "
                     "một phần kho proxy riêng, một chuỗi mã mời "
-                    "riêng; dùng chung thẻ đã lưu, giới hạn thẻ "
-                    "tính gộp trên tất cả các luồng.",
+                    "riêng (tài khoản đầu của mọi luồng đều quy "
+                    "đổi mã trong ô Mã mời); dùng chung thẻ đã "
+                    "lưu, giới hạn thẻ tính gộp trên tất cả các "
+                    "luồng.",
                 )
             )
         threads = []
@@ -1055,7 +1059,7 @@ class MuseAIHelper(tk.Tk):
                 )
             else:
                 share = 0
-            seed = invite if lane_no == 1 else ""
+            seed = invite
             lane_args = (
                 lane_no, lanes, share, subset, per_proxy, seed,
                 card_limit, card_tracked, shared, shared_lock,
