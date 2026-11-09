@@ -18,19 +18,12 @@ from tkinter import messagebox, ttk
 import keyring
 from openpyxl import Workbook, load_workbook
 
+import mail_providers
 
-API_BASE = "https://tempmail.plus"
-# Domain hộp thư của tempmail.plus (đọc từ trang chủ của họ,
-# 2026-11-06). Dịch vụ không có API liệt kê domain nên danh
-# sách nằm tại đây; "tạo hộp thư" thử lần lượt từng domain.
-TEMPMAIL_DOMAINS = [
-    "mailto.plus",
-    "fexpost.com",
-    "fexbox.org",
-    "fextemp.com",
-    "merepost.com",
-    "rover.info",
-]
+
+# Giữ lại cho tương thích (test cũ đọc danh sách này): danh
+# sách domain tempmail.plus sống ở mail_providers.
+TEMPMAIL_DOMAINS = mail_providers.TEMPMAIL_PLUS_DOMAINS
 SPREADSHEET_FILE = (
     Path.home() / "AppData" / "Local" / "MuseAIHelper" / "accounts.xlsx"
 )
@@ -42,81 +35,16 @@ HELPER_TIMEOUT_SECONDS = 900
 PAUSE_BETWEEN_ACCOUNTS_SECONDS = 1
 
 
-def _request(method, path, payload=None, token=None):
-    headers = {
-        "Accept": "application/ld+json",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/130.0.0.0 Safari/537.36"
-        ),
-    }
-    data = None
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(payload).encode("utf-8")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+def _create_mailbox_account(provider_id=mail_providers.DEFAULT_PROVIDER):
+    """Tạo một hộp thư qua dịch vụ temp mail đã chọn.
 
-    request = urllib.request.Request(
-        f"{API_BASE}{path}", data=data, headers=headers, method=method
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = response.read()
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(detail)
-            detail = parsed.get("hydra:description") or parsed.get("detail") or detail
-        except (json.JSONDecodeError, AttributeError):
-            pass
-        raise RuntimeError(f"tempmail.plus trả lỗi HTTP {error.code}: {detail}") from error
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError(f"Không kết nối được tempmail.plus: {error}") from error
-
-    if not body:
-        return {}
-    return json.loads(body.decode("utf-8"))
-
-
-def _create_mailbox_account():
-    """Tạo một địa chỉ hộp thư tempmail.plus mới.
-
-    tempmail.plus không cần đăng ký hộp thư và không có mật
-    khẩu: mọi địa chỉ thuộc các domain của họ đều nhận thư
-    ngay, và API đọc thư bằng chính địa chỉ đó. "Tạo" ở đây
-    là sinh địa chỉ ngẫu nhiên rồi gọi API một lần để chắc
-    chắn dịch vụ đang trả lời cho domain đó. Trả về địa chỉ.
+    Toàn bộ logic theo từng dịch vụ nằm ở mail_providers.
+    Trả về dict {"provider", "email", "secret"} — secret là
+    mật khẩu hộp thư (mail.tm) hoặc token (tempmail.lol,
+    guerrillamail); tempmail.plus và maildrop.cc để trống vì
+    ở đó địa chỉ tự nó là khoá hộp thư.
     """
-    last_error = None
-    # Bắt đầu từ một domain ngẫu nhiên mỗi lần: các tài khoản
-    # tản đều trên cả 6 domain thay vì dồn hết vào domain đầu,
-    # và nếu Meta chê một domain nào đó thì chỉ phần tài khoản
-    # rơi vào domain đó bị ảnh hưởng.
-    start = secrets.randbelow(len(TEMPMAIL_DOMAINS))
-    ordered = TEMPMAIL_DOMAINS[start:] + TEMPMAIL_DOMAINS[:start]
-    for domain in ordered:
-        address = f"muse{secrets.token_hex(5)}@{domain}"
-        try:
-            response = _request(
-                "GET",
-                "/api/mails?email="
-                + urllib.parse.quote(address)
-                + "&limit=1",
-            )
-        except RuntimeError as error:
-            last_error = error
-            continue
-        if response.get("result") is False:
-            last_error = RuntimeError(
-                "tempmail.plus từ chối địa chỉ hộp thư."
-            )
-            continue
-        return address
-    raise last_error or RuntimeError(
-        "Không tạo được hộp thư tempmail.plus."
-    )
+    return mail_providers.create_mailbox(provider_id)
 
 
 SPREADSHEET_HEADERS = [
@@ -423,6 +351,21 @@ def _write_redeem_code(code, suffix=""):
         redeem_file.unlink()
 
 
+def _write_mailbox(mailbox, suffix=""):
+    """Ghi hộp thư của tài khoản sắp chạy vào mailbox.txt.
+
+    browser_helper đọc file này để biết đọc thư ở dịch vụ nào
+    và bằng bí mật nào (mật khẩu mail.tm / token tempmail.lol
+    / sid_token Guerrillamail). suffix là hậu tố riêng của
+    luồng song song ("", "-2", ...) như proxy/redeem. File
+    chứa bí mật hộp thư nên nằm trong .gitignore.
+    """
+    Path(__file__).with_name(f"mailbox{suffix}.txt").write_text(
+        json.dumps(mailbox, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
 class _ProxyRotation:
     """Xoay proxy theo hạn mức tài khoản; proxy bị chặn thì bỏ ngay.
 
@@ -525,7 +468,7 @@ class MuseAIHelper(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(6, weight=1)
+        root.rowconfigure(7, weight=1)
 
         ttk.Label(
             root,
@@ -535,7 +478,7 @@ class MuseAIHelper(tk.Tk):
         ttk.Label(
             root,
             text=(
-                "tempmail.plus cung cấp email tạm, không phải Gmail, và Muse.ai có thể "
+                "Email tạm lấy từ dịch vụ ở ô Temp mail bên dưới, không phải Gmail, và Muse.ai có thể "
                 "từ chối email tạm. Mỗi tài khoản: tạo mail → mở form đăng ký → "
                 "tự lấy mã xác minh → điền hồ sơ → thành công mới lưu lại, rồi "
                 "tự chuyển sang tài khoản tiếp theo."
@@ -683,8 +626,34 @@ class MuseAIHelper(tk.Tk):
         )
         self.open_sheet_button.pack(side="right")
 
+        mail_row = ttk.Frame(root)
+        mail_row.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(mail_row, text="Temp mail:").pack(side="left")
+        self.provider_var = tk.StringVar(
+            value=dict(mail_providers.PROVIDERS)[
+                mail_providers.DEFAULT_PROVIDER
+            ]
+        )
+        self.provider_combo = ttk.Combobox(
+            mail_row,
+            textvariable=self.provider_var,
+            values=[label for _, label in mail_providers.PROVIDERS],
+            state="readonly",
+            width=16,
+        )
+        self.provider_combo.pack(side="left", padx=(6, 8))
+        ttk.Label(
+            mail_row,
+            text=(
+                "dịch vụ hộp thư tạm cho lượt chạy — tempmail.plus "
+                "là mặc định và là dịch vụ duy nhất đã kiểm chứng "
+                "nhận OTP từ Meta tới nay"
+            ),
+            wraplength=480,
+        ).pack(side="left")
+
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=6, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=7, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -697,7 +666,7 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=7, column=0, sticky="ew", pady=(10, 0)
+            row=8, column=0, sticky="ew", pady=(10, 0)
         )
 
     def _save_card(self):
@@ -852,6 +821,9 @@ class MuseAIHelper(tk.Tk):
         self.card_limit_spin.configure(state="disabled" if running else "normal")
         self.lanes_spin.configure(state="disabled" if running else "normal")
         self.invite_entry.configure(state="disabled" if running else "normal")
+        self.provider_combo.configure(
+            state="disabled" if running else "readonly"
+        )
         for widget in (
             self.card_number_entry,
             self.card_expiry_entry,
@@ -958,6 +930,15 @@ class MuseAIHelper(tk.Tk):
                     f"Ô Mã mời trống — tự lấy mã {seed} từ dòng "
                     "cuối trong sheet làm đầu chuỗi."
                 )
+        provider_label = self.provider_var.get()
+        provider_id = next(
+            (
+                pid
+                for pid, label in mail_providers.PROVIDERS
+                if label == provider_label
+            ),
+            mail_providers.DEFAULT_PROVIDER,
+        )
         self.running = True
         self._lane_progress = {}
         self.stop_event.clear()
@@ -978,6 +959,9 @@ class MuseAIHelper(tk.Tk):
             "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
             "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
         )
+        self._append_log(
+            f"Dịch vụ temp mail cho lượt chạy này: {provider_label}."
+        )
         if card_tracked:
             self._append_log(
                 f"Giới hạn thẻ đang lưu: {card_used}/{card_limit} tài "
@@ -986,7 +970,7 @@ class MuseAIHelper(tk.Tk):
             )
         threading.Thread(
             target=self._run_loop,
-            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes),
+            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes, provider_id),
             daemon=True,
         ).start()
 
@@ -1013,6 +997,7 @@ class MuseAIHelper(tk.Tk):
     def _run_loop(
         self, total, pool, per_proxy, invite,
         card_limit=0, card_used=0, card_tracked=False, lanes=1,
+        provider_id=mail_providers.DEFAULT_PROVIDER,
     ):
         # Điều phối các luồng chạy song song. Kho proxy được
         # CHIA theo bước nhảy: luồng k dùng các proxy ở vị trí
@@ -1063,6 +1048,7 @@ class MuseAIHelper(tk.Tk):
             lane_args = (
                 lane_no, lanes, share, subset, per_proxy, seed,
                 card_limit, card_tracked, shared, shared_lock,
+                provider_id,
             )
             if lanes == 1:
                 self._run_lane(*lane_args)
@@ -1091,6 +1077,7 @@ class MuseAIHelper(tk.Tk):
     def _run_lane(
         self, lane_no, lanes, share, subset, per_proxy, seed,
         card_limit, card_tracked, shared, shared_lock,
+        provider_id=mail_providers.DEFAULT_PROVIDER,
     ):
         helper = Path(__file__).with_name("browser_helper.py")
         suffix = "" if lane_no == 1 else f"-{lane_no}"
@@ -1205,7 +1192,7 @@ class MuseAIHelper(tk.Tk):
                     )
                 )
                 try:
-                    address = _create_mailbox_account()
+                    created = _create_mailbox_account(provider_id)
                 except Exception as error:
                     with shared_lock:
                         shared["fail"] += 1
@@ -1214,6 +1201,18 @@ class MuseAIHelper(tk.Tk):
                     )
                     rotation.advance_after_account()
                     continue
+                if isinstance(created, dict):
+                    mailbox = created
+                else:
+                    # Tương thích ngược (bản vá kiểm thử trả về
+                    # chuỗi địa chỉ trần): coi như hộp thư không
+                    # có bí mật ở dịch vụ đang chọn.
+                    mailbox = {
+                        "provider": provider_id,
+                        "email": str(created),
+                        "secret": "",
+                    }
+                address = mailbox["email"]
                 self.events.put(
                     (
                         "log",
@@ -1224,6 +1223,10 @@ class MuseAIHelper(tk.Tk):
                     _write_redeem_code(pending_code, suffix)
                 except OSError:
                     pass
+                try:
+                    _write_mailbox(mailbox, suffix)
+                except OSError:
+                    pass
                 helper_ok, burned, waitlisted, cookie, own_invite = self._run_helper(
                     helper, address, display, label_total
                 )
@@ -1232,14 +1235,13 @@ class MuseAIHelper(tk.Tk):
                     save_error = None
                     with shared_lock:
                         try:
-                            mail_password = ""
-                            try:
-                                mail_password = (
-                                    keyring.get_password(MAIL_SERVICE, address)
-                                    or ""
-                                )
-                            except Exception:
-                                mail_password = ""
+                            # Cột "Mật khẩu hộp thư" của sheet:
+                            # bí mật của hộp thư theo dịch vụ —
+                            # mật khẩu mail.tm, token tempmail.lol
+                            # / Guerrillamail; tempmail.plus và
+                            # maildrop.cc để trống vì địa chỉ tự
+                            # nó là khoá hộp thư.
+                            mail_password = mailbox.get("secret") or ""
                             _append_spreadsheet_row(
                                 address,
                                 mail_password=mail_password,

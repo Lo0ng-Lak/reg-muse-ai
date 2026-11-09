@@ -4,6 +4,7 @@ __pycache__/
 venv/
 .vscode/settings.json
 proxy*.txt
+mailbox*.txt
 invite.txt
 redeem*.txt
 bad-proxies.txt

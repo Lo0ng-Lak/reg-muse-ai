@@ -1,4 +1,3 @@
-import html
 import json
 import re
 import secrets
@@ -11,9 +10,10 @@ import urllib.request
 from datetime import date
 from pathlib import Path
 from tkinter import messagebox
-from html.parser import HTMLParser
 
 import keyring
+
+import mail_providers
 
 
 # Ép stdout/stderr sang UTF-8. Trên Windows, print() tiếng Việt vào pipe
@@ -27,7 +27,6 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 SIGNUP_URL = "https://muse.ai/"
-API_BASE = "https://tempmail.plus"
 # Hậu tố file riêng của luồng song song: "" = luồng duy
 # nhất/luồng 1 (proxy.txt, redeem.txt như cũ); "-2".."-5"
 # khi app chính chạy nhiều luồng (proxy-2.txt, ...).
@@ -64,7 +63,7 @@ def _load_proxy():
     host:port:username:password  hoặc  http://username:password@host:port
     Không có file (hoặc file trống) → None, và main() sẽ huỷ lượt chạy
     vì đăng ký bắt buộc phải qua proxy. Chỉ lưu lượng Chromium
-    (muse.ai) đi qua proxy; tempmail.plus vẫn đi thẳng.
+    (muse.ai) đi qua proxy; dịch vụ temp mail vẫn đi thẳng.
     """
     try:
         raw = Path(__file__).with_name(f"proxy{LANE_SUFFIX}.txt").read_text(
@@ -1543,16 +1542,20 @@ def main():
         # bảo toàn bộ là proxy US. Nếu một proxy nào đó thoát sai
         # khu vực, màn hình waitlist sau bước hồ sơ vẫn chặn lại.
         continue_button = _open_signup_and_submit_email(page, email)
+        mailbox = _load_mailbox(email)
         try:
-            existing_ids = _get_message_ids(email)
+            existing_ids = _get_message_ids(mailbox)
         except Exception:
             # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
             # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
             existing_ids = set()
         _click_when_ready(page, continue_button, "Continue")
-        _status("Đã gửi email, đang chờ mã xác minh từ tempmail.plus...")
+        _status(
+            "Đã gửi email, đang chờ mã xác minh từ "
+            f"{mailbox['provider']}..."
+        )
 
-        code = _wait_for_verification_code(page, email, existing_ids)
+        code = _wait_for_verification_code(page, mailbox, existing_ids)
         _status("Đã nhận mã xác minh, đang điền mã...")
         _fill_verification_code(page, code)
         page.wait_for_timeout(UI_SETTLE_MS)
@@ -1870,109 +1873,61 @@ def _click_when_ready(page, locator, label):
     locator.click(timeout=BUTTON_TIMEOUT_MS)
 
 
-def _mail_request(path):
-    """Gọi API tempmail.plus (chỉ GET, không cần token/mật khẩu)."""
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/130.0.0.0 Safari/537.36"
-        ),
-    }
-    request = urllib.request.Request(
-        f"{API_BASE}{path}", headers=headers, method="GET"
-    )
+def _load_mailbox(email):
+    """Hộp thư của tài khoản này (app chính ghi mailbox.txt).
+
+    App chính ghi {"provider", "email", "secret"} vào
+    mailbox{LANE_SUFFIX}.txt trước khi mở helper — helper đọc
+    thư đúng ở dịch vụ đó. Chạy helper độc lập (không có file,
+    file hỏng, hoặc địa chỉ trong file khác email được giao)
+    thì quay về tempmail.plus theo email như hành vi cũ.
+    """
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            body = response.read()
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"tempmail.plus trả lỗi HTTP {error.code}: {detail}"
-        ) from error
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError(
-            f"Không kết nối được tempmail.plus: {error}"
-        ) from error
-
-    return json.loads(body.decode("utf-8")) if body else {}
-
-
-def _mail_list(email):
-    response = _mail_request(
-        "/api/mails?email=" + urllib.parse.quote(email) + "&limit=20"
-    )
-    return response.get("mail_list") or []
+        raw = Path(__file__).with_name(
+            f"mailbox{LANE_SUFFIX}.txt"
+        ).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        data = None
+    if (
+        isinstance(data, dict)
+        and data.get("email") == email
+        and data.get("provider")
+    ):
+        return {
+            "provider": data["provider"],
+            "email": email,
+            "secret": data.get("secret") or "",
+        }
+    return {
+        "provider": mail_providers.DEFAULT_PROVIDER,
+        "email": email,
+        "secret": "",
+    }
 
 
 def _message_id(message):
-    return message.get("mail_id") or message.get("id")
+    return message.get("id")
 
 
-def _get_message_ids(email):
+def _get_message_ids(mailbox):
     return {
         message_id
         for message_id in (
-            _message_id(message) for message in _mail_list(email)
+            _message_id(message)
+            for message in mail_providers.list_messages(mailbox)
         )
         if message_id
     }
 
 
-def _message_text(detail):
-    text = detail.get("text")
-    if text:
-        return text
-    html_body = detail.get("html") or []
-    if not html_body:
-        return detail.get("intro", "")
-    parser = _HtmlTextExtractor()
-    parser.feed("\n".join(html_body) if isinstance(html_body, list) else html_body)
-    return html.unescape("\n".join(parser.parts))
+def _verification_code_from_new_messages(mailbox, existing_ids):
+    """Tìm mã xác minh trong các thư MỚI của hộp thư.
 
-
-class _HtmlTextExtractor(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.parts = []
-
-    def handle_data(self, data):
-        value = data.strip()
-        if value:
-            self.parts.append(value)
-
-
-def _detail_text(detail):
-    """Bóc toàn bộ chữ đọc được trong chi tiết thư tempmail.plus.
-
-    Ưu tiên các trường quen thuộc (text/html/intro) qua
-    _message_text; nếu vẫn rỗng thì gom mọi chuỗi trong JSON
-    (bỏ qua các trường id để không nhặt nhầm số id làm mã).
+    Quét tiêu đề trước, chưa thấy mới đọc toàn văn thư — qua
+    mail_providers nên dịch vụ nào cũng dùng chung nhịp này.
     """
-    text = _message_text(detail)
-    if text:
-        return text
-    parts = []
-
-    def collect(value):
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, dict):
-            for key, item in value.items():
-                if "id" in key.lower():
-                    continue
-                collect(item)
-        elif isinstance(value, list):
-            for item in value:
-                collect(item)
-
-    collect(detail)
-    return "\n".join(parts)
-
-
-def _verification_code_from_new_messages(email, existing_ids):
-    for message in _mail_list(email):
+    for message in mail_providers.list_messages(mailbox):
         message_id = _message_id(message)
         if not message_id or message_id in existing_ids:
             continue
@@ -1981,15 +1936,10 @@ def _verification_code_from_new_messages(email, existing_ids):
         if codes:
             return codes[0]
         try:
-            detail = _mail_request(
-                f"/api/mails/{message_id}?email="
-                + urllib.parse.quote(email)
-            )
+            text = mail_providers.read_message(mailbox, message_id)
         except Exception:
             continue
-        codes = re.findall(
-            r"(?<!\d)\d{4,8}(?!\d)", _detail_text(detail)
-        )
+        codes = re.findall(r"(?<!\d)\d{4,8}(?!\d)", text)
         if codes:
             return codes[0]
     return None
@@ -2019,7 +1969,7 @@ def _verification_input(page):
     return None
 
 
-def _wait_for_verification_code(page, email, existing_ids):
+def _wait_for_verification_code(page, mailbox, existing_ids):
     deadline = time.monotonic() + CODE_TIMEOUT_SECONDS
     code = None
     warned = False
@@ -2029,10 +1979,10 @@ def _wait_for_verification_code(page, email, existing_ids):
         if code is None:
             try:
                 code = _verification_code_from_new_messages(
-                    email, existing_ids
+                    mailbox, existing_ids
                 )
             except Exception:
-                # Một lần rớt kết nối tới tempmail.plus không
+                # Một lần rớt kết nối tới dịch vụ mail không
                 # được giết cả tài khoản — bỏ qua lượt kiểm tra
                 # này và thử lại ở vòng chờ tiếp theo.
                 if not warned:
@@ -2045,8 +1995,8 @@ def _wait_for_verification_code(page, email, existing_ids):
             return code
         page.wait_for_timeout(4000)
     raise TimeoutError(
-        f"Không tìm thấy mã xác minh mới trong tempmail.plus sau "
-        f"{CODE_TIMEOUT_SECONDS} giây."
+        f"Không tìm thấy mã xác minh mới trong hộp thư "
+        f"{mailbox['provider']} sau {CODE_TIMEOUT_SECONDS} giây."
     )
 
 

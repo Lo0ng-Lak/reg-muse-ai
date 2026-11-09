@@ -3,7 +3,8 @@
 ## Muse.ai Account Helper
 
 A small Windows desktop helper that registers Muse.ai accounts in a batch.
-For each account it creates a tempmail.plus inbox, opens Muse.ai in a dedicated
+For each account it creates a temp-mail inbox (provider selectable —
+tempmail.plus by default), opens Muse.ai in a dedicated
 browser, retrieves the email verification code, fills the profile form, and —
 only when the signup actually completes — saves the account to a local Excel
 sheet. The window shows nothing but the live process log. CAPTCHA and any
@@ -38,15 +39,19 @@ proxies included, then the run stops on its own), and click **Bắt đầu
 đăng ký**. For each account
 the app then, with no further clicks:
 
-1. Creates a random tempmail.plus address. tempmail.plus inboxes have no
-   password — the address itself is the inbox key, so nothing is stored.
+1. Creates a fresh inbox at the temp-mail provider chosen in the
+   **Temp mail** dropdown (see "Temp mail providers" below). Depending
+   on the provider the inbox may have a secret — a mail.tm password or
+   a tempmail.lol / Guerrillamail token — which is kept for reading the
+   code and written to the sheet; providers without a secret store
+   nothing, because the address itself is the inbox key.
    (There is no Muse.ai password either — signup is email plus a
    one-time code.)
 2. Opens a dedicated Chromium window **through the proxy**, first checks the
    exit IP it actually got, and only continues if that IP is in the US.
    It then fills the email into the visible "Mobile number or email" field
    and submits **Continue** to request a verification code.
-3. Polls tempmail.plus for the code (up to three minutes), fills it, and submits
+3. Polls the chosen temp-mail provider for the code (up to three minutes), fills it, and submits
    **Confirm** on the code form.
 4. On the final profile form, fills the first and last name as "Long" and
    "long" when the form asks for them (some regions, such as US IPs, only
@@ -58,16 +63,17 @@ the app then, with no further clicks:
    your card in the app (see below) the tool fills the card form and
    confirms for you; otherwise the batch pauses for up to four minutes for
    you to type the card and a US ZIP in the Chromium window yourself. Only
-   after the card step is accepted are the account's email and password
-   appended to `accounts.xlsx` in the app's local Windows data folder;
+   after the card step is accepted are the account's email and mailbox
+   secret appended to `accounts.xlsx` in the app's local Windows data folder;
    failed attempts are only written to the on-screen log, never to the
    sheet.
 6. After the card step there is one last screen with a **Get started**
    button (sometimes Confirm/Continue): the tool clicks it — repeatedly
    if several such screens chain together — waits to land inside the
    Muse interface, and reads the session cookies. A successful row in `accounts.xlsx`
-   therefore carries: creation time, email, the tempmail.plus mailbox
-   password (the only password there is), the session cookie in the
+   therefore carries: creation time, email, the mailbox secret (the
+   mail.tm password or the tempmail.lol token; empty for providers
+   where the address itself is the inbox key), the session cookie in the
    browser's header form (`name=value; name=value; …`, covering the
    muse.ai, meta.com and facebook.com cookies — passed from the helper
    to the app out of band and never printed in the log), and the
@@ -112,6 +118,51 @@ The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
 
+### Temp mail providers
+
+The **Temp mail** dropdown picks which disposable-mail service each run
+uses; all five go through one shared module (`mail_providers.py`), and
+the choice is per run — pick a provider, then start the batch.
+
+- **tempmail.plus** — the default, and the only provider verified
+  end-to-end with Meta so far: on 2026-11-06 Meta accepted its domains
+  at signup and the verification email arrived and was auto-read.
+  Six domains, a random one per account. Inboxes are public (no
+  password); the random address itself is the key.
+- **tempmail.lol** — token-based inboxes on domains the service assigns.
+  The token is stored in the sheet's mailbox-password column so the
+  inbox can be read again later.
+- **maildrop.cc** — a single domain, no account creation: the tool picks
+  the local part and reads via their GraphQL API. Nothing is stored.
+- **mail.tm** — password-protected mailboxes; the generated password is
+  stored in the sheet's mailbox-password column. It currently has only
+  **one** active public domain (fldubai.com), and it throttled the
+  owner's own IP under bursts in the past (connection resets) — the
+  service itself works, just don't hammer it.
+- **Guerrillamail** — the service assigns the address (e.g.
+  @guerrillamailblock.com) and a session token, which is stored in the
+  sheet. A fresh inbox always contains a welcome message; the tool
+  snapshots existing mail before requesting a code, so it is ignored
+  automatically.
+
+Except for tempmail.plus, these providers are **not yet verified for
+Meta signup** — whether Meta accepts their domains and whether the
+verification email actually arrives can only be proven by a real run.
+
+When a signup fails, *where* it fails tells you what to fix. If the
+attempt is rejected at the email step, or the verification code never
+arrives, the mail domain/provider is the suspect — switch providers.
+The post-profile block ("You can't create a new account right now") is
+a different verdict: that is Meta refusing the proxy's exit IP, the
+tool already retires that proxy on its own, and changing the mail
+provider will not help there.
+
+Temp-mail traffic always stays on the machine's direct connection,
+whichever provider is chosen — only the Muse.ai browser traffic goes
+through the proxy. Per-account mailbox state is passed to the helper in
+`mailbox.txt` / `mailbox-<n>.txt` next to the scripts (gitignored, like
+the proxy and redeem files).
+
 ### Proxy pool: required, US exit only
 
 Registration only ever happens through a proxy — there is no VPN/direct
@@ -131,7 +182,7 @@ be US proxies supplied by you: **the tool does not verify exit IPs** (that
 check cost several page loads per account and was removed for speed at the
 owner's direction). The backstop is the post-profile classification — if
 an exit lands in an unsupported region, the "Join the waitlist" screen
-still fails that account. tempmail.plus traffic stays on the machine's direct
+still fails that account. Temp-mail traffic stays on the machine's direct
 connection. The log only ever shows each proxy's host:port, never its
 password. `proxies.txt` and `proxy.txt` are listed in `.gitignore`, so
 they are never committed — keep it that way.
@@ -149,7 +200,7 @@ saved card**, and the per-card success limit counts globally across
 lanes (slots are reserved atomically, so the limit is never overshot).
 Lanes need at least as many proxies as lanes; with fewer proxies the
 lane count is reduced to the pool size. Per-lane state lives in
-`proxy-<n>.txt` / `redeem-<n>.txt` next to the scripts (also gitignored);
+`proxy-<n>.txt` / `redeem-<n>.txt` / `mailbox-<n>.txt` next to the scripts (also gitignored);
 the spreadsheet is written under a lock so lanes cannot corrupt it.
 
 The **Proxy lỗi** (bad proxy) box under the Proxy box is the exclusion
