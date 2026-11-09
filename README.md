@@ -42,7 +42,7 @@ the app then, with no further clicks:
 1. Creates a fresh inbox at the temp-mail provider chosen in the
    **Temp mail** dropdown (see "Temp mail providers" below). Depending
    on the provider the inbox may have a secret — a mail.tm password or
-   a tempmail.lol / Guerrillamail token — which is kept for reading the
+   a Guerrillamail token — which is kept for reading the
    code and written to the sheet; providers without a secret store
    nothing, because the address itself is the inbox key.
    (There is no Muse.ai password either — signup is email plus a
@@ -72,7 +72,7 @@ the app then, with no further clicks:
    if several such screens chain together — waits to land inside the
    Muse interface, and reads the session cookies. A successful row in `accounts.xlsx`
    therefore carries: creation time, email, the mailbox secret (the
-   mail.tm password or the tempmail.lol token; empty for providers
+   mail.tm password or the Guerrillamail session token; empty for providers
    where the address itself is the inbox key), the session cookie in the
    browser's header form (`name=value; name=value; …`, covering the
    muse.ai, meta.com and facebook.com cookies — passed from the helper
@@ -121,7 +121,7 @@ successfully registered accounts.
 ### Temp mail providers
 
 The **Temp mail** dropdown picks which disposable-mail service each run
-uses; all five go through one shared module (`mail_providers.py`), and
+uses; all four go through one shared module (`mail_providers.py`), and
 the choice is per run — pick a provider, then start the batch.
 
 - **tempmail.plus** — the default, and the only provider verified
@@ -129,9 +129,6 @@ the choice is per run — pick a provider, then start the batch.
   at signup and the verification email arrived and was auto-read.
   Six domains, a random one per account. Inboxes are public (no
   password); the random address itself is the key.
-- **tempmail.lol** — token-based inboxes on domains the service assigns.
-  The token is stored in the sheet's mailbox-password column so the
-  inbox can be read again later.
 - **maildrop.cc** — a single domain, no account creation: the tool picks
   the local part and reads via their GraphQL API. Nothing is stored.
 - **mail.tm** — password-protected mailboxes; the generated password is
@@ -145,9 +142,16 @@ the choice is per run — pick a provider, then start the batch.
   snapshots existing mail before requesting a code, so it is ignored
   automatically.
 
-Except for tempmail.plus, these providers are **not yet verified for
-Meta signup** — whether Meta accepts their domains and whether the
-verification email actually arrives can only be proven by a real run.
+On 2026-11-09 every provider was put through a real-delivery test: a
+real email was sent to a fresh inbox at each provider and read back
+with this tool's own code. tempmail.plus (2s), mail.tm (5s),
+maildrop.cc (19s — its API occasionally drops a connection; the
+tool's polling retries on its own) and Guerrillamail (20s) all
+received and read the mail. **tempmail.lol failed the same test** —
+its API timed out and dropped connections continuously, and a live
+run never retrieved a code with it — so it was **removed from the
+choices**. Whether Meta accepts the domains of mail.tm, maildrop.cc
+and Guerrillamail at signup can still only be proven by a real run.
 
 When a signup fails, *where* it fails tells you what to fix. If the
 attempt is rejected at the email step, or the verification code never

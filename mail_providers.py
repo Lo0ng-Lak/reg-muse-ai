@@ -9,7 +9,6 @@ Mỗi hộp thư là một dict:
 
 "secret" là thứ cần để đọc lại hộp thư về sau:
 - mail.tm: mật khẩu hộp thư (tự sinh 16 ký tự khi tạo).
-- tempmail.lol: token của hộp thư.
 - guerrillamail: sid_token của phiên.
 - tempmail.plus và maildrop.cc: "" — địa chỉ tự nó là khoá
   hộp thư, không có bí mật nào.
@@ -43,7 +42,6 @@ HTTP_TIMEOUT_SECONDS = 20
 # Thứ tự này là thứ tự trong ô chọn "Temp mail" của app.
 PROVIDERS = [
     ("tempmail.plus", "tempmail.plus"),
-    ("tempmail.lol", "tempmail.lol"),
     ("maildrop.cc", "maildrop.cc"),
     ("mail.tm", "mail.tm"),
     ("guerrillamail", "Guerrillamail"),

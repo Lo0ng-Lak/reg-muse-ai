@@ -40,8 +40,8 @@ def _create_mailbox_account(provider_id=mail_providers.DEFAULT_PROVIDER):
 
     Toàn bộ logic theo từng dịch vụ nằm ở mail_providers.
     Trả về dict {"provider", "email", "secret"} — secret là
-    mật khẩu hộp thư (mail.tm) hoặc token (tempmail.lol,
-    guerrillamail); tempmail.plus và maildrop.cc để trống vì
+    mật khẩu hộp thư (mail.tm) hoặc token (guerrillamail);
+    tempmail.plus và maildrop.cc để trống vì
     ở đó địa chỉ tự nó là khoá hộp thư.
     """
     return mail_providers.create_mailbox(provider_id)
