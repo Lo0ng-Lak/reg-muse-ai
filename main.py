@@ -596,6 +596,13 @@ class MuseAIHelper(tk.Tk):
         ttk.Label(controls, text="Mã mời:").pack(side="left")
         self.invite_entry = ttk.Entry(controls, width=10)
         self.invite_entry.pack(side="left", padx=(6, 12))
+        self.single_invite_var = tk.BooleanVar(value=False)
+        self.single_invite_check = ttk.Checkbutton(
+            controls,
+            text="Chỉ dùng 1 mã mời này",
+            variable=self.single_invite_var,
+        )
+        self.single_invite_check.pack(side="left", padx=(0, 12))
         try:
             saved_invite = (
                 Path(__file__)
@@ -821,6 +828,9 @@ class MuseAIHelper(tk.Tk):
         self.card_limit_spin.configure(state="disabled" if running else "normal")
         self.lanes_spin.configure(state="disabled" if running else "normal")
         self.invite_entry.configure(state="disabled" if running else "normal")
+        self.single_invite_check.configure(
+            state="disabled" if running else "normal"
+        )
         self.provider_combo.configure(
             state="disabled" if running else "readonly"
         )
@@ -930,6 +940,7 @@ class MuseAIHelper(tk.Tk):
                     f"Ô Mã mời trống — tự lấy mã {seed} từ dòng "
                     "cuối trong sheet làm đầu chuỗi."
                 )
+        single_invite = bool(self.single_invite_var.get())
         provider_label = self.provider_var.get()
         provider_id = next(
             (
@@ -962,6 +973,19 @@ class MuseAIHelper(tk.Tk):
         self._append_log(
             f"Dịch vụ temp mail cho lượt chạy này: {provider_label}."
         )
+        if single_invite:
+            if invite:
+                self._append_log(
+                    f"Chế độ mã mời: CHỈ DÙNG 1 MÃ — mọi tài khoản "
+                    f"đều quy đổi mã {invite}; mã từng tài khoản tự "
+                    "lấy được chỉ lưu vào sheet, không nối chuỗi."
+                )
+            else:
+                self._append_log(
+                    "Chế độ mã mời: CHỈ DÙNG 1 MÃ — nhưng chưa có "
+                    "mã nào (ô Mã mời trống, sheet cũng không có), "
+                    "nên các tài khoản sẽ không quy đổi mã mời nào."
+                )
         if card_tracked:
             self._append_log(
                 f"Giới hạn thẻ đang lưu: {card_used}/{card_limit} tài "
@@ -970,7 +994,7 @@ class MuseAIHelper(tk.Tk):
             )
         threading.Thread(
             target=self._run_loop,
-            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes, provider_id),
+            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes, provider_id, single_invite),
             daemon=True,
         ).start()
 
@@ -998,6 +1022,7 @@ class MuseAIHelper(tk.Tk):
         self, total, pool, per_proxy, invite,
         card_limit=0, card_used=0, card_tracked=False, lanes=1,
         provider_id=mail_providers.DEFAULT_PROVIDER,
+        single_invite=False,
     ):
         # Điều phối các luồng chạy song song. Kho proxy được
         # CHIA theo bước nhảy: luồng k dùng các proxy ở vị trí
@@ -1008,7 +1033,11 @@ class MuseAIHelper(tk.Tk):
         # RIÊNG, nhưng tài khoản ĐẦU TIÊN của mọi luồng đều
         # quy đổi mã trong ô Mã mời (mã chủ tool cài đặt); từ
         # tài khoản thứ hai, mỗi luồng nối tiếp mã do tài khoản
-        # trước trong chính luồng đó lấy được. Thẻ
+        # trước trong chính luồng đó lấy được. Nếu
+        # single_invite bật thì KHÔNG nối chuỗi: MỌI tài khoản
+        # của MỌI luồng đều quy đổi đúng mã trong ô Mã mời (mã
+        # hạt giống); mã từng tài khoản tự lấy được chỉ ghi vào
+        # sheet. Thẻ
         # thì cả các luồng dùng CHUNG một thẻ đã lưu; bộ đếm
         # giới hạn thẻ tính gộp toàn cục (đếm cả số tài khoản
         # đang chạy dở để không vượt giới hạn).
@@ -1048,7 +1077,7 @@ class MuseAIHelper(tk.Tk):
             lane_args = (
                 lane_no, lanes, share, subset, per_proxy, seed,
                 card_limit, card_tracked, shared, shared_lock,
-                provider_id,
+                provider_id, single_invite,
             )
             if lanes == 1:
                 self._run_lane(*lane_args)
@@ -1078,6 +1107,7 @@ class MuseAIHelper(tk.Tk):
         self, lane_no, lanes, share, subset, per_proxy, seed,
         card_limit, card_tracked, shared, shared_lock,
         provider_id=mail_providers.DEFAULT_PROVIDER,
+        single_invite=False,
     ):
         helper = Path(__file__).with_name("browser_helper.py")
         suffix = "" if lane_no == 1 else f"-{lane_no}"
@@ -1090,7 +1120,9 @@ class MuseAIHelper(tk.Tk):
         # đổi pending_code (mã của tài khoản trước cùng luồng);
         # mã nó tự lấy được thành pending_code cho tài khoản sau
         # cùng luồng và được ghi đè vào invite.txt để lượt chạy
-        # sau có một đầu chuỗi mà nối tiếp.
+        # sau có một đầu chuỗi mà nối tiếp. Ở chế độ 1 mã mời
+        # (single_invite), pending_code bị ĐÓNG BĂNG ở mã hạt
+        # giống này cho mọi tài khoản — không bao giờ tiến lên.
         pending_code = (seed or "").strip().upper()
         # share = 0 là chế độ không giới hạn: luồng chạy tới khi
         # phần kho proxy của nó dùng hết một vòng thì dừng.
@@ -1290,7 +1322,7 @@ class MuseAIHelper(tk.Tk):
                                 "— lý do ở dòng RESULT phía trên.",
                             )
                         )
-                if helper_ok and own_invite:
+                if helper_ok and own_invite and not single_invite:
                     pending_code = own_invite
                     try:
                         Path(__file__).with_name("invite.txt").write_text(
@@ -1305,6 +1337,20 @@ class MuseAIHelper(tk.Tk):
                             f"[{display}/{label_total}] Chuỗi mã mời: tài khoản "
                             f"tiếp theo sẽ quy đổi mã {own_invite} — mã "
                             "của tài khoản này.",
+                        )
+                    )
+                elif helper_ok and own_invite and single_invite and pending_code:
+                    # Chế độ 1 mã mời: mã riêng của tài khoản này
+                    # đã nằm trong sheet; KHÔNG nối chuỗi — tài
+                    # khoản sau vẫn quy đổi đúng mã hạt giống như
+                    # mọi tài khoản khác trong lượt chạy.
+                    self.events.put(
+                        (
+                            "log",
+                            f"[{display}/{label_total}] Chế độ 1 mã "
+                            f"mời: tài khoản tiếp theo vẫn quy đổi "
+                            f"mã {pending_code} (mã riêng của tài "
+                            "khoản này chỉ lưu vào sheet).",
                         )
                     )
                 if burned:

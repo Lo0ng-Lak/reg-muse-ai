@@ -114,6 +114,17 @@ the app then, with no further clicks:
    `accounts.xlsx`, and if there is none, the first account simply
    redeems nothing and starts the chain with its own code.
 
+   The **Chỉ dùng 1 mã mời này** ("use only this one invite
+   code") checkbox next to the field switches the run to
+   single-code mode: when it is ticked, **every** account of
+   **every** lane redeems exactly the code in the Mã mời field
+   (after the same empty-field sheet seeding above) and the chain
+   never advances — each account's own harvested code is still
+   saved in its sheet row, but it is never redeemed by the next
+   account, and the field keeps showing your chosen code during
+   and after the run. Unticked (the default), the chaining
+   behavior described above applies unchanged.
+
 The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
