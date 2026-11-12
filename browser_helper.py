@@ -1821,7 +1821,8 @@ def _try_register_completion_api(page, tos_version, token_box,
         return None
     if isinstance(data, dict) and data:
         keys = ", ".join(sorted(data.keys()))
-        _status(f"API hoàn tất hồ sơ OK (trả về: {keys}).")
+        nxt = data.get("redirect_to") or "(không có)"
+        _status(f"API hoàn tất hồ sơ OK (trả về: {keys}; chuyển tới: {nxt}).")
     _status("Đã hoàn tất hồ sơ qua API.")
     return data if isinstance(data, dict) else {}
 
