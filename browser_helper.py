@@ -1526,6 +1526,13 @@ def _fetch_csrf_token(page):
     return token
 
 
+# register-completion trả 403 registrationBlocked: Meta không cho
+# tạo tài khoản trên IP này — cùng bản chất với hộp thoại
+# "Something went wrong" ở luồng bấm nút, nên được báo PROXY_BURN
+# như nhau (gặp live 2026-11-12: 4/5 luồng cùng lúc).
+REGISTRATION_BLOCKED = "registration_blocked"
+
+
 def _api_post_authed(page, path, payload, token_box):
     """Gọi API native kèm CSRF token trong token_box (dict có khóa
     "token"). Gặp lỗi csrfFailed thì lấy token mới qua /restart
@@ -1761,7 +1768,8 @@ def _try_register_completion_api(page, tos_version, token_box,
                                  birth_date=None):
     """Hoàn tất hồ sơ qua API. Trả dict JSON trả về khi xong (phía
     gọi đọc redirect_to / checkpoint_url / auth_meta_session trong
-    đó để đồng bộ phiên web), None khi lỗi (ghi log lý do).
+    đó để đồng bộ phiên web), REGISTRATION_BLOCKED khi Meta chặn
+    tạo tài khoản trên IP này, None khi lỗi khác (ghi log lý do).
     birth_date: ngày sinh dùng cho API; không có thì tự sinh ngẫu
     nhiên (trên 18 tuổi). Luồng API KHÔNG điền form hồ sơ trước —
     tải lại trang để lấy form làm mất trạng thái luồng (chưa có
@@ -1796,6 +1804,16 @@ def _try_register_completion_api(page, tos_version, token_box,
         )
         return None
     if not 200 <= status < 300:
+        if (
+            status == 403
+            and isinstance(data, dict)
+            and data.get("type") == "registrationBlocked"
+        ):
+            _status(
+                "API hoàn tất hồ sơ bị chặn tạo tài khoản "
+                "(registrationBlocked) — IP này bị Meta chặn."
+            )
+            return REGISTRATION_BLOCKED
         _status(
             f"API hoàn tất hồ sơ trả HTTP {status} "
             f"({_preview_body(text)})."
@@ -2091,6 +2109,28 @@ def main():
             completion = _try_register_completion_api(
                 page, tos_version, token_box
             )
+            if completion == REGISTRATION_BLOCKED:
+                # Meta chặn tạo tài khoản trên IP này — cùng bản
+                # chất với hộp thoại "Something went wrong" ở luồng
+                # bấm nút: báo PROXY_BURN để lượt chạy bỏ proxy này
+                # thay vì thử tiếp 50 tài khoản trên cùng một IP
+                # bị chặn (gặp live 2026-11-12: 4/5 luồng cùng lúc).
+                _status(
+                    "PROXY_BURN: Meta chặn tạo tài khoản trên IP này "
+                    "(registrationBlocked ở API hoàn tất hồ sơ)."
+                )
+                if DIRECT_MODE:
+                    detail = (
+                        "Meta báo không thể tạo tài khoản lúc này — IP "
+                        "của máy (VPN) đã bị chặn; đổi server VPN "
+                        "khác rồi chạy lại."
+                    )
+                else:
+                    detail = (
+                        "Meta báo không thể tạo tài khoản lúc này — IP "
+                        "của proxy đang dùng đã bị chặn; đổi proxy khác."
+                    )
+                raise RuntimeError(detail)
             if completion is None:
                 # API lỗi: KHÔNG tải lại trang — tải lại cũng về
                 # khung đăng nhập và mất luôn màn hình mã/hồ sơ

@@ -254,7 +254,10 @@ Meta refuses account creation on it ("Something went wrong"), the app
 moves that proxy into this box, stores it in `bad-proxies.txt`
 (gitignored), retires it immediately for the rest of the run — it is
 never rotated back to, in any lane — and filters it out of the pool at
-the start of every later run. A proxy is identified by its full line
+the start of every later run. A 403 `registrationBlocked` from the
+register-completion API counts as the same refusal (same "Something
+went wrong" verdict, seen live 2026-11-12 on 4 of 5 lanes at once).
+A proxy is identified by its full line
 (credentials included): pool lines may share one host:port gateway
 with a different user/password per exit session, and those count as
 different proxies — only lines that are identical collapse into one.
