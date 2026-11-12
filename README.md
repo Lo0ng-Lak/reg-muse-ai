@@ -48,18 +48,22 @@ the app then, with no further clicks:
    (There is no Muse.ai password either — signup is email plus a
    one-time code.)
 2. Opens a dedicated Chromium window **through the proxy** (or
-   direct, in VPN mode) and signs up through Muse.ai's own native
-   auth API, called from inside the browser (fetch on the same
-   origin, so the requests carry the page's session — calling the
-   API from outside the browser is rejected with 403): send-otp
-   for the email, then the code from step 3, then
-   register-completion with a random birthday (age always over
-   18). If any API step fails, returns an unexpected shape, or
-   asks for an extra human check, the helper falls back to the
-   old way — filling the visible "Mobile number or email" field,
-   submitting **Continue**, filling the code form, and filling
-   the profile form (names "Long"/"long" when asked, random
-   birthday) before clicking **Confirm**.
+   direct, in VPN mode). The forms are still filled exactly as
+   before — email into the visible "Mobile number or email" field,
+   birthday (+ names when asked) into the profile form — but the
+   **submissions** go through Muse.ai's own native auth API,
+   called from inside the browser (fetch on the same origin, so
+   the requests carry the page's session — calling the API from
+   outside the browser is rejected with 403): send-otp for the
+   email, then the code from step 3, then register-completion
+   with the same birthday that was filled in the form. The code
+   form is the one exception: it auto-submits the moment the code
+   is fully entered, so filling it IS submitting it — the code
+   step therefore calls the confirm-otp API with the form left
+   empty, and only fills the form if the API call fails. If any
+   API step fails, returns an unexpected shape, or asks for an
+   extra human check, the helper falls back to clicking the
+   buttons on the already-filled forms.
 3. Polls the chosen temp-mail provider for the code (up to three minutes), which the
    API step (or the code form, in fallback mode) then confirms.
 4. On the final profile form, fills the first and last name as "Long" and

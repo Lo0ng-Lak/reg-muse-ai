@@ -1514,19 +1514,10 @@ def _wait_for_code_from_mail(page, mailbox, existing_ids):
     )
 
 
-def _native_auth_via_api(page, email, mailbox, existing_ids):
-    """Đăng ký bằng API native của muse.ai tới hết bước hồ sơ.
-
-    Gọi từ trong trình duyệt (fetch cùng origin) nên request mang
-    đúng phiên/cookie của trang. Trả True khi đã xong bước hồ sơ
-    qua API (main sẽ mở lại trang rồi phân loại màn hình tiếp theo
-    như cũ); trả False khi gặp bất kỳ trục trặc nào TRƯỚC khi xác
-    nhận OTP thành công, để main rơi về luồng bấm nút DOM cũ.
-    Sau khi OTP đã xác nhận mà hoàn tất hồ sơ lỗi thì vẫn trả True
-    (phiên đã đăng nhập — mở lại trang để màn hình thật tự nói,
-    thay vì bấm lại từ đầu trên một phiên nửa vời). Mọi lỗi đều
-    được nuốt ở đây (chỉ ghi log) trừ cửa sổ đã đóng.
-    """
+def _try_send_otp_api(page, email):
+    """Gửi OTP qua API native. Trả True khi đã gửi, False khi lỗi
+    (ghi log lý do) để phía gọi bấm nút Continue trên form đã điền
+    sẵn. Form email phải được điền trước khi gọi hàm này."""
     try:
         status, data, text = _api_post(
             page, "/send-otp", {"contact_point": email, "region": "US"}
@@ -1549,16 +1540,13 @@ def _native_auth_via_api(page, email, mailbox, existing_ids):
     if isinstance(data, dict):
         keys = ", ".join(sorted(data.keys())) or "trống"
         _status(f"API gửi OTP OK (trả về: {keys}).")
-    _status(
-        "Đã gửi OTP qua API, đang chờ mã xác minh từ "
-        f"{mailbox['provider']}..."
-    )
-    try:
-        code = _wait_for_code_from_mail(page, mailbox, existing_ids)
-    except TimeoutError:
-        _status("Chờ mã OTP qua API hết giờ — dùng nút bấm để gửi lại mã.")
-        return False
-    _status("Đã nhận mã xác minh, đang xác nhận qua API...")
+    return True
+
+
+def _try_confirm_otp_api(page, code):
+    """Xác nhận OTP qua API. Trả tos_content_version khi ra bước
+    hoàn tất hồ sơ, None khi lỗi (ghi log lý do) để phía gọi rơi
+    về điền mã vào form (form tự gửi khi đủ số)."""
     try:
         status, data, text = _api_post(
             page, "/confirm-otp", {"otp_code": code, "remember_device": True}
@@ -1568,34 +1556,41 @@ def _native_auth_via_api(page, email, mailbox, existing_ids):
             "Gọi API xác nhận OTP không được "
             f"({_short_error(error)}) — dùng nút bấm."
         )
-        return False
+        return None
     if _api_response_has_challenge(data, text):
         _status(
             "API xác nhận OTP yêu cầu kiểm tra thêm — dùng nút bấm "
             "để bạn xử lý trên trình duyệt."
         )
-        return False
+        return None
     if not 200 <= status < 300:
         _status(
             f"API xác nhận OTP trả HTTP {status} — dùng nút bấm thay thế."
         )
-        return False
-    tos_version = None
-    if isinstance(data, dict):
-        state = data.get("registration_state")
-        tos = data.get("tos") or {}
-        tos_version = tos.get("content_version") if isinstance(tos, dict) else None
-        _status(f"API xác nhận OTP OK (trạng thái: {state}).")
-        if state != "completion_required" or not tos_version:
-            _status(
-                "Xác nhận OTP xong nhưng không ra bước hoàn tất hồ "
-                "sơ — dùng nút bấm."
-            )
-            return False
-    else:
+        return None
+    if not isinstance(data, dict):
         _status("API xác nhận OTP trả về không phải JSON — dùng nút bấm.")
-        return False
-    birth_date = _random_birth_date()
+        return None
+    state = data.get("registration_state")
+    tos = data.get("tos") or {}
+    tos_version = tos.get("content_version") if isinstance(tos, dict) else None
+    _status(f"API xác nhận OTP OK (trạng thái: {state}).")
+    if state != "completion_required" or not tos_version:
+        _status(
+            "Xác nhận OTP xong nhưng không ra bước hoàn tất hồ "
+            "sơ — dùng nút bấm."
+        )
+        return None
+    return tos_version
+
+
+def _try_register_completion_api(page, tos_version, birth_date=None):
+    """Hoàn tất hồ sơ qua API. Trả True khi xong, False khi lỗi
+    (ghi log lý do). birth_date: dùng ngày sinh đã điền sẵn trên
+    form hồ sơ (nếu có) để form và API khớp nhau; không có thì tự
+    sinh ngẫu nhiên."""
+    if birth_date is None:
+        birth_date = _random_birth_date()
     _status(
         "Đang hoàn tất hồ sơ qua API (ngày sinh "
         f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year})..."
@@ -1613,26 +1608,51 @@ def _native_auth_via_api(page, email, mailbox, existing_ids):
     except Exception as error:
         _status(
             "Gọi API hoàn tất hồ sơ không được "
-            f"({_short_error(error)}) — mở lại trang để kiểm tra."
+            f"({_short_error(error)})."
         )
-        return True
+        return False
     if _api_response_has_challenge(data, text):
         _status(
             "API hoàn tất hồ sơ yêu cầu kiểm tra thêm — mở lại trang "
             "để bạn xử lý trên trình duyệt."
         )
-        return True
+        return False
     if not 200 <= status < 300:
-        _status(
-            f"API hoàn tất hồ sơ trả HTTP {status} — mở lại trang "
-            "để kiểm tra màn hình thật."
-        )
-        return True
+        _status(f"API hoàn tất hồ sơ trả HTTP {status}.")
+        return False
     if isinstance(data, dict) and data:
         keys = ", ".join(sorted(data.keys()))
         _status(f"API hoàn tất hồ sơ OK (trả về: {keys}).")
     _status("Đã hoàn tất hồ sơ qua API.")
     return True
+
+
+def _try_fill_profile_form(page, timeout_ms=20000):
+    """Cố điền form hồ sơ sau khi OTP đã xác nhận qua API: mở lại
+    trang để app hiện form, điền ngày sinh (+ tên nếu hỏi). Trả
+    ngày sinh đã điền khi xong, None khi form không hiện hoặc điền
+    lỗi (lúc đó luồng API gửi register-completion mà không cần
+    form). Không ném lỗi."""
+    try:
+        page.goto(
+            SIGNUP_URL,
+            wait_until="domcontentloaded",
+            timeout=PAGE_TIMEOUT_MS,
+        )
+    except Exception as error:
+        _status(
+            "Không mở lại được trang để điền hồ sơ "
+            f"({_short_error(error)}) — gửi API luôn."
+        )
+        return None
+    try:
+        return _fill_profile(page, timeout_ms=timeout_ms)
+    except Exception as error:
+        _status(
+            "Không điền được form hồ sơ "
+            f"({_short_error(error)}) — gửi API luôn."
+        )
+        return None
 
 
 def _open_signup_and_submit_email(page, email):
@@ -1795,43 +1815,43 @@ def main():
             # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
             # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
             existing_ids = set()
-        # Đăng ký bằng API native trước (gọi từ trong trình duyệt
-        # nên mang đúng phiên/cookie của trang — gọi từ ngoài bị
-        # 403); trục trặc gì thì rơi về luồng bấm nút DOM cũ bên
-        # dưới. Từ bước nhập thẻ trở đi mọi thứ giữ nguyên như cũ.
-        try:
-            page.goto(
-                SIGNUP_URL,
-                wait_until="domcontentloaded",
-                timeout=PAGE_TIMEOUT_MS,
-            )
-        except Exception as error:
-            if DIRECT_MODE:
-                detail = (
-                    "Không tải được trang muse.ai — mạng/VPN quá chậm "
-                    "hoặc mất kết nối."
-                )
-            else:
-                detail = (
-                    "Không tải được trang muse.ai qua proxy — proxy quá "
-                    "chậm hoặc đã chết."
-                )
-            raise RuntimeError(
-                f"{detail} ({_short_error(error)})"
-            ) from error
-        if _native_auth_via_api(page, email, mailbox, existing_ids):
+        # API thay nút bấm, form vẫn điền như cũ: điền form email
+        # trước rồi gửi OTP qua API; điền form hồ sơ trước rồi gửi
+        # hoàn tất qua API. Riêng form mã thì KHÔNG điền trước
+        # được — nó tự gửi ngay khi nhập đủ số, nên bước mã chỉ
+        # gọi API (form để trống); API lỗi mới điền form để nó tự
+        # gửi. Trục trặc ở bước nào thì rơi về bấm nút DOM ở bước
+        # đó. Từ bước nhập thẻ trở đi mọi thứ giữ nguyên như cũ.
+        continue_button = _open_signup_and_submit_email(page, email)
+        use_api = _try_send_otp_api(page, email)
+        tos_version = None
+        if use_api:
             _status(
-                "Đã hoàn tất hồ sơ qua API — mở lại trang để tới "
-                "bước tiếp theo..."
+                "Đã gửi OTP qua API, đang chờ mã xác minh từ "
+                f"{mailbox['provider']}..."
             )
-            page.goto(
-                SIGNUP_URL,
-                wait_until="domcontentloaded",
-                timeout=PAGE_TIMEOUT_MS,
-            )
-        else:
-            continue_button = _open_signup_and_submit_email(page, email)
+            try:
+                code = _wait_for_code_from_mail(page, mailbox, existing_ids)
+            except TimeoutError:
+                _status(
+                    "Chờ mã OTP qua API hết giờ — bấm Continue để "
+                    "gửi lại mã rồi điền như cũ."
+                )
+                use_api = False
+            else:
+                _status("Đã nhận mã xác minh, đang xác nhận qua API...")
+                tos_version = _try_confirm_otp_api(page, code)
+                if tos_version is None:
+                    use_api = False
+        if not use_api:
             _click_when_ready(page, continue_button, "Continue")
+            # Mốc thư cũ chụp lại sau khi bấm: mã OTP của lần gửi
+            # qua API (nếu có) coi như thư cũ, chỉ chờ mã mới gửi
+            # lại qua nút bấm.
+            try:
+                existing_ids = _get_message_ids(mailbox)
+            except Exception:
+                pass
             _status(
                 "Đã gửi email, đang chờ mã xác minh từ "
                 f"{mailbox['provider']}..."
@@ -1855,6 +1875,44 @@ def main():
                 "button", name="Confirm", exact=True
             )
             _click_when_ready(page, finish_button, "Confirm")
+        else:
+            # API đã xác nhận OTP: cố điền form hồ sơ trước rồi
+            # gửi hoàn tất qua API với đúng ngày sinh đã điền.
+            filled_birth_date = _try_fill_profile_form(page)
+            if _try_register_completion_api(
+                page, tos_version, filled_birth_date
+            ):
+                _status(
+                    "Đã hoàn tất hồ sơ qua API — mở lại trang để "
+                    "tới bước tiếp theo..."
+                )
+                page.goto(
+                    SIGNUP_URL,
+                    wait_until="domcontentloaded",
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+            elif filled_birth_date is not None:
+                # API lỗi mà form đã điền sẵn — bấm Confirm trên form.
+                _status(
+                    "API hoàn tất hồ sơ lỗi — bấm Confirm trên form "
+                    "hồ sơ đã điền sẵn."
+                )
+                finish_button = page.get_by_role(
+                    "button", name="Confirm", exact=True
+                )
+                _click_when_ready(page, finish_button, "Confirm")
+            else:
+                # API lỗi, form cũng không điền được — mở lại trang
+                # để màn hình thật tự nói (phân loại bên dưới).
+                _status(
+                    "API hoàn tất hồ sơ lỗi, form cũng không điền "
+                    "được — mở lại trang để kiểm tra màn hình thật."
+                )
+                page.goto(
+                    SIGNUP_URL,
+                    wait_until="domcontentloaded",
+                    timeout=PAGE_TIMEOUT_MS,
+                )
         if auto:
             _status("Đã gửi hồ sơ, đang chờ màn hình tiếp theo...")
             outcome = _classify_after_profile(page)
@@ -2022,8 +2080,14 @@ def _random_birth_date():
     )
 
 
-def _fill_profile(page):
-    if not _wait_for_profile_form(page, BUTTON_TIMEOUT_MS):
+def _fill_profile(page, timeout_ms=BUTTON_TIMEOUT_MS):
+    """Điền form hồ sơ, trả về ngày sinh đã chọn.
+
+    timeout_ms: thời gian chờ form hiện — luồng DOM chờ lâu
+    (mặc định), luồng API chờ ngắn vì form có thể không hiện
+    (lúc đó API gửi luôn mà không cần form).
+    """
+    if not _wait_for_profile_form(page, timeout_ms):
         raise RuntimeError(
             "Không thấy form hồ sơ (cả hai biến thể tên/ngày sinh)."
         )
@@ -2049,6 +2113,7 @@ def _fill_profile(page):
         f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year} "
         "(tuổi trên 18)."
     )
+    return birth_date
 
 
 def _wait_for_input_value(page, field, expected, label):
