@@ -1463,6 +1463,16 @@ def _api_post(page, path, payload):
     return status, data, text
 
 
+def _preview_body(text, limit=200):
+    """Một dòng xem trước ngắn của thân phản hồi lỗi (để ghi log).
+
+    Chỉ dùng cho phản hồi LỖI (thân thường là mã/thông báo lỗi).
+    Phản hồi thành công không bao giờ ghi thân ra log vì có thể
+    chứa token — chỉ ghi tên trường.
+    """
+    return (text or "").replace("\n", " ").replace("\r", " ")[:limit]
+
+
 def _api_response_has_challenge(data, text):
     """API có yêu cầu kiểm tra thêm (captcha/thử thách) không?
 
@@ -1535,7 +1545,10 @@ def _try_send_otp_api(page, email):
         )
         return False
     if not 200 <= status < 300:
-        _status(f"API gửi OTP trả HTTP {status} — dùng nút bấm thay thế.")
+        _status(
+            f"API gửi OTP trả HTTP {status} "
+            f"({_preview_body(text)}) — dùng nút bấm thay thế."
+        )
         return False
     if isinstance(data, dict):
         keys = ", ".join(sorted(data.keys())) or "trống"
@@ -1565,7 +1578,8 @@ def _try_confirm_otp_api(page, code):
         return None
     if not 200 <= status < 300:
         _status(
-            f"API xác nhận OTP trả HTTP {status} — dùng nút bấm thay thế."
+            f"API xác nhận OTP trả HTTP {status} "
+            f"({_preview_body(text)}) — dùng nút bấm thay thế."
         )
         return None
     if not isinstance(data, dict):
@@ -1618,7 +1632,10 @@ def _try_register_completion_api(page, tos_version, birth_date=None):
         )
         return False
     if not 200 <= status < 300:
-        _status(f"API hoàn tất hồ sơ trả HTTP {status}.")
+        _status(
+            f"API hoàn tất hồ sơ trả HTTP {status} "
+            f"({_preview_body(text)})."
+        )
         return False
     if isinstance(data, dict) and data:
         keys = ", ".join(sorted(data.keys()))
