@@ -1722,9 +1722,13 @@ def _try_send_otp_api(page, email, token_box):
 
 
 def _try_confirm_otp_api(page, code, token_box):
-    """Xác nhận OTP qua API. Trả tos_content_version khi ra bước
-    hoàn tất hồ sơ, None khi lỗi (ghi log lý do) để phía gọi rơi
-    về điền mã vào form (form tự gửi khi đủ số)."""
+    """Xác nhận OTP qua API. Trả (tos_content_version, requires_name)
+    khi ra bước hoàn tất hồ sơ, None khi lỗi (ghi log lý do) để phía
+    gọi rơi về điền mã vào form (form tự gửi khi đủ số).
+    requires_name: server có bắt nhập họ tên ở bước hoàn tất hồ sơ
+    không — trang tự đọc cờ này từ kết quả xác nhận OTP và chỉ gửi
+    first_name/last_name khi cờ bật (thiếu tên khi bị bắt thì
+    register-completion trả 400 invalidRequest)."""
     try:
         status, data, text = _api_post_authed(
             page, "/confirm-otp",
@@ -1754,41 +1758,54 @@ def _try_confirm_otp_api(page, code, token_box):
     state = data.get("registration_state")
     tos = data.get("tos") or {}
     tos_version = tos.get("content_version") if isinstance(tos, dict) else None
-    _status(f"API xác nhận OTP OK (trạng thái: {state}).")
+    requires_name = bool(data.get("requires_name"))
+    _status(
+        "API xác nhận OTP OK (trạng thái: "
+        f"{state}; cần tên: {'có' if requires_name else 'không'})."
+    )
     if state != "completion_required" or not tos_version:
         _status(
             "Xác nhận OTP xong nhưng không ra bước hoàn tất hồ "
             "sơ — dùng nút bấm."
         )
         return None
-    return tos_version
+    return tos_version, requires_name
 
 
 def _try_register_completion_api(page, tos_version, token_box,
-                                 birth_date=None):
+                                 birth_date=None, include_names=False):
     """Hoàn tất hồ sơ qua API. Trả dict JSON trả về khi xong (phía
     gọi đọc redirect_to / checkpoint_url / auth_meta_session trong
     đó để đồng bộ phiên web), REGISTRATION_BLOCKED khi Meta chặn
     tạo tài khoản trên IP này, None khi lỗi khác (ghi log lý do).
     birth_date: ngày sinh dùng cho API; không có thì tự sinh ngẫu
-    nhiên (trên 18 tuổi). Luồng API KHÔNG điền form hồ sơ trước —
-    tải lại trang để lấy form làm mất trạng thái luồng (chưa có
-    phiên) và trang về khung đăng nhập (gặp live 2026-11-12)."""
+    nhiên (trên 18 tuổi). include_names: kèm first_name/last_name
+    ("Long"/"long", như form điền tay) — chỉ bật khi kết quả xác
+    nhận OTP báo requires_name, đúng như trang tự làm; thiếu tên
+    khi bị bắt thì server trả 400 invalidRequest (gặp live
+    2026-11-12). Luồng API KHÔNG điền form hồ sơ trước — tải lại
+    trang để lấy form làm mất trạng thái luồng (chưa có phiên) và
+    trang về khung đăng nhập (gặp live 2026-11-12)."""
     if birth_date is None:
         birth_date = _random_birth_date()
     _status(
         "Đang hoàn tất hồ sơ qua API (ngày sinh "
-        f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year})..."
+        f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year}"
+        f"{'; kèm tên' if include_names else ''})..."
     )
+    payload = {
+        "date_of_birth": birth_date.isoformat(),
+        "tos_content_version": tos_version,
+        "remember_device": True,
+    }
+    if include_names:
+        payload["first_name"] = "Long"
+        payload["last_name"] = "long"
     try:
         status, data, text = _api_post_authed(
             page,
             "/register-completion",
-            {
-                "date_of_birth": birth_date.isoformat(),
-                "tos_content_version": tos_version,
-                "remember_device": True,
-            },
+            payload,
             token_box,
         )
     except Exception as error:
@@ -2060,9 +2077,11 @@ def main():
                 use_api = False
             else:
                 _status("Đã nhận mã xác minh, đang xác nhận qua API...")
-                tos_version = _try_confirm_otp_api(page, code, token_box)
-                if tos_version is None:
+                confirmed = _try_confirm_otp_api(page, code, token_box)
+                if confirmed is None:
                     use_api = False
+                else:
+                    tos_version, requires_name = confirmed
         if not use_api:
             _click_when_ready(page, continue_button, "Continue")
             # Mốc thư cũ chụp lại sau khi bấm: mã OTP của lần gửi
@@ -2106,9 +2125,11 @@ def main():
             # khởi động lại như chưa đăng nhập và chỉ còn khung
             # đăng nhập; form hồ sơ cũng không hiện để mà điền.
             # Ngày sinh dùng ngẫu nhiên (trên 18 tuổi) như luồng
-            # API ban đầu.
+            # API ban đầu; họ tên kèm theo khi kết quả xác nhận
+            # OTP báo requires_name (đúng như trang tự làm).
             completion = _try_register_completion_api(
-                page, tos_version, token_box
+                page, tos_version, token_box,
+                include_names=requires_name,
             )
             if completion == REGISTRATION_BLOCKED:
                 # Meta chặn tạo tài khoản trên IP này — cùng bản

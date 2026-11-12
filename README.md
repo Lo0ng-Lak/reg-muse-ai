@@ -56,7 +56,11 @@ the app then, with no further clicks:
    calling the API from outside the browser is rejected with
    403): send-otp for the email, then the code from step 3, then
    register-completion with a random birthday (age always over
-   18). The profile form is NOT filled on the API path: it only
+   18). When the confirm-otp response says the flow requires a
+   name (`requires_name`), the completion also sends first_name
+   "Long" and last_name "long", exactly as the page does — leaving
+   the names out in that case makes the server answer 400
+   `invalidRequest`. The profile form is NOT filled on the API path: it only
    appears inside the page's own button-click flow, and reloading
    the page to reach it loses the in-memory flow state (there is
    no session yet) and drops back to the login frame. Every API
