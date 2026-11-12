@@ -7,6 +7,7 @@ import tkinter as tk
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import date
 from pathlib import Path
 from tkinter import messagebox
@@ -1419,13 +1420,24 @@ def _locator_enabled(locator):
         return False
 
 
-_API_FETCH_JS = """([url, payload, csrfToken]) => {
+# Gọi API native: các header đúng như hàm gọi API của trang tự
+# làm (aT trong JS của muse.ai) — CSRF token, X-Hatch-Waterfall-Id
+# (một UUID cho cả lượt thử, trang tự sinh khi bắt đầu lượt đăng
+# ký) và X-Hatch-Caa-Reg-Entry-Point: login_home (điểm vào mặc
+# định khi đăng ký từ trang chính). Header activation-source trang
+# chỉ gửi khi có nguồn kích hoạt (luồng đăng ký thường không có)
+# nên không gửi.
+_API_FETCH_JS = """([url, payload, csrfToken, waterfallId]) => {
     const headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "X-Hatch-Caa-Reg-Entry-Point": "login_home"
     };
     if (csrfToken) {
         headers["X-Hatch-CSRF-Token"] = csrfToken;
+    }
+    if (waterfallId) {
+        headers["X-Hatch-Waterfall-Id"] = waterfallId;
     }
     return fetch(url, {
         method: "POST",
@@ -1442,37 +1454,44 @@ _API_FETCH_JS = """([url, payload, csrfToken]) => {
 # Lấy CSRF token: POST /restart (không cần token) rồi đọc
 # csrf_token trong JSON trả về — đúng cách trang đăng ký tự làm
 # khi khởi tạo luồng auth (đã đọc trong JS của muse.ai).
-_API_RESTART_JS = """([url]) => fetch(url, {
-    method: "POST",
-    headers: {
+_API_RESTART_JS = """([url, waterfallId]) => {
+    const headers = {
         "Content-Type": "application/json",
         "Accept": "application/json"
-    },
+    };
+    if (waterfallId) {
+        headers["X-Hatch-Waterfall-Id"] = waterfallId;
+    }
+    return fetch(url, {
+    method: "POST",
+    headers: headers,
     credentials: "same-origin",
     cache: "no-store",
     body: "{}"
 }).then(async (response) => ({
     status: response.status,
     text: await response.text()
-}))"""
+}))}"""
 
 
-def _api_post(page, path, payload, csrf_token=None):
+def _api_post(page, path, payload, csrf_token=None, waterfall_id=None):
     """Gọi một API native của muse.ai TỪ TRONG trình duyệt.
 
     fetch cùng origin nên request mang đúng cookie/phiên của
     trang — khác hẳn gọi từ ngoài bằng curl (bị 403 Forbidden
     ngay từ send-otp, đã thử 2026-11-12). csrf_token (lấy qua
     /restart) được gửi trong header X-Hatch-CSRF-Token — thiếu
-    nó server trả 403 csrfFailed (gặp live 2026-11-12). Trả
-    (status, data, raw_text); data là JSON đã parse hoặc None
-    khi thân không phải JSON. Lỗi evaluate (trang đóng, fetch
-    bị chặn) ném RuntimeError để phía gọi rơi về luồng DOM.
+    nó server trả 403 csrfFailed (gặp live 2026-11-12).
+    waterfall_id (một UUID cho cả lượt thử) và điểm vào
+    login_home được gửi như trang tự làm. Trả (status, data,
+    raw_text); data là JSON đã parse hoặc None khi thân không
+    phải JSON. Lỗi evaluate (trang đóng, fetch bị chặn) ném
+    RuntimeError để phía gọi rơi về luồng DOM.
     """
     try:
         result = page.evaluate(
             _API_FETCH_JS,
-            [NATIVE_AUTH_BASE + path, payload, csrf_token],
+            [NATIVE_AUTH_BASE + path, payload, csrf_token, waterfall_id],
         )
     except Exception as error:
         raise RuntimeError(
@@ -1490,16 +1509,18 @@ def _api_post(page, path, payload, csrf_token=None):
     return status, data, text
 
 
-def _fetch_csrf_token(page):
+def _fetch_csrf_token(page, waterfall_id=None):
     """Lấy CSRF token cho luồng auth native qua POST /restart.
 
     Trả token (str) hoặc None khi lỗi (đã ghi log lý do). Token
     này trang đăng ký cũng tự lấy khi khởi tạo luồng auth — đọc
-    từ JSON trả về của /restart, không đọc cookie.
+    từ JSON trả về của /restart, không đọc cookie. waterfall_id
+    (nếu có) được gửi kèm như trang tự làm.
     """
     try:
         result = page.evaluate(
-            _API_RESTART_JS, [NATIVE_AUTH_BASE + "/restart"]
+            _API_RESTART_JS,
+            [NATIVE_AUTH_BASE + "/restart", waterfall_id],
         )
     except Exception as error:
         _status(
@@ -1535,18 +1556,21 @@ REGISTRATION_BLOCKED = "registration_blocked"
 
 def _api_post_authed(page, path, payload, token_box):
     """Gọi API native kèm CSRF token trong token_box (dict có khóa
-    "token"). Gặp lỗi csrfFailed thì lấy token mới qua /restart
-    rồi thử lại đúng một lần (server tự gợi ý "Refresh the page
-    and try again")."""
+    "token" và "waterfall_id"). Gặp lỗi csrfFailed thì lấy token
+    mới qua /restart rồi thử lại đúng một lần (server tự gợi ý
+    "Refresh the page and try again")."""
     status, data, text = _api_post(
-        page, path, payload, token_box.get("token")
+        page, path, payload, token_box.get("token"),
+        token_box.get("waterfall_id"),
     )
     if status == 403 and "csrfFailed" in (text or ""):
         _status("CSRF token hết hiệu lực — lấy token mới rồi thử lại...")
-        fresh = _fetch_csrf_token(page)
+        fresh = _fetch_csrf_token(page, token_box.get("waterfall_id"))
         if fresh:
             token_box["token"] = fresh
-            status, data, text = _api_post(page, path, payload, fresh)
+            status, data, text = _api_post(
+                page, path, payload, fresh, token_box.get("waterfall_id")
+            )
     return status, data, text
 
 
@@ -2055,7 +2079,14 @@ def main():
         # thì rơi về bấm nút DOM ở bước đó. Từ bước nhập thẻ trở
         # đi mọi thứ giữ nguyên như cũ.
         continue_button = _open_signup_and_submit_email(page, email)
-        token_box = {"token": _fetch_csrf_token(page)}
+        # Một UUID "waterfall" cho cả lượt thử này — trang tự sinh
+        # một UUID khi bắt đầu lượt đăng ký (beginHatchAuthAttempt)
+        # và gửi kèm trên /restart lẫn mọi lệnh auth sau đó.
+        waterfall_id = str(uuid.uuid4())
+        token_box = {
+            "token": _fetch_csrf_token(page, waterfall_id),
+            "waterfall_id": waterfall_id,
+        }
         if token_box["token"] is None:
             _status("Không lấy được CSRF token — dùng nút bấm.")
             use_api = False
