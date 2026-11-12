@@ -47,16 +47,27 @@ the app then, with no further clicks:
    nothing, because the address itself is the inbox key.
    (There is no Muse.ai password either — signup is email plus a
    one-time code.)
-2. Opens a dedicated Chromium window **through the proxy**, first checks the
-   exit IP it actually got, and only continues if that IP is in the US.
-   It then fills the email into the visible "Mobile number or email" field
-   and submits **Continue** to request a verification code.
-3. Polls the chosen temp-mail provider for the code (up to three minutes), fills it, and submits
-   **Confirm** on the code form.
+2. Opens a dedicated Chromium window **through the proxy** (or
+   direct, in VPN mode) and signs up through Muse.ai's own native
+   auth API, called from inside the browser (fetch on the same
+   origin, so the requests carry the page's session — calling the
+   API from outside the browser is rejected with 403): send-otp
+   for the email, then the code from step 3, then
+   register-completion with a random birthday (age always over
+   18). If any API step fails, returns an unexpected shape, or
+   asks for an extra human check, the helper falls back to the
+   old way — filling the visible "Mobile number or email" field,
+   submitting **Continue**, filling the code form, and filling
+   the profile form (names "Long"/"long" when asked, random
+   birthday) before clicking **Confirm**.
+3. Polls the chosen temp-mail provider for the code (up to three minutes), which the
+   API step (or the code form, in fallback mode) then confirms.
 4. On the final profile form, fills the first and last name as "Long" and
    "long" when the form asks for them (some regions, such as US IPs, only
    ask for the birthday — the name step is then skipped), and picks a
    random birthday with an age always over 18, then clicks **Confirm**.
+   (This step only runs in fallback mode — the API path completes the
+   profile with register-completion instead.)
 5. Watches the screen after the profile form. A "Join the waitlist" screen
    means Muse is unavailable in the proxy exit's region and the attempt
    fails. On the card-entry screen ("Confirm your age"), if you have saved

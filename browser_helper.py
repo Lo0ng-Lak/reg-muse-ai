@@ -27,6 +27,11 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 SIGNUP_URL = "https://muse.ai/"
+# API native của muse.ai (phần auth mà trang đăng ký tự gọi).
+# Chỉ gọi được TỪ TRONG trình duyệt (fetch cùng origin) — gọi
+# từ ngoài bằng curl bị 403 Forbidden ngay từ send-otp (đã thử
+# 2026-11-12).
+NATIVE_AUTH_BASE = "https://muse.ai/api/auth/native"
 # Hậu tố file riêng của luồng song song: "" = luồng duy
 # nhất/luồng 1 (proxy.txt, redeem.txt như cũ); "-2".."-5"
 # khi app chính chạy nhiều luồng (proxy-2.txt, ...).
@@ -1414,6 +1419,222 @@ def _locator_enabled(locator):
         return False
 
 
+_API_FETCH_JS = """([url, payload]) => fetch(url, {
+    method: "POST",
+    headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    },
+    credentials: "same-origin",
+    body: JSON.stringify(payload)
+}).then(async (response) => ({
+    status: response.status,
+    text: await response.text()
+}))"""
+
+
+def _api_post(page, path, payload):
+    """Gọi một API native của muse.ai TỪ TRONG trình duyệt.
+
+    fetch cùng origin nên request mang đúng cookie/phiên của
+    trang — khác hẳn gọi từ ngoài bằng curl (bị 403 Forbidden
+    ngay từ send-otp, đã thử 2026-11-12). Trả (status, data,
+    raw_text); data là JSON đã parse hoặc None khi thân không
+    phải JSON. Lỗi evaluate (trang đóng, fetch bị chặn) ném
+    RuntimeError để phía gọi rơi về luồng DOM.
+    """
+    try:
+        result = page.evaluate(
+            _API_FETCH_JS, [NATIVE_AUTH_BASE + path, payload]
+        )
+    except Exception as error:
+        raise RuntimeError(
+            f"Không gọi được API {path} từ trình duyệt "
+            f"({_short_error(error)})"
+        ) from error
+    status = result.get("status", 0) if isinstance(result, dict) else 0
+    text = result.get("text", "") if isinstance(result, dict) else ""
+    data = None
+    if text:
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+    return status, data, text
+
+
+def _api_response_has_challenge(data, text):
+    """API có yêu cầu kiểm tra thêm (captcha/thử thách) không?
+
+    Chỉ soi tên trường và đoạn text ngắn — không đọc giá trị nhạy
+    cảm. Gặp thử thách thì luồng API dừng lại để luồng DOM mở
+    trình duyệt cho người dùng xử lý bằng tay, không bỏ qua.
+    """
+    haystack = ""
+    if isinstance(data, dict):
+        haystack += " ".join(str(key) for key in data.keys()).lower()
+        for key in ("error", "message", "code"):
+            value = data.get(key)
+            if isinstance(value, str):
+                haystack += " " + value.lower()
+    haystack += " " + (text or "")[:500].lower()
+    return any(
+        word in haystack
+        for word in (
+            "captcha",
+            "challenge",
+            "verify you are human",
+            "human verification",
+        )
+    )
+
+
+def _wait_for_code_from_mail(page, mailbox, existing_ids):
+    """Chờ mã OTP trong hộp thư, không cần form mã trên trang
+    (dùng cho luồng API — trang vẫn đang ở bước email). Nhịp và
+    thời gian chờ giống hệt _wait_for_verification_code."""
+    deadline = time.monotonic() + CODE_TIMEOUT_SECONDS
+    warned = False
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError("Cửa sổ Chromium đã đóng trước khi xác minh.")
+        try:
+            code = _verification_code_from_new_messages(mailbox, existing_ids)
+        except Exception:
+            if not warned:
+                _status("Kiểm tra hộp thư bị rớt kết nối — đang thử lại...")
+                warned = True
+            code = None
+        if code:
+            return code
+        page.wait_for_timeout(4000)
+    raise TimeoutError(
+        f"Không tìm thấy mã xác minh mới trong hộp thư "
+        f"{mailbox['provider']} sau {CODE_TIMEOUT_SECONDS} giây."
+    )
+
+
+def _native_auth_via_api(page, email, mailbox, existing_ids):
+    """Đăng ký bằng API native của muse.ai tới hết bước hồ sơ.
+
+    Gọi từ trong trình duyệt (fetch cùng origin) nên request mang
+    đúng phiên/cookie của trang. Trả True khi đã xong bước hồ sơ
+    qua API (main sẽ mở lại trang rồi phân loại màn hình tiếp theo
+    như cũ); trả False khi gặp bất kỳ trục trặc nào TRƯỚC khi xác
+    nhận OTP thành công, để main rơi về luồng bấm nút DOM cũ.
+    Sau khi OTP đã xác nhận mà hoàn tất hồ sơ lỗi thì vẫn trả True
+    (phiên đã đăng nhập — mở lại trang để màn hình thật tự nói,
+    thay vì bấm lại từ đầu trên một phiên nửa vời). Mọi lỗi đều
+    được nuốt ở đây (chỉ ghi log) trừ cửa sổ đã đóng.
+    """
+    try:
+        status, data, text = _api_post(
+            page, "/send-otp", {"contact_point": email, "region": "US"}
+        )
+    except Exception as error:
+        _status(
+            "Gọi API gửi OTP không được "
+            f"({_short_error(error)}) — dùng nút bấm."
+        )
+        return False
+    if _api_response_has_challenge(data, text):
+        _status(
+            "API gửi OTP yêu cầu kiểm tra thêm — dùng nút bấm để "
+            "bạn xử lý trên trình duyệt."
+        )
+        return False
+    if not 200 <= status < 300:
+        _status(f"API gửi OTP trả HTTP {status} — dùng nút bấm thay thế.")
+        return False
+    if isinstance(data, dict):
+        keys = ", ".join(sorted(data.keys())) or "trống"
+        _status(f"API gửi OTP OK (trả về: {keys}).")
+    _status(
+        "Đã gửi OTP qua API, đang chờ mã xác minh từ "
+        f"{mailbox['provider']}..."
+    )
+    try:
+        code = _wait_for_code_from_mail(page, mailbox, existing_ids)
+    except TimeoutError:
+        _status("Chờ mã OTP qua API hết giờ — dùng nút bấm để gửi lại mã.")
+        return False
+    _status("Đã nhận mã xác minh, đang xác nhận qua API...")
+    try:
+        status, data, text = _api_post(
+            page, "/confirm-otp", {"otp_code": code, "remember_device": True}
+        )
+    except Exception as error:
+        _status(
+            "Gọi API xác nhận OTP không được "
+            f"({_short_error(error)}) — dùng nút bấm."
+        )
+        return False
+    if _api_response_has_challenge(data, text):
+        _status(
+            "API xác nhận OTP yêu cầu kiểm tra thêm — dùng nút bấm "
+            "để bạn xử lý trên trình duyệt."
+        )
+        return False
+    if not 200 <= status < 300:
+        _status(
+            f"API xác nhận OTP trả HTTP {status} — dùng nút bấm thay thế."
+        )
+        return False
+    tos_version = None
+    if isinstance(data, dict):
+        state = data.get("registration_state")
+        tos = data.get("tos") or {}
+        tos_version = tos.get("content_version") if isinstance(tos, dict) else None
+        _status(f"API xác nhận OTP OK (trạng thái: {state}).")
+        if state != "completion_required" or not tos_version:
+            _status(
+                "Xác nhận OTP xong nhưng không ra bước hoàn tất hồ "
+                "sơ — dùng nút bấm."
+            )
+            return False
+    else:
+        _status("API xác nhận OTP trả về không phải JSON — dùng nút bấm.")
+        return False
+    birth_date = _random_birth_date()
+    _status(
+        "Đang hoàn tất hồ sơ qua API (ngày sinh "
+        f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year})..."
+    )
+    try:
+        status, data, text = _api_post(
+            page,
+            "/register-completion",
+            {
+                "date_of_birth": birth_date.isoformat(),
+                "tos_content_version": tos_version,
+                "remember_device": True,
+            },
+        )
+    except Exception as error:
+        _status(
+            "Gọi API hoàn tất hồ sơ không được "
+            f"({_short_error(error)}) — mở lại trang để kiểm tra."
+        )
+        return True
+    if _api_response_has_challenge(data, text):
+        _status(
+            "API hoàn tất hồ sơ yêu cầu kiểm tra thêm — mở lại trang "
+            "để bạn xử lý trên trình duyệt."
+        )
+        return True
+    if not 200 <= status < 300:
+        _status(
+            f"API hoàn tất hồ sơ trả HTTP {status} — mở lại trang "
+            "để kiểm tra màn hình thật."
+        )
+        return True
+    if isinstance(data, dict) and data:
+        keys = ", ".join(sorted(data.keys()))
+        _status(f"API hoàn tất hồ sơ OK (trả về: {keys}).")
+    _status("Đã hoàn tất hồ sơ qua API.")
+    return True
+
+
 def _open_signup_and_submit_email(page, email):
     """Mở trang đăng ký, chờ form HIỆN HẲN rồi mới điền email.
 
@@ -1567,7 +1788,6 @@ def main():
         # Không kiểm tra IP thoát nữa: kho proxy do người dùng đảm
         # bảo toàn bộ là proxy US. Nếu một proxy nào đó thoát sai
         # khu vực, màn hình waitlist sau bước hồ sơ vẫn chặn lại.
-        continue_button = _open_signup_and_submit_email(page, email)
         mailbox = _load_mailbox(email)
         try:
             existing_ids = _get_message_ids(mailbox)
@@ -1575,31 +1795,66 @@ def main():
             # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
             # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
             existing_ids = set()
-        _click_when_ready(page, continue_button, "Continue")
-        _status(
-            "Đã gửi email, đang chờ mã xác minh từ "
-            f"{mailbox['provider']}..."
-        )
-
-        code = _wait_for_verification_code(page, mailbox, existing_ids)
-        _status("Đã nhận mã xác minh, đang điền mã...")
-        _fill_verification_code(page, code)
-        page.wait_for_timeout(UI_SETTLE_MS)
-        # Form mã của Muse.ai TỰ GỬI ngay khi nhập đủ số: trang tự nhảy
-        # sang bước hồ sơ mà không cần bấm Confirm. TUYỆT ĐỐI không bấm
-        # nút "Confirm" nào khi form hồ sơ đã hiện mà chưa điền: nút
-        # Confirm của form hồ sơ luôn bấm được, bấm ngay lúc này là gửi
-        # ngày sinh MẶC ĐỊNH (ngày hôm nay — tuổi 0) và bị chặn vì dưới
-        # 18 tuổi. Vì vậy: chờ form hồ sơ (cả hai biến thể) tự hiện
-        # trước; chỉ khi nó không hiện mới bấm Confirm của form mã rồi
-        # chờ tiếp.
-        _ensure_profile_form(page)
-        _status("Mã đã xác nhận, đang điền hồ sơ...")
-        _fill_profile(page)
-        finish_button = page.get_by_role(
-            "button", name="Confirm", exact=True
-        )
-        _click_when_ready(page, finish_button, "Confirm")
+        # Đăng ký bằng API native trước (gọi từ trong trình duyệt
+        # nên mang đúng phiên/cookie của trang — gọi từ ngoài bị
+        # 403); trục trặc gì thì rơi về luồng bấm nút DOM cũ bên
+        # dưới. Từ bước nhập thẻ trở đi mọi thứ giữ nguyên như cũ.
+        try:
+            page.goto(
+                SIGNUP_URL,
+                wait_until="domcontentloaded",
+                timeout=PAGE_TIMEOUT_MS,
+            )
+        except Exception as error:
+            if DIRECT_MODE:
+                detail = (
+                    "Không tải được trang muse.ai — mạng/VPN quá chậm "
+                    "hoặc mất kết nối."
+                )
+            else:
+                detail = (
+                    "Không tải được trang muse.ai qua proxy — proxy quá "
+                    "chậm hoặc đã chết."
+                )
+            raise RuntimeError(
+                f"{detail} ({_short_error(error)})"
+            ) from error
+        if _native_auth_via_api(page, email, mailbox, existing_ids):
+            _status(
+                "Đã hoàn tất hồ sơ qua API — mở lại trang để tới "
+                "bước tiếp theo..."
+            )
+            page.goto(
+                SIGNUP_URL,
+                wait_until="domcontentloaded",
+                timeout=PAGE_TIMEOUT_MS,
+            )
+        else:
+            continue_button = _open_signup_and_submit_email(page, email)
+            _click_when_ready(page, continue_button, "Continue")
+            _status(
+                "Đã gửi email, đang chờ mã xác minh từ "
+                f"{mailbox['provider']}..."
+            )
+            code = _wait_for_verification_code(page, mailbox, existing_ids)
+            _status("Đã nhận mã xác minh, đang điền mã...")
+            _fill_verification_code(page, code)
+            page.wait_for_timeout(UI_SETTLE_MS)
+            # Form mã của Muse.ai TỰ GỬI ngay khi nhập đủ số: trang tự nhảy
+            # sang bước hồ sơ mà không cần bấm Confirm. TUYỆT ĐỐI không bấm
+            # nút "Confirm" nào khi form hồ sơ đã hiện mà chưa điền: nút
+            # Confirm của form hồ sơ luôn bấm được, bấm ngay lúc này là gửi
+            # ngày sinh MẶC ĐỊNH (ngày hôm nay — tuổi 0) và bị chặn vì dưới
+            # 18 tuổi. Vì vậy: chờ form hồ sơ (cả hai biến thể) tự hiện
+            # trước; chỉ khi nó không hiện mới bấm Confirm của form mã rồi
+            # chờ tiếp.
+            _ensure_profile_form(page)
+            _status("Mã đã xác nhận, đang điền hồ sơ...")
+            _fill_profile(page)
+            finish_button = page.get_by_role(
+                "button", name="Confirm", exact=True
+            )
+            _click_when_ready(page, finish_button, "Confirm")
         if auto:
             _status("Đã gửi hồ sơ, đang chờ màn hình tiếp theo...")
             outcome = _classify_after_profile(page)
