@@ -56,7 +56,12 @@ the app then, with no further clicks:
    the requests carry the page's session — calling the API from
    outside the browser is rejected with 403): send-otp for the
    email, then the code from step 3, then register-completion
-   with the same birthday that was filled in the form. The code
+   with the same birthday that was filled in the form. Every API
+   call carries an `X-Hatch-CSRF-Token` header, obtained first
+   from `POST /api/auth/native/restart` (which returns the token
+   as `csrf_token` — the same way the page's own auth code gets
+   it); a `csrfFailed` 403 refreshes the token once and retries.
+   The code
    form is the one exception: it auto-submits the moment the code
    is fully entered, so filling it IS submitting it — the code
    step therefore calls the confirm-otp API with the form left
