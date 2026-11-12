@@ -178,10 +178,11 @@ through the proxy. Per-account mailbox state is passed to the helper in
 `mailbox.txt` / `mailbox-<n>.txt` next to the scripts (gitignored, like
 the proxy and redeem files).
 
-### Proxy pool: required, US exit only
+### Connection: proxy pool or machine IP (VPN)
 
-Registration only ever happens through a proxy — there is no VPN/direct
-mode. Paste your proxies into the **Proxy** box in the app window, **one
+The **Kết nối** (Connection) dropdown picks how registration traffic
+goes out: **Proxy (pool)** (default) or **IP máy (VPN)**. In proxy mode,
+paste your proxies into the **Proxy** box in the app window, **one
 proxy per line**: `host:port:username:password` (or a full
 `http://username:password@host:port` URL). The pool is stored in a local
 `proxies.txt` next to the scripts and pre-fills the box on the next launch.
@@ -230,6 +231,21 @@ with a different user/password per exit session, and those count as
 different proxies — only lines that are identical collapse into one.
 The box is editable: delete a line there and that proxy is allowed
 again from the next run.
+
+**IP máy (VPN)** runs Chromium straight through the machine's own
+connection — turn your VPN on before pressing **Bắt đầu**, and make
+sure it exits in the US (the tool does not verify exit IPs; the
+post-profile waitlist screen is the only backstop, same as in proxy
+mode). Differences from proxy mode: the run is always **1 lane** (every
+lane would share the one IP anyway, so a higher lane count is ignored
+with a log note); the **Tài khoản / proxy** quota is disabled; and
+there is no proxy to rotate to — if Meta blocks account creation on
+this IP ("Something went wrong") or the run lands on "Join the
+waitlist", the **whole run stops at once** and the log tells you to
+switch VPN servers (US preferred) and run again. All accounts in a
+direct-mode run come from one IP, so they are more visibly linked than
+accounts spread across a proxy pool. Temp-mail traffic stays on the
+machine's direct connection in both modes.
 
 ### Your card: entered once, kept in Windows Credential Manager
 

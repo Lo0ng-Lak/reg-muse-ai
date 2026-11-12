@@ -33,6 +33,15 @@ CARD_SERVICE = "MuseAIHelper:card"
 CARD_FIELDS = ("number", "expiry", "cvv", "zip")
 HELPER_TIMEOUT_SECONDS = 900
 PAUSE_BETWEEN_ACCOUNTS_SECONDS = 1
+# Chế độ kết nối của lượt chạy: qua kho proxy, hoặc chạy trực
+# tiếp qua IP của máy (người dùng tự bật VPN trước khi chạy).
+# "DIRECT" là câu đánh dấu ghi vào proxy.txt để helper biết
+# là không dùng proxy.
+DIRECT_PROXY_LINE = "DIRECT"
+CONN_MODES = (
+    ("proxy", "Proxy (pool)"),
+    ("direct", "IP máy (VPN)"),
+)
 
 
 def _create_mailbox_account(provider_id=mail_providers.DEFAULT_PROVIDER):
@@ -468,7 +477,7 @@ class MuseAIHelper(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(7, weight=1)
+        root.rowconfigure(8, weight=1)
 
         ttk.Label(
             root,
@@ -659,8 +668,33 @@ class MuseAIHelper(tk.Tk):
             wraplength=480,
         ).pack(side="left")
 
+        conn_row = ttk.Frame(root)
+        conn_row.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(conn_row, text="Kết nối:").pack(side="left")
+        self.conn_mode_var = tk.StringVar(value=CONN_MODES[0][1])
+        self.conn_combo = ttk.Combobox(
+            conn_row,
+            textvariable=self.conn_mode_var,
+            values=[label for _, label in CONN_MODES],
+            state="readonly",
+            width=14,
+        )
+        self.conn_combo.pack(side="left", padx=(6, 8))
+        self.conn_combo.bind(
+            "<<ComboboxSelected>>", self._on_conn_mode_change
+        )
+        ttk.Label(
+            conn_row,
+            text=(
+                "IP máy (VPN): chạy trực tiếp qua IP của máy này — "
+                "bật VPN trước khi bấm Bắt đầu, chỉ chạy 1 luồng, "
+                "IP bị chặn là dừng cả lượt chạy."
+            ),
+            wraplength=480,
+        ).pack(side="left")
+
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=7, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=8, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -673,7 +707,15 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=8, column=0, sticky="ew", pady=(10, 0)
+            row=9, column=0, sticky="ew", pady=(10, 0)
+        )
+
+    def _on_conn_mode_change(self, _event=None):
+        """Chế độ IP máy không có kho proxy để xoay nên ô
+        'Tài khoản / proxy' vô nghĩa — khoá lại cho rõ."""
+        direct = self.conn_mode_var.get() == CONN_MODES[1][1]
+        self.per_proxy_spin.configure(
+            state="disabled" if direct else "normal"
         )
 
     def _save_card(self):
@@ -824,7 +866,13 @@ class MuseAIHelper(tk.Tk):
         self.count_spin.configure(state="disabled" if running else "normal")
         self.proxy_text.configure(state="disabled" if running else "normal")
         self.bad_proxy_text.configure(state="disabled" if running else "normal")
-        self.per_proxy_spin.configure(state="disabled" if running else "normal")
+        direct = (
+            getattr(self, "conn_mode_var", None) is not None
+            and self.conn_mode_var.get() == CONN_MODES[1][1]
+        )
+        self.per_proxy_spin.configure(
+            state="disabled" if (running or direct) else "normal"
+        )
         self.card_limit_spin.configure(state="disabled" if running else "normal")
         self.lanes_spin.configure(state="disabled" if running else "normal")
         self.invite_entry.configure(state="disabled" if running else "normal")
@@ -832,6 +880,9 @@ class MuseAIHelper(tk.Tk):
             state="disabled" if running else "normal"
         )
         self.provider_combo.configure(
+            state="disabled" if running else "readonly"
+        )
+        self.conn_combo.configure(
             state="disabled" if running else "readonly"
         )
         for widget in (
@@ -897,38 +948,59 @@ class MuseAIHelper(tk.Tk):
                 "Thẻ rồi bấm Lưu thẻ để bộ đếm reset về 0, rồi chạy lại.",
             )
             return
-        try:
-            pool = self._sync_proxy_pool()
-        except RuntimeError as error:
-            messagebox.showerror("Lỗi proxy", str(error))
-            return
-        if not pool:
-            messagebox.showwarning(
-                "Thiếu proxy",
-                "Tool chỉ đăng ký qua proxy. "
-                "Hãy nhập ít nhất một proxy (mỗi dòng một proxy, "
-                "dạng host:port:user:pass) vào ô Proxy rồi bấm lại.",
-            )
-            return
-        bad_keys = self._sync_bad_proxies()
-        if bad_keys:
-            excluded = sum(
-                1 for line in pool if _proxy_key(line) in bad_keys
-            )
-            if excluded:
-                self._append_log(
-                    f"Đã loại {excluded} proxy trong ô Proxy lỗi "
-                    "khỏi kho cho đợt chạy này."
+        conn_label = self.conn_mode_var.get()
+        conn_id = next(
+            (
+                cid
+                for cid, label in CONN_MODES
+                if label == conn_label
+            ),
+            "proxy",
+        )
+        direct = conn_id == "direct"
+        if direct:
+            # Chế độ IP máy: không dùng kho proxy — pool chỉ là
+            # câu đánh dấu DIRECT để helper chạy thẳng qua IP của
+            # máy (người dùng tự bật VPN trước). Hạn mức "tài
+            # khoản / proxy" vô nghĩa nên đặt rất lớn để vòng xoay
+            # không bao giờ quay vòng — quay vòng sẽ khiến chế độ
+            # không giới hạn dừng sớm sau vài tài khoản.
+            pool = [DIRECT_PROXY_LINE]
+            per_proxy = 10**9
+        else:
+            try:
+                pool = self._sync_proxy_pool()
+            except RuntimeError as error:
+                messagebox.showerror("Lỗi proxy", str(error))
+                return
+            if not pool:
+                messagebox.showwarning(
+                    "Thiếu proxy",
+                    "Chế độ Proxy chỉ đăng ký qua proxy. "
+                    "Hãy nhập ít nhất một proxy (mỗi dòng một proxy, "
+                    "dạng host:port:user:pass) vào ô Proxy rồi bấm lại, "
+                    "hoặc chọn chế độ IP máy (VPN) ở ô Kết nối.",
                 )
-        pool = _prepare_pool(pool, bad_keys)
-        if bad_keys and not pool:
-            messagebox.showwarning(
-                "Toàn bộ proxy đều nằm trong kho lỗi",
-                "Mọi proxy trong ô Proxy đều đã bị đánh dấu "
-                "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
-                "lại, hoặc dán proxy mới vào ô Proxy.",
-            )
-            return
+                return
+            bad_keys = self._sync_bad_proxies()
+            if bad_keys:
+                excluded = sum(
+                    1 for line in pool if _proxy_key(line) in bad_keys
+                )
+                if excluded:
+                    self._append_log(
+                        f"Đã loại {excluded} proxy trong ô Proxy lỗi "
+                        "khỏi kho cho đợt chạy này."
+                    )
+            pool = _prepare_pool(pool, bad_keys)
+            if bad_keys and not pool:
+                messagebox.showwarning(
+                    "Toàn bộ proxy đều nằm trong kho lỗi",
+                    "Mọi proxy trong ô Proxy đều đã bị đánh dấu "
+                    "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
+                    "lại, hoặc dán proxy mới vào ô Proxy.",
+                )
+                return
         invite = self._sync_invite_code()
         if not invite:
             seed = _last_invite_from_sheet()
@@ -955,21 +1027,37 @@ class MuseAIHelper(tk.Tk):
         self.stop_event.clear()
         self._set_controls_running(True)
         if total == 0:
-            self._append_log(
-                "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
-                "khoản — chạy tới khi dùng hết lượt của toàn bộ "
-                "proxy trong danh sách (bấm Dừng để ngắt bất cứ "
-                "lúc nào) ---"
-            )
+            if direct:
+                self._append_log(
+                    "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
+                    "khoản — chạy tới khi bấm Dừng (chế độ IP máy "
+                    "không có kho proxy để dùng hết) ---"
+                )
+            else:
+                self._append_log(
+                    "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
+                    "khoản — chạy tới khi dùng hết lượt của toàn bộ "
+                    "proxy trong danh sách (bấm Dừng để ngắt bất cứ "
+                    "lúc nào) ---"
+                )
         else:
             self._append_log(
                 f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---"
             )
-        self._append_log(
-            f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
-            "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
-            "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
-        )
+        if direct:
+            self._append_log(
+                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
+                "IP của máy này, không qua proxy. Kiểm tra VPN đã "
+                "bật và đang thoát ở US trước khi chạy; mọi tài "
+                "khoản dùng chung 1 IP nên chỉ chạy 1 luồng; IP bị "
+                "Meta chặn là lượt chạy dừng ngay."
+            )
+        else:
+            self._append_log(
+                f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
+                "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
+                "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
+            )
         self._append_log(
             f"Dịch vụ temp mail cho lượt chạy này: {provider_label}."
         )
@@ -994,7 +1082,7 @@ class MuseAIHelper(tk.Tk):
             )
         threading.Thread(
             target=self._run_loop,
-            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes, provider_id, single_invite),
+            args=(total, pool, per_proxy, invite, card_limit, card_used, card_tracked, lanes, provider_id, single_invite, direct),
             daemon=True,
         ).start()
 
@@ -1022,7 +1110,7 @@ class MuseAIHelper(tk.Tk):
         self, total, pool, per_proxy, invite,
         card_limit=0, card_used=0, card_tracked=False, lanes=1,
         provider_id=mail_providers.DEFAULT_PROVIDER,
-        single_invite=False,
+        single_invite=False, direct=False,
     ):
         # Điều phối các luồng chạy song song. Kho proxy được
         # CHIA theo bước nhảy: luồng k dùng các proxy ở vị trí
@@ -1040,10 +1128,23 @@ class MuseAIHelper(tk.Tk):
         # sheet. Thẻ
         # thì cả các luồng dùng CHUNG một thẻ đã lưu; bộ đếm
         # giới hạn thẻ tính gộp toàn cục (đếm cả số tài khoản
-        # đang chạy dở để không vượt giới hạn).
-        lanes = max(1, min(int(lanes), 5, len(pool)))
+        # đang chạy dở để không vượt giới hạn). Ở chế độ IP máy
+        # (direct), pool chỉ có câu đánh dấu DIRECT nên mọi luồng
+        # đều dùng chung 1 IP — ép về 1 luồng để không tạo nhiều
+        # tài khoản đồng thời từ cùng một IP.
+        requested_lanes = max(1, min(int(lanes), 5))
+        lanes = max(1, min(requested_lanes, len(pool)))
         if total > 0:
             lanes = min(lanes, total)
+        if direct and requested_lanes > 1:
+            self.events.put(
+                (
+                    "log",
+                    f"Chế độ IP máy (VPN): mọi luồng đều dùng "
+                    f"chung 1 IP nên chỉ chạy 1 luồng — số luồng "
+                    f"đã đặt ({requested_lanes}) bị bỏ qua.",
+                )
+            )
         shared = {
             "success": 0,
             "fail": 0,
@@ -1077,7 +1178,7 @@ class MuseAIHelper(tk.Tk):
             lane_args = (
                 lane_no, lanes, share, subset, per_proxy, seed,
                 card_limit, card_tracked, shared, shared_lock,
-                provider_id, single_invite,
+                provider_id, single_invite, direct,
             )
             if lanes == 1:
                 self._run_lane(*lane_args)
@@ -1107,7 +1208,7 @@ class MuseAIHelper(tk.Tk):
         self, lane_no, lanes, share, subset, per_proxy, seed,
         card_limit, card_tracked, shared, shared_lock,
         provider_id=mail_providers.DEFAULT_PROVIDER,
-        single_invite=False,
+        single_invite=False, direct=False,
     ):
         helper = Path(__file__).with_name("browser_helper.py")
         suffix = "" if lane_no == 1 else f"-{lane_no}"
@@ -1194,14 +1295,24 @@ class MuseAIHelper(tk.Tk):
                         note = ""
                     except OSError as error:
                         note = f" (không ghi được proxy{suffix}.txt: {error})"
-                    self.events.put(
-                        (
-                            "log",
-                            f"{lane_tag}Proxy #{proxy_index + 1}/{len(subset)}: "
-                            f"{_proxy_display(line)} — dùng cho các tài "
-                            f"khoản tiếp theo.{note}",
+                    if direct:
+                        self.events.put(
+                            (
+                                "log",
+                                "Chế độ IP máy (VPN): không dùng "
+                                "proxy — mọi tài khoản chạy qua IP "
+                                f"của máy này.{note}",
+                            )
                         )
-                    )
+                    else:
+                        self.events.put(
+                            (
+                                "log",
+                                f"{lane_tag}Proxy #{proxy_index + 1}/{len(subset)}: "
+                                f"{_proxy_display(line)} — dùng cho các tài "
+                                f"khoản tiếp theo.{note}",
+                            )
+                        )
                 with shared_lock:
                     s_now = shared["success"]
                     f_now = shared["fail"]
@@ -1353,7 +1464,7 @@ class MuseAIHelper(tk.Tk):
                             "khoản này chỉ lưu vào sheet).",
                         )
                     )
-                if burned:
+                if burned and not direct:
                     self.events.put(
                         (
                             "log",
@@ -1362,28 +1473,50 @@ class MuseAIHelper(tk.Tk):
                         )
                     )
                 if burned or waitlisted:
-                    # Proxy này hỏng ở cấp IP: Meta chặn tạo tài
-                    # khoản, hoặc IP thoát rơi vào khu vực chưa
-                    # hỗ trợ (waitlist). Đưa vào kho proxy lỗi để
-                    # loại khỏi mọi đợt chạy sau, và loại ngay
-                    # trong đợt này (kể cả khi xoay vòng quay lại).
-                    reason = (
-                        "bị Meta chặn tạo tài khoản"
-                        if burned
-                        else "bị 'Join the waitlist' (khu vực "
-                        "không hỗ trợ)"
-                    )
-                    if self._mark_proxy_bad(line):
+                    if direct:
+                        # IP máy là IP duy nhất của cả lượt chạy:
+                        # không có proxy khác để đổi, chạy tiếp
+                        # chỉ thất bại nối nhau — dừng ngay để
+                        # người dùng đổi server VPN.
+                        reason = (
+                            "bị Meta chặn tạo tài khoản"
+                            if burned
+                            else "rơi vào 'Join the waitlist' "
+                            "(khu vực không hỗ trợ)"
+                        )
                         self.events.put(
                             (
                                 "log",
-                                f"[{display}/{label_total}] Proxy "
-                                f"{_proxy_display(line)} {reason} — "
-                                "đã đưa vào ô Proxy lỗi, không dùng "
-                                "lại ở các đợt sau.",
+                                f"[{display}/{label_total}] IP máy "
+                                f"(VPN) {reason} — dừng lượt chạy. "
+                                "Đổi server VPN (ưu tiên US) rồi "
+                                "chạy lại.",
                             )
                         )
-                    rotation.retire_current()
+                        self.stop_event.set()
+                    else:
+                        # Proxy này hỏng ở cấp IP: Meta chặn tạo tài
+                        # khoản, hoặc IP thoát rơi vào khu vực chưa
+                        # hỗ trợ (waitlist). Đưa vào kho proxy lỗi để
+                        # loại khỏi mọi đợt chạy sau, và loại ngay
+                        # trong đợt này (kể cả khi xoay vòng quay lại).
+                        reason = (
+                            "bị Meta chặn tạo tài khoản"
+                            if burned
+                            else "bị 'Join the waitlist' (khu vực "
+                            "không hỗ trợ)"
+                        )
+                        if self._mark_proxy_bad(line):
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{display}/{label_total}] Proxy "
+                                    f"{_proxy_display(line)} {reason} — "
+                                    "đã đưa vào ô Proxy lỗi, không dùng "
+                                    "lại ở các đợt sau.",
+                                )
+                            )
+                        rotation.retire_current()
                 else:
                     rotation.advance_after_account(burned=burned)
                 if (share == 0 or index < share) and not self.stop_event.is_set():

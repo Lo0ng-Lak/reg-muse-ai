@@ -32,6 +32,9 @@ SIGNUP_URL = "https://muse.ai/"
 # khi app chính chạy nhiều luồng (proxy-2.txt, ...).
 # main() gán từ tham số dòng lệnh thứ 4.
 LANE_SUFFIX = ""
+# Chế độ IP máy (VPN): proxy.txt chứa câu "DIRECT" thì helper
+# chạy Chromium thẳng, không qua proxy. main() gán từ _load_proxy().
+DIRECT_MODE = False
 CARD_SERVICE = "MuseAIHelper:card"
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
@@ -59,11 +62,15 @@ def _short_error(error):
 def _load_proxy():
     """Đọc proxy tuỳ chọn từ file proxy.txt nằm cạnh script.
 
-    Một dòng duy nhất, một trong hai dạng:
-    host:port:username:password  hoặc  http://username:password@host:port
-    Không có file (hoặc file trống) → None, và main() sẽ huỷ lượt chạy
-    vì đăng ký bắt buộc phải qua proxy. Chỉ lưu lượng Chromium
-    (muse.ai) đi qua proxy; dịch vụ temp mail vẫn đi thẳng.
+    Một dòng duy nhất, một trong ba dạng:
+    host:port:username:password, http://username:password@host:port,
+    hoặc câu đánh dấu DIRECT (chế độ IP máy: chạy thẳng qua IP
+    của máy, không qua proxy — trả về chuỗi "DIRECT" để main()
+    phân biệt với "không có proxy").
+    Không có file (hoặc file trống / dòng không đọc được) → None,
+    và main() sẽ huỷ lượt chạy vì đăng ký bắt buộc phải qua proxy
+    hoặc qua IP máy. Chỉ lưu lượng Chromium (muse.ai) đi qua
+    proxy; dịch vụ temp mail vẫn đi thẳng.
     """
     try:
         raw = Path(__file__).with_name(f"proxy{LANE_SUFFIX}.txt").read_text(
@@ -74,6 +81,8 @@ def _load_proxy():
     if not raw:
         return None
     line = raw.splitlines()[0].strip()
+    if line.upper() == "DIRECT":
+        return "DIRECT"
     if line.startswith(("http://", "https://")):
         parsed = urllib.parse.urlparse(line)
         if not parsed.hostname or not parsed.port:
@@ -1425,13 +1434,23 @@ def _open_signup_and_submit_email(page, email):
             timeout=PAGE_TIMEOUT_MS,
         )
     except Exception as error:
-        # Mọi lỗi ở riêng bước mở trang đều có nghĩa là proxy
-        # hiện tại không tải nổi muse.ai (quá chậm, đã chết,
-        # hoặc từ chối kết nối). Dịch sang một câu ngắn gọn để
-        # dòng RESULT đọc được ngay, kèm dòng lỗi gốc đầu tiên.
+        # Mọi lỗi ở riêng bước mở trang đều có nghĩa là đường
+        # mạng hiện tại không tải nổi muse.ai (proxy quá chậm /
+        # đã chết, hoặc VPN mất kết nối ở chế độ IP máy). Dịch
+        # sang một câu ngắn gọn để dòng RESULT đọc được ngay,
+        # kèm dòng lỗi gốc đầu tiên.
+        if DIRECT_MODE:
+            detail = (
+                "Không tải được trang muse.ai — mạng/VPN quá chậm "
+                "hoặc mất kết nối."
+            )
+        else:
+            detail = (
+                "Không tải được trang muse.ai qua proxy — proxy quá "
+                "chậm hoặc đã chết."
+            )
         raise RuntimeError(
-            "Không tải được trang muse.ai qua proxy — proxy quá "
-            f"chậm hoặc đã chết. ({_short_error(error)})"
+            f"{detail} ({_short_error(error)})"
         ) from error
     _status("Đã mở trang Muse.ai — chờ form hiển thị đầy đủ...")
     email_field = page.get_by_role(
@@ -1493,7 +1512,7 @@ def _open_signup_and_submit_email(page, email):
 
 
 def main():
-    global LANE_SUFFIX
+    global LANE_SUFFIX, DIRECT_MODE
     if len(sys.argv) not in (2, 3, 4):
         raise ValueError("Thiếu địa chỉ email cần điền.")
     email = sys.argv[1]
@@ -1520,21 +1539,28 @@ def main():
     proxy = _load_proxy()
     if not proxy:
         detail = (
-            "Chưa cấu hình proxy — tool chỉ đăng ký qua proxy. "
-            "Hãy nhập proxy trong ứng dụng rồi chạy lại."
+            "Chưa cấu hình proxy — tool chỉ đăng ký qua proxy hoặc "
+            "qua IP máy (chế độ IP máy). Hãy nhập proxy trong ứng "
+            "dụng, hoặc chọn chế độ IP máy rồi chạy lại."
         )
         if auto:
             _status(f"RESULT: FAIL {detail}")
             sys.exit(1)
         _show_error("Chưa cấu hình proxy", detail)
         return
+    DIRECT_MODE = proxy == "DIRECT"
+    if DIRECT_MODE:
+        _status(
+            "Chế độ IP máy (VPN): chạy trực tiếp qua IP của máy, "
+            "không qua proxy."
+        )
 
     playwright = sync_playwright().start()
     browser = None
     page = None
     try:
         browser = playwright.chromium.launch(
-            headless=False, proxy=proxy
+            headless=False, proxy=None if DIRECT_MODE else proxy
         )
         page = browser.new_page()
         page.set_default_timeout(PAGE_TIMEOUT_MS)
@@ -1582,20 +1608,36 @@ def main():
                     "PROXY_BURN: Meta chặn tạo tài khoản trên IP này "
                     "('Something went wrong')."
                 )
-                raise RuntimeError(
-                    "Meta báo không thể tạo tài khoản lúc này — IP "
-                    "của proxy đang dùng đã bị chặn; đổi proxy khác."
-                )
+                if DIRECT_MODE:
+                    detail = (
+                        "Meta báo không thể tạo tài khoản lúc này — IP "
+                        "của máy (VPN) đã bị chặn; đổi server VPN "
+                        "khác rồi chạy lại."
+                    )
+                else:
+                    detail = (
+                        "Meta báo không thể tạo tài khoản lúc này — IP "
+                        "của proxy đang dùng đã bị chặn; đổi proxy khác."
+                    )
+                raise RuntimeError(detail)
             if outcome == "waitlist":
                 _status(
                     "WAITLIST: IP thoát rơi vào khu vực chưa được "
                     "hỗ trợ ('Join the waitlist')."
                 )
-                raise RuntimeError(
-                    "Ra màn hình 'Join the waitlist' — Muse chưa khả "
-                    "dụng ở IP thoát hiện tại. Hãy đổi sang proxy US "
-                    "khác rồi chạy lại."
-                )
+                if DIRECT_MODE:
+                    detail = (
+                        "Ra màn hình 'Join the waitlist' — Muse chưa "
+                        "khả dụng ở IP hiện tại. Hãy đổi sang server "
+                        "VPN US khác rồi chạy lại."
+                    )
+                else:
+                    detail = (
+                        "Ra màn hình 'Join the waitlist' — Muse chưa khả "
+                        "dụng ở IP thoát hiện tại. Hãy đổi sang proxy US "
+                        "khác rồi chạy lại."
+                    )
+                raise RuntimeError(detail)
             if outcome != "card":
                 raise RuntimeError(
                     "Sau hồ sơ không ra bước nhập thẻ, cũng không ra "
