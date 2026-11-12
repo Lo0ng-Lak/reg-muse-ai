@@ -236,11 +236,11 @@ again from the next run.
 connection — turn your VPN on before pressing **Bắt đầu**, and make
 sure it exits in the US (the tool does not verify exit IPs; the
 post-profile waitlist screen is the only backstop, same as in proxy
-mode). Differences from proxy mode: the run is always **1 lane** (every
-lane would share the one IP anyway, so a higher lane count is ignored
-with a log note); the **Tài khoản / proxy** quota is disabled; and
-there is no proxy to rotate to — if Meta blocks account creation on
-this IP ("Something went wrong") or the run lands on "Join the
+mode). Differences from proxy mode: the **Tài khoản / proxy** quota is
+disabled, and all lanes share the machine's single IP — the lane count
+runs exactly as set (the owner's decision; concurrent accounts from one
+IP are more likely to be flagged), and if Meta blocks account creation
+on this IP ("Something went wrong") or the run lands on "Join the
 waitlist", the **whole run stops at once** and the log tells you to
 switch VPN servers (US preferred) and run again. All accounts in a
 direct-mode run come from one IP, so they are more visibly linked than

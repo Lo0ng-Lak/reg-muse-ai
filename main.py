@@ -687,8 +687,8 @@ class MuseAIHelper(tk.Tk):
             conn_row,
             text=(
                 "IP máy (VPN): chạy trực tiếp qua IP của máy này — "
-                "bật VPN trước khi bấm Bắt đầu, chỉ chạy 1 luồng, "
-                "IP bị chặn là dừng cả lượt chạy."
+                "bật VPN trước khi bấm Bắt đầu; mọi luồng dùng "
+                "chung 1 IP, IP bị chặn là dừng cả lượt chạy."
             ),
             wraplength=480,
         ).pack(side="left")
@@ -1048,9 +1048,9 @@ class MuseAIHelper(tk.Tk):
             self._append_log(
                 "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
                 "IP của máy này, không qua proxy. Kiểm tra VPN đã "
-                "bật và đang thoát ở US trước khi chạy; mọi tài "
-                "khoản dùng chung 1 IP nên chỉ chạy 1 luồng; IP bị "
-                "Meta chặn là lượt chạy dừng ngay."
+                "bật và đang thoát ở US trước khi chạy; mọi luồng "
+                "dùng chung 1 IP nên IP bị Meta chặn là cả lượt "
+                "chạy dừng ngay."
             )
         else:
             self._append_log(
@@ -1129,20 +1129,25 @@ class MuseAIHelper(tk.Tk):
         # thì cả các luồng dùng CHUNG một thẻ đã lưu; bộ đếm
         # giới hạn thẻ tính gộp toàn cục (đếm cả số tài khoản
         # đang chạy dở để không vượt giới hạn). Ở chế độ IP máy
-        # (direct), pool chỉ có câu đánh dấu DIRECT nên mọi luồng
-        # đều dùng chung 1 IP — ép về 1 luồng để không tạo nhiều
-        # tài khoản đồng thời từ cùng một IP.
+        # (direct), pool chỉ có câu đánh dấu DIRECT: mọi luồng
+        # đều dùng chung 1 IP của máy — số luồng chạy đúng như
+        # đã đặt (chủ tool chấp nhận rủi ro IP bị chặn); mỗi
+        # luồng vẫn có file proxy riêng (proxy.txt, proxy-2.txt,
+        # ...) đều chứa câu DIRECT.
         requested_lanes = max(1, min(int(lanes), 5))
-        lanes = max(1, min(requested_lanes, len(pool)))
+        if direct:
+            lanes = requested_lanes
+        else:
+            lanes = max(1, min(requested_lanes, len(pool)))
         if total > 0:
             lanes = min(lanes, total)
-        if direct and requested_lanes > 1:
+        if direct and lanes > 1:
             self.events.put(
                 (
                     "log",
-                    f"Chế độ IP máy (VPN): mọi luồng đều dùng "
-                    f"chung 1 IP nên chỉ chạy 1 luồng — số luồng "
-                    f"đã đặt ({requested_lanes}) bị bỏ qua.",
+                    f"Chế độ IP máy (VPN): {lanes} luồng dùng chung "
+                    "1 IP của máy — IP bị Meta chặn là dừng cả lượt "
+                    "chạy.",
                 )
             )
         shared = {
@@ -1154,20 +1159,37 @@ class MuseAIHelper(tk.Tk):
         }
         shared_lock = threading.Lock()
         if lanes > 1:
-            self.events.put(
-                (
-                    "log",
-                    f"Chạy {lanes} luồng song song — mỗi luồng "
-                    "một phần kho proxy riêng, một chuỗi mã mời "
-                    "riêng (tài khoản đầu của mọi luồng đều quy "
-                    "đổi mã trong ô Mã mời); dùng chung thẻ đã "
-                    "lưu, giới hạn thẻ tính gộp trên tất cả các "
-                    "luồng.",
+            if direct:
+                self.events.put(
+                    (
+                        "log",
+                        f"Chạy {lanes} luồng song song ở chế độ IP "
+                        "máy (VPN) — mọi luồng dùng chung 1 IP của "
+                        "máy; mỗi luồng một chuỗi mã mời riêng "
+                        "(tài khoản đầu của mọi luồng đều quy đổi "
+                        "mã trong ô Mã mời); dùng chung thẻ đã "
+                        "lưu, giới hạn thẻ tính gộp trên tất cả "
+                        "các luồng.",
+                    )
                 )
-            )
+            else:
+                self.events.put(
+                    (
+                        "log",
+                        f"Chạy {lanes} luồng song song — mỗi luồng "
+                        "một phần kho proxy riêng, một chuỗi mã mời "
+                        "riêng (tài khoản đầu của mọi luồng đều quy "
+                        "đổi mã trong ô Mã mời); dùng chung thẻ đã "
+                        "lưu, giới hạn thẻ tính gộp trên tất cả các "
+                        "luồng.",
+                    )
+                )
         threads = []
         for lane_no in range(1, lanes + 1):
-            subset = pool[lane_no - 1::lanes]
+            if direct:
+                subset = [DIRECT_PROXY_LINE]
+            else:
+                subset = pool[lane_no - 1::lanes]
             if total > 0:
                 share = total // lanes + (
                     1 if lane_no <= total % lanes else 0
