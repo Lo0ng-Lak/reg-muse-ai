@@ -1419,33 +1419,60 @@ def _locator_enabled(locator):
         return False
 
 
-_API_FETCH_JS = """([url, payload]) => fetch(url, {
+_API_FETCH_JS = """([url, payload, csrfToken]) => {
+    const headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    };
+    if (csrfToken) {
+        headers["X-Hatch-CSRF-Token"] = csrfToken;
+    }
+    return fetch(url, {
+        method: "POST",
+        headers: headers,
+        credentials: "same-origin",
+        body: JSON.stringify(payload)
+    }).then(async (response) => ({
+        status: response.status,
+        text: await response.text()
+    }));
+}"""
+
+
+# Lấy CSRF token: POST /restart (không cần token) rồi đọc
+# csrf_token trong JSON trả về — đúng cách trang đăng ký tự làm
+# khi khởi tạo luồng auth (đã đọc trong JS của muse.ai).
+_API_RESTART_JS = """([url]) => fetch(url, {
     method: "POST",
     headers: {
         "Content-Type": "application/json",
         "Accept": "application/json"
     },
     credentials: "same-origin",
-    body: JSON.stringify(payload)
+    cache: "no-store",
+    body: "{}"
 }).then(async (response) => ({
     status: response.status,
     text: await response.text()
 }))"""
 
 
-def _api_post(page, path, payload):
+def _api_post(page, path, payload, csrf_token=None):
     """Gọi một API native của muse.ai TỪ TRONG trình duyệt.
 
     fetch cùng origin nên request mang đúng cookie/phiên của
     trang — khác hẳn gọi từ ngoài bằng curl (bị 403 Forbidden
-    ngay từ send-otp, đã thử 2026-11-12). Trả (status, data,
-    raw_text); data là JSON đã parse hoặc None khi thân không
-    phải JSON. Lỗi evaluate (trang đóng, fetch bị chặn) ném
-    RuntimeError để phía gọi rơi về luồng DOM.
+    ngay từ send-otp, đã thử 2026-11-12). csrf_token (lấy qua
+    /restart) được gửi trong header X-Hatch-CSRF-Token — thiếu
+    nó server trả 403 csrfFailed (gặp live 2026-11-12). Trả
+    (status, data, raw_text); data là JSON đã parse hoặc None
+    khi thân không phải JSON. Lỗi evaluate (trang đóng, fetch
+    bị chặn) ném RuntimeError để phía gọi rơi về luồng DOM.
     """
     try:
         result = page.evaluate(
-            _API_FETCH_JS, [NATIVE_AUTH_BASE + path, payload]
+            _API_FETCH_JS,
+            [NATIVE_AUTH_BASE + path, payload, csrf_token],
         )
     except Exception as error:
         raise RuntimeError(
@@ -1460,6 +1487,59 @@ def _api_post(page, path, payload):
             data = json.loads(text)
         except (json.JSONDecodeError, ValueError):
             data = None
+    return status, data, text
+
+
+def _fetch_csrf_token(page):
+    """Lấy CSRF token cho luồng auth native qua POST /restart.
+
+    Trả token (str) hoặc None khi lỗi (đã ghi log lý do). Token
+    này trang đăng ký cũng tự lấy khi khởi tạo luồng auth — đọc
+    từ JSON trả về của /restart, không đọc cookie.
+    """
+    try:
+        result = page.evaluate(
+            _API_RESTART_JS, [NATIVE_AUTH_BASE + "/restart"]
+        )
+    except Exception as error:
+        _status(
+            "Không gọi được /restart để lấy CSRF token "
+            f"({_short_error(error)})."
+        )
+        return None
+    status = result.get("status", 0) if isinstance(result, dict) else 0
+    text = result.get("text", "") if isinstance(result, dict) else ""
+    if not 200 <= status < 300:
+        _status(
+            f"Gọi /restart trả HTTP {status} ({_preview_body(text)})."
+        )
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        _status("Gọi /restart trả về không phải JSON.")
+        return None
+    token = data.get("csrf_token") if isinstance(data, dict) else None
+    if not isinstance(token, str) or not token:
+        _status("Gọi /restart không trả về csrf_token.")
+        return None
+    return token
+
+
+def _api_post_authed(page, path, payload, token_box):
+    """Gọi API native kèm CSRF token trong token_box (dict có khóa
+    "token"). Gặp lỗi csrfFailed thì lấy token mới qua /restart
+    rồi thử lại đúng một lần (server tự gợi ý "Refresh the page
+    and try again")."""
+    status, data, text = _api_post(
+        page, path, payload, token_box.get("token")
+    )
+    if status == 403 and "csrfFailed" in (text or ""):
+        _status("CSRF token hết hiệu lực — lấy token mới rồi thử lại...")
+        fresh = _fetch_csrf_token(page)
+        if fresh:
+            token_box["token"] = fresh
+            status, data, text = _api_post(page, path, payload, fresh)
     return status, data, text
 
 
@@ -1524,13 +1604,14 @@ def _wait_for_code_from_mail(page, mailbox, existing_ids):
     )
 
 
-def _try_send_otp_api(page, email):
+def _try_send_otp_api(page, email, token_box):
     """Gửi OTP qua API native. Trả True khi đã gửi, False khi lỗi
     (ghi log lý do) để phía gọi bấm nút Continue trên form đã điền
     sẵn. Form email phải được điền trước khi gọi hàm này."""
     try:
-        status, data, text = _api_post(
-            page, "/send-otp", {"contact_point": email, "region": "US"}
+        status, data, text = _api_post_authed(
+            page, "/send-otp", {"contact_point": email, "region": "US"},
+            token_box,
         )
     except Exception as error:
         _status(
@@ -1556,13 +1637,14 @@ def _try_send_otp_api(page, email):
     return True
 
 
-def _try_confirm_otp_api(page, code):
+def _try_confirm_otp_api(page, code, token_box):
     """Xác nhận OTP qua API. Trả tos_content_version khi ra bước
     hoàn tất hồ sơ, None khi lỗi (ghi log lý do) để phía gọi rơi
     về điền mã vào form (form tự gửi khi đủ số)."""
     try:
-        status, data, text = _api_post(
-            page, "/confirm-otp", {"otp_code": code, "remember_device": True}
+        status, data, text = _api_post_authed(
+            page, "/confirm-otp",
+            {"otp_code": code, "remember_device": True}, token_box,
         )
     except Exception as error:
         _status(
@@ -1598,7 +1680,8 @@ def _try_confirm_otp_api(page, code):
     return tos_version
 
 
-def _try_register_completion_api(page, tos_version, birth_date=None):
+def _try_register_completion_api(page, tos_version, token_box,
+                                 birth_date=None):
     """Hoàn tất hồ sơ qua API. Trả True khi xong, False khi lỗi
     (ghi log lý do). birth_date: dùng ngày sinh đã điền sẵn trên
     form hồ sơ (nếu có) để form và API khớp nhau; không có thì tự
@@ -1610,7 +1693,7 @@ def _try_register_completion_api(page, tos_version, birth_date=None):
         f"{birth_date.day:02d}/{birth_date.month:02d}/{birth_date.year})..."
     )
     try:
-        status, data, text = _api_post(
+        status, data, text = _api_post_authed(
             page,
             "/register-completion",
             {
@@ -1618,6 +1701,7 @@ def _try_register_completion_api(page, tos_version, birth_date=None):
                 "tos_content_version": tos_version,
                 "remember_device": True,
             },
+            token_box,
         )
     except Exception as error:
         _status(
@@ -1837,10 +1921,18 @@ def main():
         # hoàn tất qua API. Riêng form mã thì KHÔNG điền trước
         # được — nó tự gửi ngay khi nhập đủ số, nên bước mã chỉ
         # gọi API (form để trống); API lỗi mới điền form để nó tự
-        # gửi. Trục trặc ở bước nào thì rơi về bấm nút DOM ở bước
-        # đó. Từ bước nhập thẻ trở đi mọi thứ giữ nguyên như cũ.
+        # gửi. Mọi lệnh gọi API đều kèm CSRF token lấy qua
+        # POST /restart (thiếu token server trả 403 csrfFailed —
+        # gặp live 2026-11-12). Trục trặc ở bước nào thì rơi về
+        # bấm nút DOM ở bước đó. Từ bước nhập thẻ trở đi mọi thứ
+        # giữ nguyên như cũ.
         continue_button = _open_signup_and_submit_email(page, email)
-        use_api = _try_send_otp_api(page, email)
+        token_box = {"token": _fetch_csrf_token(page)}
+        if token_box["token"] is None:
+            _status("Không lấy được CSRF token — dùng nút bấm.")
+            use_api = False
+        else:
+            use_api = _try_send_otp_api(page, email, token_box)
         tos_version = None
         if use_api:
             _status(
@@ -1857,7 +1949,7 @@ def main():
                 use_api = False
             else:
                 _status("Đã nhận mã xác minh, đang xác nhận qua API...")
-                tos_version = _try_confirm_otp_api(page, code)
+                tos_version = _try_confirm_otp_api(page, code, token_box)
                 if tos_version is None:
                     use_api = False
         if not use_api:
@@ -1897,7 +1989,7 @@ def main():
             # gửi hoàn tất qua API với đúng ngày sinh đã điền.
             filled_birth_date = _try_fill_profile_form(page)
             if _try_register_completion_api(
-                page, tos_version, filled_birth_date
+                page, tos_version, token_box, filled_birth_date
             ):
                 _status(
                     "Đã hoàn tất hồ sơ qua API — mở lại trang để "
