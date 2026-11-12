@@ -285,6 +285,69 @@ def _proxy_key(value):
     return value.strip().lower()
 
 
+def _check_public_ip():
+    """Tra IP công khai hiện tại của máy (IP thoát ra internet).
+
+    Dùng ipinfo.io (HTTPS) trước, ip-api.com (HTTP) dự phòng;
+    cả hai đều miễn phí, không cần key. Trả về dict {"ip",
+    "country_code", "country", "city", "region", "org"} hoặc
+    None khi cả hai đều lỗi. Chỉ đọc — không gửi gì ngoài chính
+    request tra IP. Dùng để hiển thị và cảnh báo, KHÔNG chặn
+    chạy: lượt chạy vẫn tiếp tục dù IP không phải US hay tra
+    không được.
+    """
+    request = urllib.request.Request(
+        "https://ipinfo.io/json",
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        ip = data.get("ip")
+        if ip:
+            return {
+                "ip": ip,
+                "country_code": (data.get("country") or "").upper(),
+                "country": data.get("country") or "?",
+                "city": data.get("city") or "",
+                "region": data.get("region") or "",
+                "org": data.get("org") or "",
+            }
+    except Exception:
+        pass
+    try:
+        request = urllib.request.Request(
+            "http://ip-api.com/json/",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        ip = data.get("query")
+        if ip:
+            return {
+                "ip": ip,
+                "country_code": (data.get("countryCode") or "").upper(),
+                "country": data.get("country") or "?",
+                "city": data.get("city") or "",
+                "region": data.get("regionName") or "",
+                "org": data.get("isp") or "",
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _format_ip_status(info):
+    """Một dòng ngắn gọn cho nhãn IP: '1.2.3.4 (US — Los Angeles,
+    California)'."""
+    where = info["country_code"] or info["country"]
+    if info["city"]:
+        where += f" — {info['city']}"
+        if info["region"]:
+            where += f", {info['region']}"
+    return f"{info['ip']} ({where})"
+
+
 def _prepare_pool(pool, bad_keys):
     """Lọc kho proxy cho một đợt chạy: bỏ các dòng nằm trong kho
     lỗi (khớp theo nguyên dòng qua _proxy_key) và bỏ dòng trùng
@@ -477,7 +540,7 @@ class MuseAIHelper(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(8, weight=1)
+        root.rowconfigure(9, weight=1)
 
         ttk.Label(
             root,
@@ -693,8 +756,20 @@ class MuseAIHelper(tk.Tk):
             wraplength=480,
         ).pack(side="left")
 
+        ip_row = ttk.Frame(root)
+        ip_row.grid(row=8, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(ip_row, text="IP hiện tại:").pack(side="left")
+        self.ip_status = tk.StringVar(value="chưa kiểm tra")
+        ttk.Label(ip_row, textvariable=self.ip_status).pack(
+            side="left", padx=(6, 8)
+        )
+        self.check_ip_button = ttk.Button(
+            ip_row, text="Kiểm tra IP", command=self._on_check_ip
+        )
+        self.check_ip_button.pack(side="left")
+
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=8, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=9, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -707,7 +782,7 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=9, column=0, sticky="ew", pady=(10, 0)
+            row=10, column=0, sticky="ew", pady=(10, 0)
         )
 
     def _on_conn_mode_change(self, _event=None):
@@ -717,6 +792,54 @@ class MuseAIHelper(tk.Tk):
         self.per_proxy_spin.configure(
             state="disabled" if direct else "normal"
         )
+
+    def _report_ip(self, info):
+        """Ghi kết quả tra IP vào log + nhãn IP (dùng chung cho
+        nút Kiểm tra IP và lúc bắt đầu lượt chạy VPN). Chỉ hiển
+        thị và cảnh báo — không chặn chạy."""
+        if info is None:
+            self.events.put(("ip", "không kiểm tra được"))
+            self.events.put(
+                (
+                    "log",
+                    "Không kiểm tra được IP hiện tại của máy "
+                    "(mạng hoặc dịch vụ tra IP lỗi) — chạy tiếp "
+                    "mà không biết IP thoát ở đâu.",
+                )
+            )
+            return
+        status = _format_ip_status(info)
+        self.events.put(("ip", status))
+        line = f"IP hiện tại của máy: {status}"
+        if info["org"]:
+            line += f" — {info['org']}"
+        self.events.put(("log", line))
+        if info["country_code"] and info["country_code"] != "US":
+            self.events.put(
+                (
+                    "log",
+                    f"CẢNH BÁO: IP đang thoát ở "
+                    f"{info['country']} "
+                    f"({info['country_code']}), không phải US — "
+                    "kiểm tra lại VPN trước khi chạy.",
+                )
+            )
+
+    def _on_check_ip(self):
+        """Nút Kiểm tra IP: tra IP trên luồng riêng để không
+        đơ giao diện; kết quả về qua hàng đợi sự kiện. Nút
+        này không bị khoá khi đang chạy — kiểm tra giữa lượt
+        chạy vẫn được (ví dụ nghi VPN rớt)."""
+        self.check_ip_button.configure(state="disabled")
+        self.ip_status.set("đang kiểm tra…")
+
+        def _work():
+            try:
+                self._report_ip(_check_public_ip())
+            finally:
+                self.events.put(("ip_done", None))
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _save_card(self):
         """Lưu thẻ vào Windows Credential Manager (không ghi ra file).
@@ -1137,6 +1260,10 @@ class MuseAIHelper(tk.Tk):
         requested_lanes = max(1, min(int(lanes), 5))
         if direct:
             lanes = requested_lanes
+            # Chế độ IP máy: kiểm tra IP thoát trước khi chạy —
+            # chỉ hiển thị + cảnh báo, không chặn (tra lỗi hay IP
+            # không phải US thì lượt chạy vẫn tiếp tục).
+            self._report_ip(_check_public_ip())
         else:
             lanes = max(1, min(requested_lanes, len(pool)))
         if total > 0:
@@ -1629,6 +1756,10 @@ class MuseAIHelper(tk.Tk):
                 kind, payload = self.events.get_nowait()
                 if kind == "log":
                     self._append_log(payload)
+                elif kind == "ip":
+                    self.ip_status.set(payload)
+                elif kind == "ip_done":
+                    self.check_ip_button.configure(state="normal")
                 elif kind == "bad_proxy":
                     existing = {
                         _proxy_key(line)

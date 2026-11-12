@@ -247,6 +247,15 @@ direct-mode run come from one IP, so they are more visibly linked than
 accounts spread across a proxy pool. Temp-mail traffic stays on the
 machine's direct connection in both modes.
 
+**IP check (direct mode):** the tool looks up the machine's current
+public IP (ipinfo.io, falling back to ip-api.com — both free, no key)
+and shows it next to **IP hiện tại** with its country and city. The
+check runs automatically when a direct-mode run starts, and on demand
+via the **Kiểm tra IP** button (usable even mid-run, e.g. if you
+suspect the VPN dropped). If the IP exits outside the US, the log
+warns you — but the run is **never blocked** by the check: a failed
+lookup or a non-US IP only logs a warning and the run continues.
+
 ### Your card: entered once, kept in Windows Credential Manager
 
 The **Thẻ** row in the window takes a card number, expiry (MM/YY), CVV and
