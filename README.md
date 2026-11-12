@@ -48,20 +48,29 @@ the app then, with no further clicks:
    (There is no Muse.ai password either — signup is email plus a
    one-time code.)
 2. Opens a dedicated Chromium window **through the proxy** (or
-   direct, in VPN mode). The forms are still filled exactly as
-   before — email into the visible "Mobile number or email" field,
-   birthday (+ names when asked) into the profile form — but the
-   **submissions** go through Muse.ai's own native auth API,
-   called from inside the browser (fetch on the same origin, so
-   the requests carry the page's session — calling the API from
-   outside the browser is rejected with 403): send-otp for the
-   email, then the code from step 3, then register-completion
-   with the same birthday that was filled in the form. Every API
+   direct, in VPN mode). The email form is still filled exactly
+   as before — email into the visible "Mobile number or email"
+   field — but the **submissions** go through Muse.ai's own
+   native auth API, called from inside the browser (fetch on the
+   same origin, so the requests carry the page's session —
+   calling the API from outside the browser is rejected with
+   403): send-otp for the email, then the code from step 3, then
+   register-completion with a random birthday (age always over
+   18). The profile form is NOT filled on the API path: it only
+   appears inside the page's own button-click flow, and reloading
+   the page to reach it loses the in-memory flow state (there is
+   no session yet) and drops back to the login frame. Every API
    call carries an `X-Hatch-CSRF-Token` header, obtained first
    from `POST /api/auth/native/restart` (which returns the token
    as `csrf_token` — the same way the page's own auth code gets
    it); a `csrfFailed` 403 refreshes the token once and retries.
-   The code
+   After register-completion succeeds, the helper synchronizes
+   the web session the same way the page does — a hidden form
+   POST to `/hatch/session/bootstrap/` carrying the
+   `frl_access_token` from the completion response — so the
+   browser gets its session cookies before moving to the card
+   step; without a session token it opens the `redirect_to` URL
+   from the response instead. The code
    form is the one exception: it auto-submits the moment the code
    is fully entered, so filling it IS submitting it — the code
    step therefore calls the confirm-otp API with the form left

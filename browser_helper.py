@@ -1543,6 +1543,83 @@ def _api_post_authed(page, path, payload, token_box):
     return status, data, text
 
 
+# Đồng bộ phiên web sau khi hoàn tất hồ sơ qua API — đúng cách
+# trang đăng ký tự làm (đã đọc trong JS của muse.ai): POST form ẩn
+# tới /hatch/session/bootstrap/ kèm frl_access_token, kèm đường
+# dẫn đích trong sessionStorage. Server đặt cookie phiên rồi
+# chuyển tới trang tiếp theo (checkpoint nhập thẻ hoặc app). Không
+# có bước này thì trình duyệt chưa có phiên — mở lại trang chỉ thấy
+# khung đăng nhập (gặp live 2026-11-12).
+_API_BOOTSTRAP_JS = """([frlToken, returnTo]) => {
+    if (sessionStorage.getItem("auth_meta_session_bootstrap_attempted") === "1") {
+        return "already_attempted";
+    }
+    sessionStorage.setItem("auth_meta_session_bootstrap_attempted", "1");
+    if (returnTo && returnTo !== "/") {
+        sessionStorage.setItem("auth_meta_post_login_return_to", returnTo);
+    } else {
+        sessionStorage.removeItem("auth_meta_post_login_return_to");
+    }
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = new URL("/hatch/session/bootstrap/", window.location.origin).toString();
+    form.enctype = "application/x-www-form-urlencoded";
+    form.hidden = true;
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = "frl_access_token";
+    input.value = frlToken;
+    form.appendChild(input);
+    document.body.appendChild(form);
+    form.submit();
+    return "submitted";
+}"""
+
+
+def _resolve_redirect_path(redirect_to):
+    """Chuẩn hoá redirect_to thành đường dẫn nội bộ, như code web
+    tự làm: phải là chuỗi bắt đầu bằng "/" (không phải "//"), dài
+    ≤ 4096, không chứa "\\"; còn không thì "/"."""
+    if not isinstance(redirect_to, str):
+        return "/"
+    value = redirect_to.strip()
+    if (
+        not value
+        or len(value) > 4096
+        or "\\" in value
+        or not value.startswith("/")
+        or value.startswith("//")
+    ):
+        return "/"
+    return value
+
+
+def _bootstrap_session(page, frl_token, redirect_to):
+    """Đồng bộ phiên web bằng form bootstrap (xem _API_BOOTSTRAP_JS).
+    Trả True khi đã gửi form (trang sẽ tự chuyển tới bước tiếp
+    theo), False khi lỗi hoặc đã đồng bộ rồi trong tab này (phía
+    gọi mở thẳng trang đích thay thế). Token phiên không bao giờ
+    được ghi ra log."""
+    path = _resolve_redirect_path(redirect_to)
+    try:
+        result = page.evaluate(_API_BOOTSTRAP_JS, [frl_token, path])
+    except Exception as error:
+        _status(
+            "Không gửi được form đồng bộ phiên "
+            f"({_short_error(error)})."
+        )
+        return False
+    if result != "submitted":
+        return False
+    _status("Đã gửi form đồng bộ phiên — đang chờ trang tiếp theo...")
+    page.wait_for_timeout(1500)
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+    except Exception:
+        pass
+    return True
+
+
 def _preview_body(text, limit=200):
     """Một dòng xem trước ngắn của thân phản hồi lỗi (để ghi log).
 
@@ -1682,10 +1759,13 @@ def _try_confirm_otp_api(page, code, token_box):
 
 def _try_register_completion_api(page, tos_version, token_box,
                                  birth_date=None):
-    """Hoàn tất hồ sơ qua API. Trả True khi xong, False khi lỗi
-    (ghi log lý do). birth_date: dùng ngày sinh đã điền sẵn trên
-    form hồ sơ (nếu có) để form và API khớp nhau; không có thì tự
-    sinh ngẫu nhiên."""
+    """Hoàn tất hồ sơ qua API. Trả dict JSON trả về khi xong (phía
+    gọi đọc redirect_to / checkpoint_url / auth_meta_session trong
+    đó để đồng bộ phiên web), None khi lỗi (ghi log lý do).
+    birth_date: ngày sinh dùng cho API; không có thì tự sinh ngẫu
+    nhiên (trên 18 tuổi). Luồng API KHÔNG điền form hồ sơ trước —
+    tải lại trang để lấy form làm mất trạng thái luồng (chưa có
+    phiên) và trang về khung đăng nhập (gặp live 2026-11-12)."""
     if birth_date is None:
         birth_date = _random_birth_date()
     _status(
@@ -1708,24 +1788,24 @@ def _try_register_completion_api(page, tos_version, token_box,
             "Gọi API hoàn tất hồ sơ không được "
             f"({_short_error(error)})."
         )
-        return False
+        return None
     if _api_response_has_challenge(data, text):
         _status(
             "API hoàn tất hồ sơ yêu cầu kiểm tra thêm — mở lại trang "
             "để bạn xử lý trên trình duyệt."
         )
-        return False
+        return None
     if not 200 <= status < 300:
         _status(
             f"API hoàn tất hồ sơ trả HTTP {status} "
             f"({_preview_body(text)})."
         )
-        return False
+        return None
     if isinstance(data, dict) and data:
         keys = ", ".join(sorted(data.keys()))
         _status(f"API hoàn tất hồ sơ OK (trả về: {keys}).")
     _status("Đã hoàn tất hồ sơ qua API.")
-    return True
+    return data if isinstance(data, dict) else {}
 
 
 def _try_fill_profile_form(page, timeout_ms=20000):
@@ -1733,7 +1813,14 @@ def _try_fill_profile_form(page, timeout_ms=20000):
     trang để app hiện form, điền ngày sinh (+ tên nếu hỏi). Trả
     ngày sinh đã điền khi xong, None khi form không hiện hoặc điền
     lỗi (lúc đó luồng API gửi register-completion mà không cần
-    form). Không ném lỗi."""
+    form). Không ném lỗi.
+
+    KHÔNG DÙNG NỮA trong luồng API (từ 2026-11-12): tải lại trang
+    ở bước này làm mất trạng thái luồng completion_required trong
+    bộ nhớ của app — tài khoản chưa có phiên nên trang khởi động
+    lại như chưa đăng nhập và chỉ còn khung đăng nhập, form hồ sơ
+    không hiện để mà điền. Giữ hàm lại để khỏi vỡ code/test cũ
+    đang tham chiếu tới nó."""
     try:
         page.goto(
             SIGNUP_URL,
@@ -1917,15 +2004,20 @@ def main():
             # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
             existing_ids = set()
         # API thay nút bấm, form vẫn điền như cũ: điền form email
-        # trước rồi gửi OTP qua API; điền form hồ sơ trước rồi gửi
-        # hoàn tất qua API. Riêng form mã thì KHÔNG điền trước
-        # được — nó tự gửi ngay khi nhập đủ số, nên bước mã chỉ
-        # gọi API (form để trống); API lỗi mới điền form để nó tự
-        # gửi. Mọi lệnh gọi API đều kèm CSRF token lấy qua
-        # POST /restart (thiếu token server trả 403 csrfFailed —
-        # gặp live 2026-11-12). Trục trặc ở bước nào thì rơi về
-        # bấm nút DOM ở bước đó. Từ bước nhập thẻ trở đi mọi thứ
-        # giữ nguyên như cũ.
+        # trước rồi gửi OTP qua API; xác nhận mã qua API; rồi gửi
+        # hoàn tất hồ sơ qua API LUÔN với ngày sinh ngẫu nhiên —
+        # KHÔNG mở lại trang để điền form hồ sơ trước, vì tải lại
+        # lúc chưa có phiên làm mất trạng thái luồng và trang về
+        # khung đăng nhập (gặp live 2026-11-12). Riêng form mã thì
+        # KHÔNG điền trước được — nó tự gửi ngay khi nhập đủ số,
+        # nên bước mã chỉ gọi API (form để trống); API lỗi mới
+        # điền form để nó tự gửi. Mọi lệnh gọi API đều kèm CSRF
+        # token lấy qua POST /restart (thiếu token server trả 403
+        # csrfFailed — gặp live 2026-11-12). Hoàn tất hồ sơ xong
+        # thì đồng bộ phiên web bằng form bootstrap (như trang tự
+        # làm) rồi mới tới bước tiếp theo. Trục trặc ở bước nào
+        # thì rơi về bấm nút DOM ở bước đó. Từ bước nhập thẻ trở
+        # đi mọi thứ giữ nguyên như cũ.
         continue_button = _open_signup_and_submit_email(page, email)
         token_box = {"token": _fetch_csrf_token(page)}
         if token_box["token"] is None:
@@ -1985,43 +2077,66 @@ def main():
             )
             _click_when_ready(page, finish_button, "Confirm")
         else:
-            # API đã xác nhận OTP: cố điền form hồ sơ trước rồi
-            # gửi hoàn tất qua API với đúng ngày sinh đã điền.
-            filled_birth_date = _try_fill_profile_form(page)
-            if _try_register_completion_api(
-                page, tos_version, token_box, filled_birth_date
-            ):
+            # API đã xác nhận OTP: gửi hoàn tất hồ sơ qua API
+            # LUÔN, không mở lại trang để điền form hồ sơ trước.
+            # Lý do (gặp live 2026-11-12): ở bước này tài khoản
+            # chưa có phiên — phiên chỉ được tạo khi
+            # register-completion thành công (trả về redirect_to
+            # + auth_meta_session). Tải lại trang lúc này làm
+            # mất trạng thái luồng trong bộ nhớ của app, trang
+            # khởi động lại như chưa đăng nhập và chỉ còn khung
+            # đăng nhập; form hồ sơ cũng không hiện để mà điền.
+            # Ngày sinh dùng ngẫu nhiên (trên 18 tuổi) như luồng
+            # API ban đầu.
+            completion = _try_register_completion_api(
+                page, tos_version, token_box
+            )
+            if completion is None:
+                # API lỗi: KHÔNG tải lại trang — tải lại cũng về
+                # khung đăng nhập và mất luôn màn hình mã/hồ sơ
+                # đang mở, trong khi phân loại bên dưới vẫn chạy
+                # được trên trang hiện tại.
                 _status(
-                    "Đã hoàn tất hồ sơ qua API — mở lại trang để "
-                    "tới bước tiếp theo..."
+                    "API hoàn tất hồ sơ lỗi — giữ nguyên trang hiện "
+                    "tại để kiểm tra màn hình thật."
                 )
-                page.goto(
-                    SIGNUP_URL,
-                    wait_until="domcontentloaded",
-                    timeout=PAGE_TIMEOUT_MS,
-                )
-            elif filled_birth_date is not None:
-                # API lỗi mà form đã điền sẵn — bấm Confirm trên form.
-                _status(
-                    "API hoàn tất hồ sơ lỗi — bấm Confirm trên form "
-                    "hồ sơ đã điền sẵn."
-                )
-                finish_button = page.get_by_role(
-                    "button", name="Confirm", exact=True
-                )
-                _click_when_ready(page, finish_button, "Confirm")
             else:
-                # API lỗi, form cũng không điền được — mở lại trang
-                # để màn hình thật tự nói (phân loại bên dưới).
-                _status(
-                    "API hoàn tất hồ sơ lỗi, form cũng không điền "
-                    "được — mở lại trang để kiểm tra màn hình thật."
-                )
-                page.goto(
-                    SIGNUP_URL,
-                    wait_until="domcontentloaded",
-                    timeout=PAGE_TIMEOUT_MS,
-                )
+                # Hoàn tất xong: đồng bộ phiên web bằng form
+                # bootstrap (đúng cách trang tự làm) để trình duyệt
+                # nhận cookie phiên rồi tới bước tiếp theo (thường
+                # là checkpoint nhập thẻ). Không có token phiên,
+                # hoặc gửi form lỗi, thì mở thẳng redirect_to
+                # server trả về; không có nữa mới mở lại trang chính.
+                frl_token = None
+                session = completion.get("auth_meta_session")
+                if isinstance(session, dict):
+                    frl_token = session.get("frl_access_token")
+                redirect_to = completion.get("redirect_to")
+                if isinstance(frl_token, str) and frl_token:
+                    _status(
+                        "Đã hoàn tất hồ sơ qua API — đang đồng bộ "
+                        "phiên web..."
+                    )
+                    bootstrapped = _bootstrap_session(
+                        page, frl_token, redirect_to
+                    )
+                else:
+                    _status(
+                        "Hoàn tất hồ sơ xong nhưng không có token "
+                        "phiên — mở thẳng trang đích thay thế."
+                    )
+                    bootstrapped = False
+                if not bootstrapped:
+                    path = _resolve_redirect_path(redirect_to)
+                    _status(
+                        "Đã hoàn tất hồ sơ qua API — tới bước tiếp "
+                        f"theo ({path})..."
+                    )
+                    page.goto(
+                        SIGNUP_URL.rstrip("/") + path,
+                        wait_until="domcontentloaded",
+                        timeout=PAGE_TIMEOUT_MS,
+                    )
         if auto:
             _status("Đã gửi hồ sơ, đang chờ màn hình tiếp theo...")
             outcome = _classify_after_profile(page)
