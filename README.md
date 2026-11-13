@@ -407,8 +407,11 @@ show a "Confirm you're human" checkpoint
 (auth.meta.com/checkpoints/...) — the helper clicks Continue and
 solves the CAPTCHA through CapSolver (using the key saved on the
 Meta tab), or waits up to 4 minutes for you to solve it by hand if
-no key is saved; the flow then continues to the card step (or the
-profile form).
+no key is saved. After the CAPTCHA, Meta sometimes asks for a
+selfie photo as well (varies per account) — the helper uploads the
+selfie file saved on the Meta tab, or waits for you to upload it
+by hand if none is saved. The flow then continues to the card
+step (or the profile form).
 A successful login is saved to `accounts.xlsx` — email, mailbox
 secret, session cookie and invite code as usual, plus the mailbox's
 `Link lấy OTP` — and marked in the Meta file's **Muse** column, so

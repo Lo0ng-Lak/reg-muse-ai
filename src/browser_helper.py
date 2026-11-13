@@ -1968,34 +1968,45 @@ def _wait_for_profile_or_card(page, timeout_ms=15000):
 
 
 def _handle_login_checkpoint(page, timeout_seconds=240):
-    """Xử lý màn "Confirm you're human" của Meta khi đăng nhập
-    Muse bằng tài khoản Meta.
+    """Xử lý các màn xác minh của Meta khi đăng nhập Muse bằng
+    tài khoản Meta.
 
     Sau OTP, Meta có thể đưa trình duyệt sang
     auth.meta.com/checkpoints/... bắt xác minh người thật (gặp live
-    2026-11-13 15:40 — đây cũng là lý do lượt đăng nhập Muse nhìn
-    như "chạy sang Meta"). Màn này có hai dạng như ở luồng đăng ký
+    2026-11-13 15:40) — màn này có hai dạng như ở luồng đăng ký
     Meta: (A) chỉ có nút Continue — bấm thì hiện CAPTCHA; (B)
-    CAPTCHA đã hiện — giải xong mới bấm được Continue. Qua rồi thì
-    về bước nhập thẻ (hoặc form hồ sơ). CAPTCHA giải qua CapSolver
-    (key đã lưu ở tab Meta); chưa có key thì chờ người dùng giải
-    tay trong trình duyệt. Trả True khi màn kiểm tra đã qua (hoặc
-    ngay từ đầu không có), False khi hết giờ / hết cách mà vẫn
-    còn. Lỗi giải CAPTCHA thì ném RuntimeError như luồng Meta.
+    CAPTCHA đã hiện — giải xong mới bấm được Continue. Qua CAPTCHA
+    rồi Meta có thể bắt up ảnh selfie tiếp (hên xui từng tài
+    khoản, gặp live 2026-11-13 15:51) — up file selfie đã lưu ở
+    tab Meta rồi bấm Continue. Qua hết thì về bước nhập thẻ (hoặc
+    form hồ sơ). CAPTCHA giải qua CapSolver (key đã lưu ở tab
+    Meta); chưa có key / chưa có file selfie thì chờ người dùng
+    làm tay trong trình duyệt. Trả True khi đã qua hết các màn
+    xác minh (hoặc ngay từ đầu không có màn nào), False khi hết
+    giờ / hết cách mà vẫn còn. Lỗi giải CAPTCHA thì ném
+    RuntimeError như luồng Meta.
     """
-    if not _meta_checkpoint_visible(page):
+    checkpoint = _meta_checkpoint_visible(page)
+    selfie = _meta_selfie_page_visible(page)
+    if not checkpoint and not selfie:
         return True
-    _status(
-        "Meta bắt xác minh người thật sau OTP "
-        "('Confirm you're human') — đang xử lý..."
-    )
+    if checkpoint:
+        _status(
+            "Meta bắt xác minh người thật sau OTP "
+            "('Confirm you're human') — đang xử lý..."
+        )
+    else:
+        _status("Meta bắt up ảnh selfie sau OTP — đang xử lý...")
     api_key = _capsolver_key()
-    if not api_key:
+    if checkpoint and not api_key:
         _status(
             "Chưa lưu CapSolver API key — giải CAPTCHA tay trong "
             "cửa sổ Chromium; tool chờ tối đa "
             f"{timeout_seconds // 60} phút."
         )
+    selfie_path = _load_selfie_path()
+    selfie_uploaded = False
+    selfie_manual_warned = False
     deadline = time.monotonic() + timeout_seconds
     captcha_solved = set()
     checkpoint_clicks = 0
@@ -2003,9 +2014,46 @@ def _handle_login_checkpoint(page, timeout_seconds=240):
     while time.monotonic() < deadline:
         if page.is_closed():
             return False
-        if not _meta_checkpoint_visible(page):
-            _status("Đã qua trang kiểm tra của Meta.")
+        checkpoint = _meta_checkpoint_visible(page)
+        selfie = _meta_selfie_page_visible(page)
+        if not checkpoint and not selfie:
+            _status("Đã qua các bước xác minh của Meta.")
             return True
+        if not checkpoint:
+            # Checkpoint đã qua (hoặc không có), chỉ còn trang
+            # selfie — up ảnh rồi bấm nút xác nhận.
+            if not selfie_uploaded and selfie_path is not None:
+                ok, reason = _meta_upload_selfie(page, selfie_path)
+                if ok:
+                    selfie_uploaded = True
+                    _status("Đã up ảnh selfie cho bước xác minh.")
+                else:
+                    _status(
+                        "Up ảnh selfie chưa được "
+                        f"({reason}) — thử lại ở lần sau, hoặc up "
+                        "tay trong trình duyệt."
+                    )
+                page.wait_for_timeout(2000)
+                continue
+            if selfie_path is None and not selfie_manual_warned:
+                _status(
+                    "Meta bắt up ảnh selfie mà chưa có file selfie "
+                    "đã lưu (ô Ảnh selfie ở tab Meta) — up tay "
+                    "trong cửa sổ Chromium."
+                )
+                selfie_manual_warned = True
+            # Bấm nút xác nhận — nút chỉ hiện sau khi ảnh tải lên
+            # (hoặc sau khi người dùng up tay), nên thử lại ở các
+            # lần lặp sau.
+            clicked = _meta_click_button(
+                page, ("Continue", "Confirm", "Submit")
+            )
+            if clicked:
+                _status(f"Đã bấm {clicked} sau khi up selfie.")
+                page.wait_for_timeout(2000)
+            else:
+                page.wait_for_timeout(3000)
+            continue
         detected = capsolver.detect_captcha(page)
         if detected is not None and detected["kind"] not in captcha_solved:
             if not api_key:
@@ -2079,8 +2127,9 @@ def _handle_login_checkpoint(page, timeout_seconds=240):
             if after is not None:
                 _status("Đã bấm Continue — CAPTCHA đã hiện, chuẩn bị giải.")
             elif not _meta_checkpoint_visible(page):
+                # Qua checkpoint — vòng lặp sẽ kiểm tra tiếp trang
+                # selfie (nếu có) rồi mới kết luận.
                 _status("Đã bấm Continue — đã qua trang kiểm tra.")
-                return True
             else:
                 _status(
                     "Đã bấm Continue nhưng trang chưa chuyển — "
@@ -2089,7 +2138,7 @@ def _handle_login_checkpoint(page, timeout_seconds=240):
             continue
         page.wait_for_timeout(3000)
     _status(
-        "Hết giờ chờ ở trang kiểm tra của Meta "
+        "Hết giờ chờ ở các bước xác minh của Meta "
         f"({timeout_seconds // 60} phút) mà chưa qua được."
     )
     return False
@@ -3557,9 +3606,11 @@ def main():
                 # bước nhập thẻ (không cần điền hồ sơ), form hồ sơ
                 # (chưa hoàn tất), hoặc màn kiểm tra "Confirm you're
                 # human" của Meta (auth.meta.com/checkpoints/... —
-                # gặp live 2026-11-13 15:40). Màn kiểm tra thì xử lý
-                # trước (bấm Continue + giải CAPTCHA qua CapSolver),
-                # rồi mới xem lại màn nào hiện.
+                # gặp live 2026-11-13 15:40), sau CAPTCHA có thể
+                # bắt up selfie tiếp (hên xui từng tài khoản, gặp
+                # live 2026-11-13 15:51). Xử lý các màn xác minh
+                # trước (bấm Continue + giải CAPTCHA qua CapSolver
+                # + up selfie), rồi mới xem lại màn nào hiện.
                 where = _wait_for_profile_or_card(page)
                 if where is None:
                     _handle_login_checkpoint(page)
