@@ -613,7 +613,7 @@ class Coordinator:
                         ).unlink()
                     except OSError:
                         pass
-                helper_ok, burned, waitlisted, cookie, own_invite = self._run_helper(
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite = self._run_helper(
                     helper,
                     address,
                     display,
@@ -746,7 +746,16 @@ class Coordinator:
                             "đổi sang proxy kế từ tài khoản sau.",
                         )
                     )
-                if burned or waitlisted:
+                if load_failed and not settings.direct:
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1} mở meta.ai lỗi "
+                            "tải trang 2 lần liên tiếp — đổi sang proxy kế "
+                            "từ tài khoản sau.",
+                        )
+                    )
+                if burned or waitlisted or load_failed:
                     if settings.direct:
                         # IP máy là IP duy nhất của cả lượt chạy:
                         # không có proxy khác để đổi, chạy tiếp
@@ -757,6 +766,8 @@ class Coordinator:
                             if burned
                             else "rơi vào 'Join the waitlist' "
                             "(khu vực không hỗ trợ)"
+                            if waitlisted
+                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
                         )
                         self.events.put(
                             (
@@ -771,14 +782,18 @@ class Coordinator:
                     else:
                         # Proxy này hỏng ở cấp IP: Meta chặn tạo tài
                         # khoản, hoặc IP thoát rơi vào khu vực chưa
-                        # hỗ trợ (waitlist). Đưa vào kho proxy lỗi để
-                        # loại khỏi mọi đợt chạy sau, và loại ngay
-                        # trong đợt này (kể cả khi xoay vòng quay lại).
+                        # hỗ trợ (waitlist), hoặc không tải nổi
+                        # meta.ai 2 lần liên tiếp. Đưa vào kho proxy
+                        # lỗi để loại khỏi mọi đợt chạy sau, và loại
+                        # ngay trong đợt này (kể cả khi xoay vòng
+                        # quay lại).
                         reason = (
                             "bị Meta chặn tạo tài khoản"
                             if burned
                             else "bị 'Join the waitlist' (khu vực "
                             "không hỗ trợ)"
+                            if waitlisted
+                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
                         )
                         if self._mark_proxy_bad(line):
                             self.events.put(
@@ -1019,7 +1034,7 @@ class Coordinator:
                         self.events.put(
                             ("log", f"[{display}/{label_total}] {error}")
                         )
-                helper_ok, burned, waitlisted, cookie, own_invite = (
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite = (
                     self._run_helper(
                         helper, address, display, label_total,
                         muse_login=True,
@@ -1119,13 +1134,24 @@ class Coordinator:
                             "đổi sang proxy kế từ tài khoản sau.",
                         )
                     )
-                if burned or waitlisted:
+                if load_failed and not settings.direct:
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1} mở meta.ai lỗi "
+                            "tải trang 2 lần liên tiếp — đổi sang proxy kế "
+                            "từ tài khoản sau.",
+                        )
+                    )
+                if burned or waitlisted or load_failed:
                     if settings.direct:
                         reason = (
                             "bị Meta chặn đăng nhập"
                             if burned
                             else "rơi vào 'Join the waitlist' "
                             "(khu vực không hỗ trợ)"
+                            if waitlisted
+                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
                         )
                         self.events.put(
                             (
@@ -1143,6 +1169,8 @@ class Coordinator:
                             if burned
                             else "bị 'Join the waitlist' (khu vực "
                             "không hỗ trợ)"
+                            if waitlisted
+                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
                         )
                         if self._mark_proxy_bad(line):
                             self.events.put(
@@ -1191,11 +1219,17 @@ class Coordinator:
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False, False, "", ""
+            return False, False, False, False, "", ""
         self.helper_process = process
         with self._process_lock:
             self.helper_processes.add(process)
-        signals = {"burn": False, "waitlist": False, "cookie": "", "invite": ""}
+        signals = {
+            "burn": False,
+            "waitlist": False,
+            "load_fail": False,
+            "cookie": "",
+            "invite": "",
+        }
 
         def forward_output():
             for line in process.stdout:
@@ -1205,6 +1239,8 @@ class Coordinator:
                         signals["burn"] = True
                     if proxy_pool._line_flags_waitlist(line):
                         signals["waitlist"] = True
+                    if proxy_pool._line_flags_load_fail(line):
+                        signals["load_fail"] = True
                     cookie = _session_cookie_from_line(line)
                     if cookie is not None:
                         # Cookie phiên chỉ đi vào sheet, không vào log.
@@ -1245,4 +1281,4 @@ class Coordinator:
             self.helper_processes.discard(process)
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"], signals["waitlist"], signals["cookie"], signals["invite"]
+        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"]

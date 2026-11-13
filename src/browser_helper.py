@@ -3373,6 +3373,87 @@ def _meta_click_birthday_continue(page, birth_date, meta_password):
         )
 
 
+def _is_page_load_error(error):
+    """Lỗi tải trang ở bước page.goto mở meta.ai — cùng lớp với
+    net::ERR_HTTP_RESPONSE_CODE_FAILURE trong log của chủ tool
+    (2026-11-13 16:55).
+
+    Playwright báo lỗi goto dạng "Page.goto: net::ERR_... at
+    <url>" hoặc "Page.goto: Timeout ... exceeded.". Chỉ nhận
+    đúng lớp lỗi điều hướng này, không nhận lỗi khác (trang đã
+    đóng, lỗi ứng dụng...) — các lỗi khác vẫn thử lại đủ 5 lần
+    như cũ.
+    """
+    first = _short_error(error)
+    if "Page.goto:" not in first:
+        return False
+    return "net::ERR_" in first or "Timeout" in first or "timeout" in first
+
+
+def _open_meta_ai(page):
+    """Mở meta.ai, thử lại tối đa 5 lần như cũ.
+
+    Quy tắc mới (2026-11-13, theo yêu cầu của chủ tool): lỗi
+    tải trang ở bước page.goto (cùng lớp với
+    net::ERR_HTTP_RESPONSE_CODE_FAILURE) mà gặp 2 lần liên tiếp
+    thì dừng thử lại ngay và báo PROXY_LOAD_FAIL — lượt chạy đổi
+    proxy và đưa proxy này vào kho proxy lỗi. Một lần lỗi đơn lẻ
+    không đánh dấu proxy hỏng. Các lỗi khác vẫn thử lại đủ 5 lần
+    như cũ.
+    """
+    goto_error = None
+    load_fail_streak = 0
+    for attempt in range(_META_RELOADS_BEFORE_SELFIE + 1):
+        try:
+            page.goto(
+                META_URL,
+                wait_until="domcontentloaded",
+                timeout=PAGE_TIMEOUT_MS,
+            )
+            return
+        except Exception as error:
+            # Mở trang lần đầu lỗi (proxy sập tunnel, timeout...)
+            # thì thử lại tối đa 5 lần (chủ trương 2026-11-13
+            # 16:17) thay vì bỏ tài khoản ngay.
+            goto_error = error
+            if _is_page_load_error(error):
+                load_fail_streak += 1
+                if load_fail_streak >= 2:
+                    # Proxy này không tải nổi meta.ai: báo tín
+                    # hiệu để lượt chạy đổi proxy + đưa vào kho
+                    # lỗi, thay vì đốt thêm 3 lần thử vô ích.
+                    # (Không in dòng proxy vào đây: dòng proxy
+                    # chứa user/password; lượt chạy đã biết proxy
+                    # đang dùng và tự ghi vào kho lỗi.)
+                    _status(
+                        "PROXY_LOAD_FAIL: mở meta.ai lỗi tải trang "
+                        "2 lần liên tiếp "
+                        f"({_short_error(error)}) — đổi proxy và "
+                        "đưa proxy này vào kho proxy lỗi."
+                    )
+                    raise RuntimeError(
+                        "Không mở được meta.ai sau 2 lần thử liên "
+                        "tiếp (lỗi tải trang: "
+                        f"{_short_error(goto_error)}) — proxy này "
+                        "sẽ bị đổi và đưa vào kho proxy lỗi."
+                    )
+            else:
+                load_fail_streak = 0
+            if attempt >= _META_RELOADS_BEFORE_SELFIE:
+                break
+            _status(
+                "Meta: mở meta.ai lỗi "
+                f"({_short_error(error)}) — thử lại lần "
+                f"{attempt + 1}/{_META_RELOADS_BEFORE_SELFIE}..."
+            )
+            page.wait_for_timeout(2000)
+    raise RuntimeError(
+        "Không mở được meta.ai sau "
+        f"{_META_RELOADS_BEFORE_SELFIE} lần thử lại "
+        f"({_short_error(goto_error)})."
+    )
+
+
 def _run_meta_registration(page, email, mailbox, existing_ids):
     """Đăng ký một tài khoản Meta ở meta.ai (chế độ --meta).
 
@@ -3400,35 +3481,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
             "chọn lại ở app chính rồi chạy lại."
         )
     _status("Meta: đang mở meta.ai...")
-    goto_error = None
-    for attempt in range(_META_RELOADS_BEFORE_SELFIE + 1):
-        try:
-            page.goto(
-                META_URL,
-                wait_until="domcontentloaded",
-                timeout=PAGE_TIMEOUT_MS,
-            )
-            goto_error = None
-            break
-        except Exception as error:
-            # Mở trang lần đầu lỗi (proxy sập tunnel, timeout...)
-            # thì thử lại tối đa 5 lần (chủ trương 2026-11-13
-            # 16:17) thay vì bỏ tài khoản ngay.
-            goto_error = error
-            if attempt >= _META_RELOADS_BEFORE_SELFIE:
-                break
-            _status(
-                "Meta: mở meta.ai lỗi "
-                f"({_short_error(error)}) — thử lại lần "
-                f"{attempt + 1}/{_META_RELOADS_BEFORE_SELFIE}..."
-            )
-            page.wait_for_timeout(2000)
-    if goto_error is not None:
-        raise RuntimeError(
-            "Không mở được meta.ai sau "
-            f"{_META_RELOADS_BEFORE_SELFIE} lần thử lại "
-            f"({_short_error(goto_error)})."
-        )
+    _open_meta_ai(page)
     # Không chờ 6 giây kiểm tra lỗi ứng dụng trước khi bấm nữa
     # (tốn cố định 6 giây mỗi tài khoản): _meta_click_login đã
     # kiểm tra lỗi ở đầu mỗi vòng bấm và tự tải lại khi gặp.

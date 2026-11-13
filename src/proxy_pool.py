@@ -32,6 +32,11 @@ def _line_flags_waitlist(line):
     """Dòng tín hiệu từ browser_helper: IP thoát bị Join the waitlist."""
     return line.startswith("WAITLIST:")
 
+def _line_flags_load_fail(line):
+    """Dòng tín hiệu từ browser_helper: mở meta.ai lỗi tải trang
+    2 lần liên tiếp trên cùng một proxy."""
+    return line.startswith("PROXY_LOAD_FAIL")
+
 def _proxy_key(value):
     """Khoá định danh một proxy = nguyên dòng proxy (gồm cả
     user/password), chuẩn hoá khoảng trắng và chữ hoa/thường.
