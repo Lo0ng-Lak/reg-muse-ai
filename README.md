@@ -51,48 +51,34 @@ the app then, with no further clicks:
    (There is no Muse.ai password either — signup is email plus a
    one-time code.)
 2. Opens a dedicated Chromium window **through the proxy** (or
-   direct, in VPN mode). The email form is still filled exactly
-   as before — email into the visible "Mobile number or email"
-   field — but the **submissions** go through Muse.ai's own
-   native auth API, called from inside the browser (fetch on the
-   same origin, so the requests carry the page's session —
-   calling the API from outside the browser is rejected with
-   403): send-otp for the email, then the code from step 3, then
-   register-completion with a random birthday (age always over
-   18). When the confirm-otp response says the flow requires a
-   name (`requires_name`), the completion also sends first_name
-   "Long" and last_name "long", exactly as the page does — leaving
-   the names out in that case makes the server answer 400
-   `invalidRequest`. The profile form is NOT filled on the API path: it only
-   appears inside the page's own button-click flow, and reloading
-   the page to reach it loses the in-memory flow state (there is
-   no session yet) and drops back to the login frame. Every API
-   call carries an `X-Hatch-CSRF-Token` header, obtained first
-   from `POST /api/auth/native/restart` (which returns the token
-   as `csrf_token` — the same way the page's own auth code gets
-   it); a `csrfFailed` 403 refreshes the token once and retries.
-   After register-completion succeeds, the helper synchronizes
-   the web session the same way the page does — a hidden form
-   POST to `/hatch/session/bootstrap/` carrying the
-   `frl_access_token` from the completion response — so the
-   browser gets its session cookies before moving to the card
-   step; without a session token it opens the `redirect_to` URL
-   from the response instead. The code
-   form is the one exception: it auto-submits the moment the code
-   is fully entered, so filling it IS submitting it — the code
-   step therefore calls the confirm-otp API with the form left
-   empty, and only fills the form if the API call fails. If any
-   API step fails, returns an unexpected shape, or asks for an
-   extra human check, the helper falls back to clicking the
-   buttons on the already-filled forms.
+   direct, in VPN mode), fills the email form and clicks
+   **Continue**, waits for the code, fills the code form (it
+   auto-submits the moment the code is fully entered, so filling
+   it IS submitting it), then fills the profile form and clicks
+   **Confirm** — the same button clicks as the manual flow.
+   (The helper also has a native-auth API path — send-otp /
+   confirm-otp / register-completion, called from inside the
+   browser with an `X-Hatch-CSRF-Token` obtained from `POST
+   /api/auth/native/restart`, plus a session bootstrap via a
+   hidden form POST to `/hatch/session/bootstrap/` — but it is
+   currently OFF: `USE_NATIVE_AUTH_API = False` in
+   `src/browser_helper.py` (set 2026-11-13, because the API
+   path's bootstrap navigates the browser through Meta callback
+   URLs). Set it to True to re-enable it. Note the trade-off:
+   the API path accepts temp-mail OTP codes, while the
+   button-click flow does not — Meta rejects temp mail at the
+   code-confirm step in the UI flow, which is why the API path
+   was built in the first place. Logging in with an already
+   registered Meta account works fine with button clicks, the
+   same as doing it by hand.)
 3. Polls the chosen temp-mail provider for the code (up to three minutes), which the
-   API step (or the code form, in fallback mode) then confirms.
+   code form then confirms.
 4. On the final profile form, fills the first and last name as "Long" and
    "long" when the form asks for them (some regions, such as US IPs, only
    ask for the birthday — the name step is then skipped), and picks a
    random birthday with an age always over 18, then clicks **Confirm**.
-   (This step only runs in fallback mode — the API path completes the
-   profile with register-completion instead.)
+   (On the API path, when enabled, the profile is completed with
+   register-completion instead and this form never appears.)
 5. Watches the screen after the profile form. A "Join the waitlist" screen
    means Muse is unavailable in the proxy exit's region and the attempt
    fails. On the card-entry screen ("Confirm your age"), if you have saved

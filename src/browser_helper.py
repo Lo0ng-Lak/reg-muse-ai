@@ -49,6 +49,18 @@ META_POST_OTP_TIMEOUT_SECONDS = 420
 # từ ngoài bằng curl bị 403 Forbidden ngay từ send-otp (đã thử
 # 2026-11-12).
 NATIVE_AUTH_BASE = "https://muse.ai/api/auth/native"
+# Đường đăng nhập/đăng ký Muse có dùng API auth native không.
+# False (mặc định từ 2026-11-13, theo lệnh sư huynh): bấm nút DOM
+# như mọi khi — điền form rồi bấm Continue / điền mã / điền hồ sơ
+# / bấm Confirm. Lý do tắt: đường API đồng bộ phiên bằng form
+# bootstrap nên trình duyệt đi qua các URL callback của Meta, nhìn
+# như lượt chạy Muse chạy sang Meta. True: bật lại đường API
+# (send-otp / confirm-otp / register-completion từ trong trình
+# duyệt). Lưu ý: đường API chấp nhận mã OTP của temp mail, còn
+# luồng bấm nút thì Meta chặn temp mail ở bước xác nhận mã — đó là
+# lý do đường API ra đời (2026-11-12). Đăng nhập bằng tài khoản
+# Meta đã đăng ký thì bấm nút vẫn chạy tốt như sư huynh đi tay.
+USE_NATIVE_AUTH_API = False
 # Hậu tố file riêng của luồng song song: "" = luồng duy
 # nhất/luồng 1 (proxy.txt, redeem.txt như cũ); "-2".."-5"
 # khi app chính chạy nhiều luồng (proxy-2.txt, ...).
@@ -3304,6 +3316,7 @@ def main():
             else:
                 page.wait_for_event("close")
             return
+        # Đường API (TẮT mặc định — xem USE_NATIVE_AUTH_API):
         # API thay nút bấm, form vẫn điền như cũ: điền form email
         # trước rồi gửi OTP qua API; xác nhận mã qua API; rồi gửi
         # hoàn tất hồ sơ qua API LUÔN với ngày sinh ngẫu nhiên —
@@ -3324,15 +3337,21 @@ def main():
         # một UUID khi bắt đầu lượt đăng ký (beginHatchAuthAttempt)
         # và gửi kèm trên /restart lẫn mọi lệnh auth sau đó.
         waterfall_id = str(uuid.uuid4())
-        token_box = {
-            "token": _fetch_csrf_token(page, waterfall_id),
-            "waterfall_id": waterfall_id,
-        }
-        if token_box["token"] is None:
-            _status("Không lấy được CSRF token — dùng nút bấm.")
+        if not USE_NATIVE_AUTH_API:
+            # Đường bấm nút: không gọi API auth, không lấy CSRF
+            # token — bấm Continue ở nhánh bên dưới như cũ.
+            token_box = {"token": None, "waterfall_id": waterfall_id}
             use_api = False
         else:
-            use_api = _try_send_otp_api(page, email, token_box)
+            token_box = {
+                "token": _fetch_csrf_token(page, waterfall_id),
+                "waterfall_id": waterfall_id,
+            }
+            if token_box["token"] is None:
+                _status("Không lấy được CSRF token — dùng nút bấm.")
+                use_api = False
+            else:
+                use_api = _try_send_otp_api(page, email, token_box)
         tos_version = None
         requires_name = False
         login_complete = None
