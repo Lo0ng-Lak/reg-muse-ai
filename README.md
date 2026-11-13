@@ -402,7 +402,13 @@ accounts you already registered: pick the Meta Excel file with
 and the run reads each row's Email Meta / Mật khẩu hộp thư /
 Nhà cung cấp columns — **no new mailbox is created**. Each account
 logs in with an email OTP, then submits the saved card at the card
-step, exactly like a signup from there on.
+step, exactly like a signup from there on. After the OTP, Meta may
+show a "Confirm you're human" checkpoint
+(auth.meta.com/checkpoints/...) — the helper clicks Continue and
+solves the CAPTCHA through CapSolver (using the key saved on the
+Meta tab), or waits up to 4 minutes for you to solve it by hand if
+no key is saved; the flow then continues to the card step (or the
+profile form).
 A successful login is saved to `accounts.xlsx` — email, mailbox
 secret, session cookie and invite code as usual, plus the mailbox's
 `Link lấy OTP` — and marked in the Meta file's **Muse** column, so

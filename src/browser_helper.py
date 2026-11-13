@@ -1967,6 +1967,134 @@ def _wait_for_profile_or_card(page, timeout_ms=15000):
     return None
 
 
+def _handle_login_checkpoint(page, timeout_seconds=240):
+    """Xử lý màn "Confirm you're human" của Meta khi đăng nhập
+    Muse bằng tài khoản Meta.
+
+    Sau OTP, Meta có thể đưa trình duyệt sang
+    auth.meta.com/checkpoints/... bắt xác minh người thật (gặp live
+    2026-11-13 15:40 — đây cũng là lý do lượt đăng nhập Muse nhìn
+    như "chạy sang Meta"). Màn này có hai dạng như ở luồng đăng ký
+    Meta: (A) chỉ có nút Continue — bấm thì hiện CAPTCHA; (B)
+    CAPTCHA đã hiện — giải xong mới bấm được Continue. Qua rồi thì
+    về bước nhập thẻ (hoặc form hồ sơ). CAPTCHA giải qua CapSolver
+    (key đã lưu ở tab Meta); chưa có key thì chờ người dùng giải
+    tay trong trình duyệt. Trả True khi màn kiểm tra đã qua (hoặc
+    ngay từ đầu không có), False khi hết giờ / hết cách mà vẫn
+    còn. Lỗi giải CAPTCHA thì ném RuntimeError như luồng Meta.
+    """
+    if not _meta_checkpoint_visible(page):
+        return True
+    _status(
+        "Meta bắt xác minh người thật sau OTP "
+        "('Confirm you're human') — đang xử lý..."
+    )
+    api_key = _capsolver_key()
+    if not api_key:
+        _status(
+            "Chưa lưu CapSolver API key — giải CAPTCHA tay trong "
+            "cửa sổ Chromium; tool chờ tối đa "
+            f"{timeout_seconds // 60} phút."
+        )
+    deadline = time.monotonic() + timeout_seconds
+    captcha_solved = set()
+    checkpoint_clicks = 0
+    captcha_stuck = 0
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        if not _meta_checkpoint_visible(page):
+            _status("Đã qua trang kiểm tra của Meta.")
+            return True
+        detected = capsolver.detect_captcha(page)
+        if detected is not None and detected["kind"] not in captcha_solved:
+            if not api_key:
+                # Không có key: chờ người dùng giải tay — CAPTCHA
+                # đã hiện, chỉ cần đợi nó biến mất / trang chuyển.
+                page.wait_for_timeout(3000)
+                continue
+            _status(
+                f"Phát hiện CAPTCHA ({detected['kind']}) — đang gửi "
+                "CapSolver giải, chờ tối đa "
+                f"{capsolver.SOLVE_TIMEOUT_SECONDS} giây..."
+            )
+            try:
+                kind = capsolver.solve_detected(
+                    page, api_key, detected,
+                    on_progress=lambda s: _status(
+                        "Vẫn đang chờ CapSolver giải CAPTCHA "
+                        f"({s}s)..."
+                    ),
+                )
+            except (capsolver.CapSolverError, TimeoutError) as error:
+                raise RuntimeError(
+                    "Giải CAPTCHA qua CapSolver lỗi: "
+                    f"{_short_error(error)}"
+                )
+            captcha_solved.add(detected["kind"])
+            captcha_stuck = 0
+            _status(f"Đã giải CAPTCHA ({kind}) qua CapSolver.")
+            page.wait_for_timeout(1500)
+            clicked = _meta_click_button(
+                page, ("Continue", "Verify", "Submit", "Confirm")
+            )
+            if clicked:
+                _status(f"Đã bấm {clicked} sau CAPTCHA.")
+            page.wait_for_timeout(2000)
+            continue
+        if detected is not None:
+            # CAPTCHA đã giải rồi mà trang vẫn đứng yên (nút
+            # Continue chưa bật sau khi token vào): thử bấm lại,
+            # KHÔNG giải lại.
+            clicked = _meta_click_button(
+                page, ("Continue", "Verify", "Submit", "Confirm")
+            )
+            if clicked:
+                captcha_stuck = 0
+                page.wait_for_timeout(2000)
+                continue
+            captcha_stuck += 1
+            if captcha_stuck >= 6:
+                _status(
+                    "Đã giải CAPTCHA nhưng trang không chuyển tiếp "
+                    "(nút Continue vẫn chưa bật) — hết cách xử lý."
+                )
+                return False
+            page.wait_for_timeout(3000)
+            continue
+        # Không có CAPTCHA mà vẫn ở checkpoint: bấm Continue để
+        # hiện CAPTCHA (màn A). Quá 3 lần không chuyển thì dừng.
+        if checkpoint_clicks >= 3:
+            _status(
+                "Đã bấm Continue 3 lần ở trang kiểm tra nhưng trang "
+                "không chuyển tiếp và không hiện CAPTCHA."
+            )
+            return False
+        _status("Bấm Continue ở trang kiểm tra...")
+        clicked = _meta_click_button(page, ("Continue",))
+        if clicked:
+            checkpoint_clicks += 1
+            page.wait_for_timeout(2000)
+            after = capsolver.detect_captcha(page)
+            if after is not None:
+                _status("Đã bấm Continue — CAPTCHA đã hiện, chuẩn bị giải.")
+            elif not _meta_checkpoint_visible(page):
+                _status("Đã bấm Continue — đã qua trang kiểm tra.")
+                return True
+            else:
+                _status(
+                    "Đã bấm Continue nhưng trang chưa chuyển — "
+                    "CAPTCHA chưa được giải nên Meta chưa cho qua."
+                )
+            continue
+        page.wait_for_timeout(3000)
+    _status(
+        "Hết giờ chờ ở trang kiểm tra của Meta "
+        f"({timeout_seconds // 60} phút) mà chưa qua được."
+    )
+    return False
+
+
 def _try_fill_profile_form(page, timeout_ms=20000):
     """Cố điền form hồ sơ sau khi OTP đã xác nhận qua API: mở lại
     trang để app hiện form, điền ngày sinh (+ tên nếu hỏi). Trả
@@ -3426,9 +3554,16 @@ def main():
             # chờ tiếp.
             if muse_login:
                 # Tài khoản Meta đã đăng ký: sau OTP có thể ra thẳng
-                # bước nhập thẻ (không cần điền hồ sơ) hoặc vẫn ra
-                # form hồ sơ (chưa hoàn tất) — chờ xem màn nào hiện.
+                # bước nhập thẻ (không cần điền hồ sơ), form hồ sơ
+                # (chưa hoàn tất), hoặc màn kiểm tra "Confirm you're
+                # human" của Meta (auth.meta.com/checkpoints/... —
+                # gặp live 2026-11-13 15:40). Màn kiểm tra thì xử lý
+                # trước (bấm Continue + giải CAPTCHA qua CapSolver),
+                # rồi mới xem lại màn nào hiện.
                 where = _wait_for_profile_or_card(page)
+                if where is None:
+                    _handle_login_checkpoint(page)
+                    where = _wait_for_profile_or_card(page)
                 if where == "profile":
                     _status("Mã đã xác nhận, đang điền hồ sơ...")
                     _fill_profile(page)
@@ -3519,6 +3654,11 @@ def main():
                     page, completion, completion_label
                 )
         if auto:
+            if muse_login:
+                # Checkpoint có thể hiện muộn (sau khi bấm Confirm
+                # ở form hồ sơ) — xử lý nốt trước khi phân loại.
+                # Không có checkpoint thì hàm này trả về ngay.
+                _handle_login_checkpoint(page)
             _status(
                 "Đã đăng nhập, đang chờ màn hình tiếp theo..."
                 if muse_login
