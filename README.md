@@ -307,5 +307,54 @@ card. Leave the ZIP empty to use 10001.
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
 The Excel sheet contains mailbox passwords and live session cookies in
 readable form, so protect the file and do not share or sync it to an
-untrusted location. The app does not bypass CAPTCHA or other
-site controls.
+untrusted location.
+
+### Meta account registration (Đăng kí Meta)
+
+The **Đăng kí Meta** button runs a separate, Meta-only registration: it
+creates Meta accounts at meta.ai (temp mail + OTP), saves each one to
+`meta_accounts.xlsx`, and **stops there — it never goes to Muse**.
+Logging into Muse with a saved Meta account is a separate step. The
+point of the split: a Meta account arriving at Muse goes through
+*login*, not registration, so it skips the register-completion step
+where temp-mail signups get blocked (`registrationBlocked`).
+
+The flow, as observed by hand (2026-11-13): meta.ai → **Log in** →
+**Use mobile number or email** → enter the temp-mail address →
+birthday (over 18, random) + a random password → keep the
+auto-generated username, **Confirm** → enter the OTP code from the
+mailbox → CAPTCHA + selfie upload → account created. After the OTP
+step there are two variants: the page may return to the meta.ai home
+screen (click **Log in** again to reach the CAPTCHA) or go straight
+to the CAPTCHA — the tool handles both.
+
+There are **no manual steps** in the Meta flow. That needs two things
+set up first, in the **Đăng kí tài khoản Meta** frame:
+
+- **CapSolver API key** — CAPTCHAs are solved automatically through
+  [CapSolver](https://www.capsolver.com/) (reCAPTCHA v2, hCaptcha,
+  Cloudflare Turnstile, FunCaptcha; ProxyLess tasks, so your proxies
+  are not shared with the service). Create an account there, add
+  balance, paste the key and press **Lưu key** — it is stored in
+  Windows Credential Manager, never in a file or in the log.
+  **Số dư** checks the remaining balance. CapSolver is pay-per-use
+  (roughly $0.5–$2 per 1,000 simple solves; check their current
+  pricing). If a CAPTCHA cannot be solved (bad key, no balance,
+  timeout), that account fails — the run never waits for manual input.
+- **Ảnh selfie** — one selfie image file, uploaded automatically at
+  the selfie step for every account in the run. Pick it with
+  **Chọn ảnh…**; the path is kept in gitignored `selfie.txt`.
+
+The Meta password is generated randomly for each account's form and
+is **not saved anywhere** (Muse login later uses an email OTP code,
+not the password). Saved accounts go to
+`%LOCALAPPDATA%\MuseAIHelper\meta_accounts.xlsx` with columns
+Thời gian tạo, Email Meta, Mật khẩu hộp thư, Username Meta. The Meta
+run reuses the proxy pool / VPN mode, lane count, temp-mail provider
+and account target of the main window; it does not use the saved card
+or invite codes.
+
+Note on CAPTCHAs: the Muse signup flow does not bypass CAPTCHA — a
+challenge there waits for you to solve it in the browser. The Meta
+flow solves its CAPTCHAs through CapSolver, a paid third-party
+solving service, using your own API key and balance.

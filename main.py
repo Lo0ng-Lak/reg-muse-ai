@@ -28,6 +28,21 @@ SPREADSHEET_FILE = (
     Path.home() / "AppData" / "Local" / "MuseAIHelper" / "accounts.xlsx"
 )
 PENDING_SPREADSHEET_FILE = SPREADSHEET_FILE.with_name("accounts.pending.xlsx")
+# Sheet tài khoản Meta (chế độ "Đăng kí Meta"): tài khoản Meta
+# đã tạo ở meta.ai, chờ đăng nhập Muse sau này (bước riêng).
+META_SPREADSHEET_FILE = (
+    Path.home() / "AppData" / "Local" / "MuseAIHelper" / "meta_accounts.xlsx"
+)
+META_PENDING_SPREADSHEET_FILE = META_SPREADSHEET_FILE.with_name(
+    "meta_accounts.pending.xlsx"
+)
+# CapSolver API key (giải CAPTCHA tự động trong luồng Meta):
+# lưu trong Windows Credential Manager, không in ra log.
+CAPSOLVER_SERVICE = "MuseAIHelper:capsolver"
+CAPSOLVER_KEY_FIELD = "api_key"
+# File đường dẫn ảnh selfie (gitignore): một ảnh dùng cho bước
+# up selfie của mọi tài khoản Meta trong lượt chạy.
+SELFIE_PATH_FILE = "selfie.txt"
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
 CARD_SERVICE = "MuseAIHelper:card"
 CARD_FIELDS = ("number", "expiry", "cvv", "zip")
@@ -194,6 +209,143 @@ def _last_invite_from_sheet():
         except Exception:
             continue
     return ""
+
+
+META_SPREADSHEET_HEADERS = [
+    "Thời gian tạo",
+    "Email Meta",
+    "Mật khẩu hộp thư",
+    "Username Meta",
+]
+
+
+def _append_meta_row(email, mail_password="", username=""):
+    """Ghi một tài khoản Meta đã tạo vào meta_accounts.xlsx.
+
+    Cùng nhịp chống khoá file như _append_spreadsheet_row (thử
+    lại 3 lần, vẫn khoá thì giữ vào meta_accounts.pending.xlsx
+    để lần ghi sau gộp lại). Không có cột mật khẩu Meta — mật
+    khẩu đăng ký Meta không được lưu (đăng nhập Muse sau này
+    dùng mã OTP qua mail).
+    """
+    temporary_file = META_SPREADSHEET_FILE.with_name(
+        "meta_accounts.tmp.xlsx"
+    )
+    try:
+        META_SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        base_file = (
+            META_PENDING_SPREADSHEET_FILE
+            if META_PENDING_SPREADSHEET_FILE.exists()
+            else META_SPREADSHEET_FILE
+        )
+        if base_file.exists():
+            workbook = load_workbook(base_file)
+            sheet = workbook.active
+            for column, header in enumerate(META_SPREADSHEET_HEADERS, start=1):
+                cell = sheet.cell(row=1, column=column)
+                if not cell.value:
+                    cell.value = header
+        else:
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Meta"
+            sheet.append(META_SPREADSHEET_HEADERS)
+
+        sheet.append(
+            [
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                email,
+                mail_password,
+                username,
+            ]
+        )
+        written = False
+        last_error = None
+        for _ in range(3):
+            try:
+                workbook.save(temporary_file)
+                temporary_file.replace(META_SPREADSHEET_FILE)
+                written = True
+                break
+            except PermissionError as error:
+                last_error = error
+                time.sleep(1)
+        if written:
+            if META_PENDING_SPREADSHEET_FILE.exists():
+                try:
+                    META_PENDING_SPREADSHEET_FILE.unlink()
+                except OSError:
+                    pass
+        else:
+            pending_tmp = META_SPREADSHEET_FILE.with_name(
+                "meta_accounts.pending.tmp.xlsx"
+            )
+            try:
+                workbook.save(pending_tmp)
+                pending_tmp.replace(META_PENDING_SPREADSHEET_FILE)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "File meta_accounts.xlsx đang bị khóa (thường do đang "
+                "mở trong Excel) nên chưa ghi được. Dòng này KHÔNG "
+                "mất — đã giữ ở meta_accounts.pending.xlsx và sẽ tự "
+                "gộp vào sheet chính ở lần ghi thành công sau; bạn chỉ "
+                "cần đóng file Excel đang mở."
+            ) from last_error
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"Không ghi được file Excel: {error}") from error
+    finally:
+        if temporary_file.exists():
+            temporary_file.unlink()
+
+
+def _load_capsolver_key():
+    """CapSolver API key đã lưu ("" nếu chưa có). Không in ra log."""
+    try:
+        value = keyring.get_password(CAPSOLVER_SERVICE, CAPSOLVER_KEY_FIELD)
+    except Exception:
+        value = None
+    return value or ""
+
+
+def _save_capsolver_key(key):
+    keyring.set_password(CAPSOLVER_SERVICE, CAPSOLVER_KEY_FIELD, key)
+
+
+def _load_selfie_path_text():
+    """Đường dẫn ảnh selfie đã lưu ("" nếu chưa chọn)."""
+    try:
+        return (
+            Path(__file__)
+            .with_name(SELFIE_PATH_FILE)
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def _save_selfie_path_text(path):
+    Path(__file__).with_name(SELFIE_PATH_FILE).write_text(
+        path.strip() + "\n", encoding="utf-8"
+    )
+
+
+def _read_meta_username(suffix=""):
+    """Username Meta helper vừa ghi (đọc xong xoá file để tài khoản
+    sau không đọc nhầm username cũ)."""
+    username_file = Path(__file__).with_name(f"meta_username{suffix}.txt")
+    try:
+        username = username_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    try:
+        username_file.unlink()
+    except OSError:
+        pass
+    return username.splitlines()[0].strip() if username else ""
 
 
 def _load_card_from_keyring():
@@ -509,8 +661,8 @@ class MuseAIHelper(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Muse.ai Account Helper")
-        self.geometry("780x560")
-        self.minsize(640, 440)
+        self.geometry("780x690")
+        self.minsize(640, 560)
         self.events = queue.Queue()
         self.running = False
         self.stop_event = threading.Event()
@@ -540,7 +692,7 @@ class MuseAIHelper(tk.Tk):
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(9, weight=1)
+        root.rowconfigure(10, weight=1)
 
         ttk.Label(
             root,
@@ -768,8 +920,62 @@ class MuseAIHelper(tk.Tk):
         )
         self.check_ip_button.pack(side="left")
 
+        meta_frame = ttk.LabelFrame(
+            root, text="Đăng kí tài khoản Meta (meta.ai)", padding=8
+        )
+        meta_frame.grid(row=9, column=0, sticky="ew", pady=(10, 0))
+        meta_frame.columnconfigure(1, weight=1)
+        ttk.Label(meta_frame, text="CapSolver API key:").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.capsolver_entry = ttk.Entry(meta_frame, width=36, show="•")
+        self.capsolver_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        self.save_capsolver_button = ttk.Button(
+            meta_frame, text="Lưu key", command=self._save_capsolver_key
+        )
+        self.save_capsolver_button.grid(row=0, column=2)
+        self.check_balance_button = ttk.Button(
+            meta_frame,
+            text="Số dư",
+            command=self._check_capsolver_balance,
+        )
+        self.check_balance_button.grid(row=0, column=3, padx=(6, 0))
+        ttk.Label(meta_frame, text="Ảnh selfie:").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        self.selfie_entry = ttk.Entry(meta_frame, width=36)
+        self.selfie_entry.grid(
+            row=1, column=1, sticky="ew", padx=(6, 6), pady=(6, 0)
+        )
+        self.browse_selfie_button = ttk.Button(
+            meta_frame, text="Chọn ảnh…", command=self._browse_selfie
+        )
+        self.browse_selfie_button.grid(row=1, column=2, pady=(6, 0))
+        self.meta_start_button = ttk.Button(
+            meta_frame,
+            text="Đăng kí Meta",
+            command=self._start_meta_registration,
+        )
+        self.meta_start_button.grid(row=1, column=3, padx=(6, 0), pady=(6, 0))
+        ttk.Label(
+            meta_frame,
+            text=(
+                "Đăng kí Meta chạy riêng: tạo tài khoản Meta ở meta.ai rồi lưu "
+                "vào meta_accounts.xlsx, không qua Muse. CAPTCHA giải tự động "
+                "qua CapSolver (trả phí theo lượt), selfie up từ file ảnh này "
+                "cho mọi tài khoản — không có bước làm tay."
+            ),
+            wraplength=720,
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        saved_key = _load_capsolver_key()
+        if saved_key:
+            self.capsolver_entry.insert(0, saved_key)
+        saved_selfie = _load_selfie_path_text()
+        if saved_selfie:
+            self.selfie_entry.insert(0, saved_selfie)
+
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
-        log_frame.grid(row=9, column=0, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=10, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled")
@@ -782,7 +988,7 @@ class MuseAIHelper(tk.Tk):
 
         self.progress = tk.StringVar(value="Sẵn sàng.")
         ttk.Label(root, textvariable=self.progress).grid(
-            row=10, column=0, sticky="ew", pady=(10, 0)
+            row=11, column=0, sticky="ew", pady=(10, 0)
         )
 
     def _on_conn_mode_change(self, _event=None):
@@ -909,6 +1115,82 @@ class MuseAIHelper(tk.Tk):
             "Đã xoá thẻ đã lưu — bước thẻ sẽ chờ bạn nhập tay."
         )
 
+    def _save_capsolver_key(self):
+        """Lưu CapSolver API key vào Windows Credential Manager.
+
+        Key không in ra log, không ghi ra file — helper đọc lại
+        qua keyring khi gặp CAPTCHA trong luồng Meta.
+        """
+        key = self.capsolver_entry.get().strip()
+        if not key:
+            messagebox.showwarning(
+                "Thiếu API key",
+                "Nhập CapSolver API key rồi bấm Lưu key.",
+            )
+            return
+        try:
+            _save_capsolver_key(key)
+        except Exception as error:
+            messagebox.showerror(
+                "Không lưu được key",
+                f"Không ghi được vào Windows Credential Manager: {error}",
+            )
+            return
+        self._append_log(
+            "Đã lưu CapSolver API key vào Windows Credential Manager."
+        )
+
+    def _check_capsolver_balance(self):
+        """Nút Số dư: hỏi số dư CapSolver trên luồng riêng.
+
+        Nút này không bị khoá khi đang chạy (giống nút Kiểm tra
+        IP) — kiểm tra giữa lượt chạy vẫn được.
+        """
+        key = self.capsolver_entry.get().strip() or _load_capsolver_key()
+        if not key:
+            messagebox.showwarning(
+                "Thiếu API key",
+                "Nhập CapSolver API key rồi bấm Lưu key trước.",
+            )
+            return
+
+        def _work():
+            try:
+                import capsolver
+
+                balance = capsolver.get_balance(key)
+            except Exception as error:
+                self.events.put(
+                    ("log", f"Kiểm tra số dư CapSolver lỗi: {error}")
+                )
+                return
+            self.events.put(("log", f"Số dư CapSolver: ${balance:.2f}."))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _browse_selfie(self):
+        """Chọn file ảnh selfie cho bước up selfie của luồng Meta."""
+        # Import lười để không bắt mọi test stub thêm filedialog.
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="Chọn ảnh selfie",
+            filetypes=[
+                ("Ảnh", "*.jpg *.jpeg *.png *.webp *.bmp"),
+                ("Tất cả", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        self.selfie_entry.delete(0, "end")
+        self.selfie_entry.insert(0, path)
+        try:
+            _save_selfie_path_text(path)
+        except OSError as error:
+            messagebox.showerror(
+                "Không lưu được đường dẫn", str(error)
+            )
+
     def _sync_proxy_pool(self):
         """Đồng bộ ô Proxy (nhiều dòng) thành kho proxy cho lượt chạy.
 
@@ -1015,6 +1297,11 @@ class MuseAIHelper(tk.Tk):
             self.card_zip_entry,
             self.save_card_button,
             self.delete_card_button,
+            self.capsolver_entry,
+            self.save_capsolver_button,
+            self.selfie_entry,
+            self.browse_selfie_button,
+            self.meta_start_button,
         ):
             widget.configure(state="disabled" if running else "normal")
         self.stop_button.configure(state="normal" if running else "disabled")
@@ -1209,6 +1496,168 @@ class MuseAIHelper(tk.Tk):
             daemon=True,
         ).start()
 
+    def _start_meta_registration(self):
+        """Nút Đăng kí Meta: chạy riêng lượt đăng ký tài khoản Meta.
+
+        Chỉ đăng ký Meta ở meta.ai rồi lưu vào meta_accounts.xlsx
+        — KHÔNG qua Muse (đăng nhập Muse là bước riêng sau này).
+        Dùng chung kho proxy / chế độ kết nối / số luồng / dịch vụ
+        temp mail / số tài khoản với lượt đăng ký Muse, nhưng
+        không dùng thẻ và không dùng mã mời. Bắt buộc phải có
+        CapSolver API key + file ảnh selfie vì luồng Meta không
+        có bước làm tay nào.
+        """
+        if self.running:
+            return
+        key = _load_capsolver_key()
+        if not key:
+            entered = self.capsolver_entry.get().strip()
+            if entered:
+                try:
+                    _save_capsolver_key(entered)
+                    key = entered
+                except Exception:
+                    key = ""
+            if not key:
+                messagebox.showwarning(
+                    "Thiếu CapSolver API key",
+                    "Đăng kí Meta giải CAPTCHA tự động qua CapSolver "
+                    "— nhập API key rồi bấm Lưu key trước khi chạy.",
+                )
+                return
+        selfie_text = self.selfie_entry.get().strip()
+        if selfie_text:
+            try:
+                _save_selfie_path_text(selfie_text)
+            except OSError:
+                pass
+        if not selfie_text or not Path(selfie_text).is_file():
+            messagebox.showwarning(
+                "Thiếu ảnh selfie",
+                "Chọn file ảnh selfie ở ô Ảnh selfie — bước up "
+                "selfie dùng đúng file này cho mọi tài khoản.",
+            )
+            return
+        try:
+            total = int(self.count_var.get())
+        except (tk.TclError, ValueError):
+            total = 0
+        if total < 0 or total > 100:
+            messagebox.showwarning(
+                "Số tài khoản chưa hợp lệ",
+                "Nhập số tài khoản từ 0 đến 100. "
+                "Để 0 là chạy liên tục tới khi dùng hết lượt của "
+                "toàn bộ proxy trong danh sách thì dừng.",
+            )
+            return
+        try:
+            per_proxy = int(self.per_proxy_var.get())
+        except (tk.TclError, ValueError):
+            per_proxy = 5
+        per_proxy = max(1, min(per_proxy, 100))
+        try:
+            lanes = int(self.lanes_var.get())
+        except (tk.TclError, ValueError):
+            lanes = 1
+        lanes = max(1, min(lanes, 5))
+        conn_label = self.conn_mode_var.get()
+        conn_id = next(
+            (
+                cid
+                for cid, label in CONN_MODES
+                if label == conn_label
+            ),
+            "proxy",
+        )
+        direct = conn_id == "direct"
+        if direct:
+            pool = [DIRECT_PROXY_LINE]
+            per_proxy = 10**9
+        else:
+            try:
+                pool = self._sync_proxy_pool()
+            except RuntimeError as error:
+                messagebox.showerror("Lỗi proxy", str(error))
+                return
+            if not pool:
+                messagebox.showwarning(
+                    "Thiếu proxy",
+                    "Chế độ Proxy chỉ đăng ký qua proxy. "
+                    "Hãy nhập ít nhất một proxy (mỗi dòng một proxy, "
+                    "dạng host:port:user:pass) vào ô Proxy rồi bấm lại, "
+                    "hoặc chọn chế độ IP máy (VPN) ở ô Kết nối.",
+                )
+                return
+            bad_keys = self._sync_bad_proxies()
+            if bad_keys:
+                excluded = sum(
+                    1 for line in pool if _proxy_key(line) in bad_keys
+                )
+                if excluded:
+                    self._append_log(
+                        f"Đã loại {excluded} proxy trong ô Proxy lỗi "
+                        "khỏi kho cho đợt chạy này."
+                    )
+            pool = _prepare_pool(pool, bad_keys)
+            if bad_keys and not pool:
+                messagebox.showwarning(
+                    "Toàn bộ proxy đều nằm trong kho lỗi",
+                    "Mọi proxy trong ô Proxy đều đã bị đánh dấu "
+                    "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
+                    "lại, hoặc dán proxy mới vào ô Proxy.",
+                )
+                return
+        provider_label = self.provider_var.get()
+        provider_id = next(
+            (
+                pid
+                for pid, label in mail_providers.PROVIDERS
+                if label == provider_label
+            ),
+            mail_providers.DEFAULT_PROVIDER,
+        )
+        self.running = True
+        self._lane_progress = {}
+        self.stop_event.clear()
+        self._set_controls_running(True)
+        if total == 0:
+            self._append_log(
+                "--- Bắt đầu lượt ĐĂNG KÍ META: KHÔNG giới hạn số "
+                "tài khoản — chạy tới khi dùng hết lượt của toàn bộ "
+                "proxy trong danh sách (bấm Dừng để ngắt bất cứ lúc "
+                "nào) ---"
+            )
+        else:
+            self._append_log(
+                "--- Bắt đầu lượt ĐĂNG KÍ META: mục tiêu "
+                f"{total} tài khoản ---"
+            )
+        if direct:
+            self._append_log(
+                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
+                "IP của máy này, không qua proxy."
+            )
+        else:
+            self._append_log(
+                f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
+                "khoản."
+            )
+        self._append_log(
+            f"Dịch vụ temp mail cho lượt chạy này: {provider_label}."
+        )
+        self._append_log(
+            "Đăng kí Meta xong là lưu vào meta_accounts.xlsx, không "
+            "qua Muse — đăng nhập Muse là bước riêng sau này."
+        )
+        threading.Thread(
+            target=self._run_loop,
+            args=(
+                total, pool, per_proxy, "", 0, 0, False, lanes,
+                provider_id, False, direct, True,
+            ),
+            daemon=True,
+        ).start()
+
     def _stop_registration(self):
         if not self.running:
             return
@@ -1233,7 +1682,7 @@ class MuseAIHelper(tk.Tk):
         self, total, pool, per_proxy, invite,
         card_limit=0, card_used=0, card_tracked=False, lanes=1,
         provider_id=mail_providers.DEFAULT_PROVIDER,
-        single_invite=False, direct=False,
+        single_invite=False, direct=False, meta=False,
     ):
         # Điều phối các luồng chạy song song. Kho proxy được
         # CHIA theo bước nhảy: luồng k dùng các proxy ở vị trí
@@ -1286,7 +1735,17 @@ class MuseAIHelper(tk.Tk):
         }
         shared_lock = threading.Lock()
         if lanes > 1:
-            if direct:
+            if meta:
+                self.events.put(
+                    (
+                        "log",
+                        f"Chạy {lanes} luồng song song (ĐĂNG KÍ "
+                        "META) — mỗi luồng một phần kho proxy "
+                        "riêng; tài khoản Meta tạo xong là lưu, "
+                        "không qua Muse.",
+                    )
+                )
+            elif direct:
                 self.events.put(
                     (
                         "log",
@@ -1327,7 +1786,7 @@ class MuseAIHelper(tk.Tk):
             lane_args = (
                 lane_no, lanes, share, subset, per_proxy, seed,
                 card_limit, card_tracked, shared, shared_lock,
-                provider_id, single_invite, direct,
+                provider_id, single_invite, direct, meta,
             )
             if lanes == 1:
                 self._run_lane(*lane_args)
@@ -1357,7 +1816,7 @@ class MuseAIHelper(tk.Tk):
         self, lane_no, lanes, share, subset, per_proxy, seed,
         card_limit, card_tracked, shared, shared_lock,
         provider_id=mail_providers.DEFAULT_PROVIDER,
-        single_invite=False, direct=False,
+        single_invite=False, direct=False, meta=False,
     ):
         helper = Path(__file__).with_name("browser_helper.py")
         suffix = "" if lane_no == 1 else f"-{lane_no}"
@@ -1511,16 +1970,26 @@ class MuseAIHelper(tk.Tk):
                         f"[{display}/{label_total}] Đã tạo mail {address} — bắt đầu đăng ký.",
                     )
                 )
-                try:
-                    _write_redeem_code(pending_code, suffix)
-                except OSError:
-                    pass
+                if not meta:
+                    try:
+                        _write_redeem_code(pending_code, suffix)
+                    except OSError:
+                        pass
                 try:
                     _write_mailbox(mailbox, suffix)
                 except OSError:
                     pass
+                if meta:
+                    # Xoá username cũ (nếu có) để tài khoản này
+                    # không đọc nhầm username của tài khoản trước.
+                    try:
+                        Path(__file__).with_name(
+                            f"meta_username{suffix}.txt"
+                        ).unlink()
+                    except OSError:
+                        pass
                 helper_ok, burned, waitlisted, cookie, own_invite = self._run_helper(
-                    helper, address, display, label_total
+                    helper, address, display, label_total, meta
                 )
                 if helper_ok:
                     saved = False
@@ -1534,12 +2003,20 @@ class MuseAIHelper(tk.Tk):
                             # maildrop.cc để trống vì địa chỉ tự
                             # nó là khoá hộp thư.
                             mail_password = mailbox.get("secret") or ""
-                            _append_spreadsheet_row(
-                                address,
-                                mail_password=mail_password,
-                                cookie=cookie,
-                                invite=own_invite,
-                            )
+                            if meta:
+                                username = _read_meta_username(suffix)
+                                _append_meta_row(
+                                    address,
+                                    mail_password=mail_password,
+                                    username=username,
+                                )
+                            else:
+                                _append_spreadsheet_row(
+                                    address,
+                                    mail_password=mail_password,
+                                    cookie=cookie,
+                                    invite=own_invite,
+                                )
                             saved = True
                             shared["success"] += 1
                             if card_tracked:
@@ -1552,13 +2029,22 @@ class MuseAIHelper(tk.Tk):
                             shared["fail"] += 1
                             save_error = error
                     if saved:
-                        self.events.put(
-                            (
-                                "log",
-                                f"[{display}/{label_total}] ✔ Đăng ký thành công {address} "
-                                "— đã lưu vào sheet Excel.",
+                        if meta:
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{display}/{label_total}] ✔ Đăng kí Meta thành công {address} "
+                                    "— đã lưu vào meta_accounts.xlsx.",
+                                )
                             )
-                        )
+                        else:
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{display}/{label_total}] ✔ Đăng ký thành công {address} "
+                                    "— đã lưu vào sheet Excel.",
+                                )
+                            )
                     else:
                         self.events.put(
                             (
@@ -1675,9 +2161,11 @@ class MuseAIHelper(tk.Tk):
                     shared["in_flight"] -= 1
 
 
-    def _run_helper(self, helper, address, index, total):
+    def _run_helper(self, helper, address, index, total, meta=False):
         suffix = getattr(self._lane_local, "suffix", "")
         command = [sys.executable, str(helper), address, "--auto"]
+        if meta:
+            command.append("--meta")
         if suffix:
             command.append(suffix.lstrip("-"))
         try:

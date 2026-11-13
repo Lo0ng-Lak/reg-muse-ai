@@ -1,6 +1,7 @@
 import json
 import re
 import secrets
+import string
 import sys
 import time
 import tkinter as tk
@@ -14,6 +15,7 @@ from tkinter import messagebox
 
 import keyring
 
+import capsolver
 import mail_providers
 
 
@@ -28,6 +30,19 @@ for _stream in (sys.stdout, sys.stderr):
 
 
 SIGNUP_URL = "https://muse.ai/"
+# Đăng ký tài khoản Meta (chế độ --meta): vào meta.ai rồi đăng
+# ký qua auth.meta.com, KHÔNG qua Muse.ai. Luồng này chạy hoàn
+# toàn tự động (CAPTCHA giải qua CapSolver, selfie up từ file)
+# theo thứ tự sư huynh đi tay và ghi lại 2026-11-13.
+META_URL = "https://www.meta.ai/"
+META_AUTH_HOST = "auth.meta.com"
+# CapSolver API key lưu trong Windows Credential Manager (app
+# chính lưu qua ô CapSolver, helper chỉ đọc — không in ra log).
+CAPSOLVER_SERVICE = "MuseAIHelper:capsolver"
+CAPSOLVER_KEY_FIELD = "api_key"
+# Thời gian chờ tối đa cho chặng sau OTP trong luồng Meta
+# (CAPTCHA + selfie + vào tài khoản): 7 phút.
+META_POST_OTP_TIMEOUT_SECONDS = 420
 # API native của muse.ai (phần auth mà trang đăng ký tự gọi).
 # Chỉ gọi được TỪ TRONG trình duyệt (fetch cùng origin) — gọi
 # từ ngoài bằng curl bị 403 Forbidden ngay từ send-otp (đã thử
@@ -2000,15 +2015,351 @@ def _open_signup_and_submit_email(page, email):
     )
 
 
+def _capsolver_key():
+    """CapSolver API key đã lưu (Windows Credential Manager).
+
+    Không bao giờ in key ra log. Trả "" khi chưa lưu.
+    """
+    try:
+        value = keyring.get_password(CAPSOLVER_SERVICE, CAPSOLVER_KEY_FIELD)
+    except Exception:
+        value = None
+    return value or ""
+
+
+def _load_selfie_path():
+    """Đường dẫn ảnh selfie (app chính ghi selfie.txt).
+
+    Trả về Path khi file tồn tại, None khi chưa chọn hoặc file
+    không còn. Một ảnh dùng cho mọi tài khoản trong lượt chạy.
+    """
+    try:
+        raw = Path(__file__).with_name("selfie.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    path = Path(raw.splitlines()[0].strip())
+    return path if path.is_file() else None
+
+
+def _random_meta_password(length=16):
+    """Mật khẩu ngẫu nhiên cho form đăng ký Meta.
+
+    Mật khẩu này CHỈ để điền form — không lưu ở đâu cả (theo
+    quyết định của chủ tool: đăng nhập Muse sau này dùng mã
+    OTP qua mail, không cần mật khẩu) và không in ra log.
+    """
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+    while True:
+        password = "".join(
+            secrets.choice(alphabet) for _ in range(length)
+        )
+        if (
+            any(char.islower() for char in password)
+            and any(char.isupper() for char in password)
+            and any(char.isdigit() for char in password)
+            and any(char in "!@#$%^&*" for char in password)
+        ):
+            return password
+
+
+def _meta_write_username(username):
+    """Ghi username Meta tự sinh ra file để app chính lưu vào sheet."""
+    if not username:
+        return
+    try:
+        Path(__file__).with_name(
+            f"meta_username{LANE_SUFFIX}.txt"
+        ).write_text(username + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _meta_logged_in(page):
+    """Đã đăng nhập Meta AI chưa.
+
+    Tiêu chí: đang ở meta.ai (không còn ở auth.meta.com) và
+    không còn nút "Log in" — khi đăng nhập, nút này được thay
+    bằng avatar/menu người dùng. Ô chat "Ask Meta AI anything..."
+    KHÔNG dùng làm tín hiệu vì trang chưa đăng nhập cũng có nó.
+    """
+    try:
+        url = page.url.lower()
+    except Exception:
+        return False
+    if META_AUTH_HOST in url or "meta.ai" not in url:
+        return False
+    try:
+        login = page.get_by_role("button", name="Log in", exact=True)
+        if login.count() and login.first.is_visible():
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _meta_click_button(page, names):
+    """Bấm nút đầu tiên trong danh sách đang hiện và bấm được.
+
+    Trả về tên nút đã bấm, None khi không có nút nào. Dùng cho
+    các bước sau CAPTCHA/selfie — nhãn nút tiếp theo chưa biết
+    chắc nên thử lần lượt.
+    """
+    for name in names:
+        button = page.get_by_role("button", name=name, exact=True)
+        try:
+            visible = (
+                button.count()
+                and button.first.is_visible()
+                and button.first.is_enabled()
+            )
+        except Exception:
+            visible = False
+        if not visible:
+            continue
+        try:
+            _click_when_ready(page, button, name)
+            return name
+        except Exception:
+            continue
+    return None
+
+
+def _meta_fill_code(page, code):
+    """Điền mã xác minh vào form "Confirm your account" của Meta.
+
+    Form Meta là một ô duy nhất (placeholder "Code"), không
+    phải ô tách như Muse.ai, và KHÔNG tự gửi — phía gọi vẫn
+    bấm Continue sau khi điền.
+    """
+    field = page.get_by_placeholder("Code", exact=True)
+    if field.count():
+        field.first.fill(code)
+        return
+    _fill_verification_code(page, code)
+
+
+def _meta_finish_after_otp(page, api_key, selfie_path):
+    """Sau bước OTP: xử lý CAPTCHA + selfie rồi đợi vào tài khoản.
+
+    Hai biến thể (quan sát tay 2026-11-13): (A) trang về màn
+    hình đầu meta.ai — bấm Log in lại thì gặp CAPTCHA; (B)
+    CAPTCHA hiện ngay sau OTP. Sau CAPTCHA là bước up ảnh
+    selfie, rồi mới vào tài khoản. Vòng lặp thăm dò lần lượt:
+    đã đăng nhập chưa → có CAPTCHA không (giải qua CapSolver)
+    → có ô up selfie không → có phải về trang chủ không (bấm
+    Log in lại). Hết giờ thì lỗi rõ kèm URL hiện tại để chụp
+    màn hình bổ sung.
+    """
+    deadline = time.monotonic() + META_POST_OTP_TIMEOUT_SECONDS
+    selfie_done = False
+    relogin_tried = False
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi xong đăng ký Meta."
+            )
+        if _meta_logged_in(page):
+            # Xác nhận lần hai sau 2 giây để loại lần đọc lúc
+            # trang đang chuyển (nút Log in chưa kịp hiện lại).
+            page.wait_for_timeout(2000)
+            if _meta_logged_in(page):
+                return
+            continue
+        try:
+            kind = capsolver.solve_page_captcha(page, api_key)
+        except (capsolver.CapSolverError, TimeoutError) as error:
+            raise RuntimeError(
+                "Giải CAPTCHA qua CapSolver lỗi: "
+                f"{_short_error(error)}"
+            )
+        if kind:
+            _status(f"Meta: đã giải CAPTCHA ({kind}) qua CapSolver.")
+            page.wait_for_timeout(1500)
+            clicked = _meta_click_button(
+                page, ("Continue", "Verify", "Submit", "Confirm")
+            )
+            if clicked:
+                _status(f"Meta: đã bấm {clicked} sau CAPTCHA.")
+            page.wait_for_timeout(2000)
+            continue
+        if not selfie_done:
+            file_input = page.locator('input[type="file"]')
+            try:
+                visible = (
+                    file_input.count() and file_input.first.is_visible()
+                )
+            except Exception:
+                visible = False
+            if visible:
+                _status("Meta: đang up ảnh selfie...")
+                file_input.first.set_input_files(str(selfie_path))
+                selfie_done = True
+                page.wait_for_timeout(2000)
+                clicked = _meta_click_button(
+                    page, ("Continue", "Upload", "Confirm", "Submit")
+                )
+                if clicked:
+                    _status(f"Meta: đã bấm {clicked} sau khi up selfie.")
+                page.wait_for_timeout(2000)
+                continue
+        if not relogin_tried:
+            login = page.get_by_role("button", name="Log in", exact=True)
+            try:
+                visible = (
+                    login.count()
+                    and login.first.is_visible()
+                    and login.first.is_enabled()
+                )
+            except Exception:
+                visible = False
+            if visible:
+                _status("Meta: trang về màn hình đầu — bấm Log in lại...")
+                _click_when_ready(page, login, "Log in")
+                relogin_tried = True
+                page.wait_for_timeout(2000)
+                continue
+        page.wait_for_timeout(3000)
+    raise RuntimeError(
+        "Hết "
+        f"{META_POST_OTP_TIMEOUT_SECONDS // 60} phút sau bước OTP mà "
+        "chưa vào được tài khoản Meta "
+        f"(URL hiện tại: {page.url[:120]})."
+    )
+
+
+def _run_meta_registration(page, email, mailbox, existing_ids):
+    """Đăng ký một tài khoản Meta ở meta.ai (chế độ --meta).
+
+    Thứ tự theo quan sát tay của chủ tool (2026-11-13):
+    meta.ai -> Log in -> "Use mobile number or email" -> nhập
+    temp mail -> ngày sinh (trên 18) + mật khẩu ngẫu nhiên (không
+    lưu) -> giữ nguyên username tự sinh, bấm Confirm -> nhập mã
+    OTP từ hộp thư -> CAPTCHA (CapSolver) + up ảnh selfie -> vào
+    tài khoản. Xong tới đây thì tài khoản Meta đã tạo xong; app
+    chính lưu lại (email + bí mật hộp thư + username) và DỪNG —
+    không qua Muse (đăng nhập Muse là bước riêng sau này).
+    """
+    api_key = _capsolver_key()
+    if not api_key:
+        raise RuntimeError(
+            "Chưa lưu CapSolver API key — nhập key ở app chính "
+            "rồi chạy lại."
+        )
+    selfie_path = _load_selfie_path()
+    if not selfie_path:
+        raise RuntimeError(
+            "Chưa chọn ảnh selfie (hoặc file ảnh không còn) — "
+            "chọn lại ở app chính rồi chạy lại."
+        )
+    _status("Meta: đang mở meta.ai...")
+    page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+    _click_when_ready(
+        page,
+        page.get_by_role("button", name="Log in", exact=True),
+        "Log in",
+    )
+    page.wait_for_url(
+        f"**{META_AUTH_HOST}**", timeout=PAGE_TIMEOUT_MS
+    )
+    _status("Meta: đang chọn đăng ký bằng email...")
+    _click_when_ready(
+        page,
+        page.get_by_text("Use mobile number or email", exact=True),
+        "Use mobile number or email",
+    )
+    email_field = page.get_by_placeholder("Mobile number or email")
+    email_field.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    email_field.fill(email)
+    _click_when_ready(
+        page,
+        page.get_by_role("button", name="Continue", exact=True),
+        "Continue",
+    )
+    _status("Meta: đang điền ngày sinh + mật khẩu...")
+    page.get_by_text(
+        "Get started on Meta AI", exact=True
+    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    birth_date = _random_birth_date()
+    _select_birth_date(page, birth_date)
+    password_field = page.get_by_placeholder("Password")
+    if not password_field.count():
+        password_field = page.locator('input[type="password"]').first
+    password_field.fill(_random_meta_password())
+    _click_when_ready(
+        page,
+        page.get_by_role("button", name="Continue", exact=True),
+        "Continue",
+    )
+    _status("Meta: đang xác nhận tạo tài khoản...")
+    page.get_by_text(
+        "Edit your Meta AI details", exact=True
+    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    username = ""
+    try:
+        user_field = page.get_by_label("Username")
+        if user_field.count():
+            username = user_field.first.input_value().strip()
+    except Exception:
+        username = ""
+    if not username:
+        # Nhãn nổi không gắn với ô input: lấy ô text đầu tiên
+        # đang có giá trị (ô Username tự điền, ô Name để trống).
+        try:
+            for index in range(page.locator("input").count()):
+                candidate = page.locator("input").nth(index)
+                if candidate.is_visible():
+                    value = (candidate.input_value() or "").strip()
+                    if value:
+                        username = value
+                        break
+        except Exception:
+            username = ""
+    if username:
+        _meta_write_username(username)
+        _status(f"META_USERNAME: {username}")
+    _click_when_ready(
+        page,
+        page.get_by_role("button", name="Confirm", exact=True),
+        "Confirm",
+    )
+    _status(
+        "Meta: đang chờ mã xác minh từ "
+        f"{mailbox['provider']}..."
+    )
+    page.get_by_text(
+        "Confirm your account", exact=True
+    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    code = _wait_for_code_from_mail(page, mailbox, existing_ids)
+    _status("Meta: đã nhận mã xác minh, đang điền mã...")
+    _meta_fill_code(page, code)
+    _click_when_ready(
+        page,
+        page.get_by_role("button", name="Continue", exact=True),
+        "Continue",
+    )
+    _meta_finish_after_otp(page, api_key, selfie_path)
+    _status("Meta: đã đăng ký xong tài khoản Meta.")
+
+
 def main():
     global LANE_SUFFIX, DIRECT_MODE
-    if len(sys.argv) not in (2, 3, 4):
+    if len(sys.argv) < 2:
         raise ValueError("Thiếu địa chỉ email cần điền.")
     email = sys.argv[1]
-    auto = len(sys.argv) >= 3 and sys.argv[2] == "--auto"
-    if len(sys.argv) == 4 and sys.argv[3].isdigit():
-        # Luồng song song: đọc đúng file proxy/redeem của luồng này.
-        LANE_SUFFIX = "-" + sys.argv[3]
+    flags = sys.argv[2:]
+    auto = "--auto" in flags
+    # --meta: đăng ký tài khoản Meta ở meta.ai thay vì đăng ký
+    # Muse.ai (app chính chạy với nút "Đăng kí Meta" riêng).
+    meta = "--meta" in flags
+    for arg in flags:
+        if arg.isdigit():
+            # Luồng song song: đọc đúng file proxy/redeem của luồng này.
+            LANE_SUFFIX = "-" + arg
+            break
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
@@ -2063,6 +2414,18 @@ def main():
             # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
             # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
             existing_ids = set()
+        if meta:
+            # Chế độ đăng ký Meta: chạy xong luồng Meta thì dừng —
+            # không qua Muse. Lỗi ở bước nào thì khối except bên
+            # ngoài xử lý như luồng Muse (RESULT: FAIL + exit 1
+            # khi chạy tự động). return trong try vẫn chạy finally
+            # (đóng trình duyệt) như thường.
+            _run_meta_registration(page, email, mailbox, existing_ids)
+            if auto:
+                _status("RESULT: META_OK")
+            else:
+                page.wait_for_event("close")
+            return
         # API thay nút bấm, form vẫn điền như cũ: điền form email
         # trước rồi gửi OTP qua API; xác nhận mã qua API; rồi gửi
         # hoàn tất hồ sơ qua API LUÔN với ngày sinh ngẫu nhiên —
