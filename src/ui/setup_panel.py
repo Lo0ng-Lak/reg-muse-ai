@@ -27,17 +27,26 @@ class SetupError(Exception):
 
 
 class SetupPanel(ttk.Frame):
-    """Proxy + luồng + kết nối + temp mail + số lượng cho một tab."""
+    """Proxy + luồng + kết nối + temp mail + số lượng cho một tab.
+
+    show_provider=False ẩn hàng Temp mail (tab Muse: mail lấy từ
+    file Excel Meta, không tạo mail mới nên không cần chọn dịch
+    vụ); read_setup() khi đó trả provider mặc định cho lượt đăng
+    ký trực tiếp cũ.
+    """
 
     def __init__(
         self, parent, coordinator, pool_file, bad_file,
-        pool_fallback_file=None,
+        pool_fallback_file=None, show_provider=True,
     ):
         super().__init__(parent)
         self.coordinator = coordinator
         self.pool_file = pool_file
         self.bad_file = bad_file
         self.pool_fallback_file = pool_fallback_file
+        self.show_provider = show_provider
+        self.provider_var = None
+        self.provider_combo = None
         self._running = False
         self._bad_proxies = proxy_pool._load_bad_proxies(bad_file)
         self.columnconfigure(0, weight=1)
@@ -97,31 +106,32 @@ class SetupPanel(ttk.Frame):
         )
         self.lanes_spin.pack(side="left", padx=(6, 12))
 
-        mail_row = ttk.Frame(self)
-        mail_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(mail_row, text="Temp mail:").pack(side="left")
-        self.provider_var = tk.StringVar(
-            value=dict(mail_providers.PROVIDERS)[
-                mail_providers.DEFAULT_PROVIDER
-            ]
-        )
-        self.provider_combo = ttk.Combobox(
-            mail_row,
-            textvariable=self.provider_var,
-            values=[label for _, label in mail_providers.PROVIDERS],
-            state="readonly",
-            width=16,
-        )
-        self.provider_combo.pack(side="left", padx=(6, 8))
-        ttk.Label(
-            mail_row,
-            text=(
-                "dịch vụ hộp thư tạm cho lượt chạy — tempmail.plus "
-                "là mặc định và là dịch vụ duy nhất đã kiểm chứng "
-                "nhận OTP từ Meta tới nay"
-            ),
-            wraplength=480,
-        ).pack(side="left")
+        if self.show_provider:
+            mail_row = ttk.Frame(self)
+            mail_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+            ttk.Label(mail_row, text="Temp mail:").pack(side="left")
+            self.provider_var = tk.StringVar(
+                value=dict(mail_providers.PROVIDERS)[
+                    mail_providers.DEFAULT_PROVIDER
+                ]
+            )
+            self.provider_combo = ttk.Combobox(
+                mail_row,
+                textvariable=self.provider_var,
+                values=[label for _, label in mail_providers.PROVIDERS],
+                state="readonly",
+                width=16,
+            )
+            self.provider_combo.pack(side="left", padx=(6, 8))
+            ttk.Label(
+                mail_row,
+                text=(
+                    "dịch vụ hộp thư tạm cho lượt chạy — tempmail.plus "
+                    "là mặc định và là dịch vụ duy nhất đã kiểm chứng "
+                    "nhận OTP từ Meta tới nay"
+                ),
+                wraplength=480,
+            ).pack(side="left")
 
         conn_row = ttk.Frame(self)
         conn_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -359,15 +369,22 @@ class SetupPanel(ttk.Frame):
                     "lỗi. Xoá bớt dòng trong ô Proxy lỗi để dùng "
                     "lại, hoặc dán proxy mới vào ô Proxy.",
                 )
-        provider_label = self.provider_var.get()
-        provider_id = next(
-            (
-                pid
-                for pid, label in mail_providers.PROVIDERS
-                if label == provider_label
-            ),
-            mail_providers.DEFAULT_PROVIDER,
-        )
+        if self.provider_var is None:
+            # Tab không có hàng Temp mail (tab Muse): mail lấy từ
+            # file Excel Meta; lượt đăng ký trực tiếp cũ (nếu còn
+            # dùng) chạy với dịch vụ mặc định.
+            provider_id = mail_providers.DEFAULT_PROVIDER
+            provider_label = dict(mail_providers.PROVIDERS)[provider_id]
+        else:
+            provider_label = self.provider_var.get()
+            provider_id = next(
+                (
+                    pid
+                    for pid, label in mail_providers.PROVIDERS
+                    if label == provider_label
+                ),
+                mail_providers.DEFAULT_PROVIDER,
+            )
         return {
             "total": total,
             "per_proxy": per_proxy,
@@ -391,9 +408,10 @@ class SetupPanel(ttk.Frame):
         )
         self.count_spin.configure(state="disabled" if running else "normal")
         self.lanes_spin.configure(state="disabled" if running else "normal")
-        self.provider_combo.configure(
-            state="disabled" if running else "readonly"
-        )
+        if self.provider_combo is not None:
+            self.provider_combo.configure(
+                state="disabled" if running else "readonly"
+            )
         self.conn_combo.configure(
             state="disabled" if running else "readonly"
         )

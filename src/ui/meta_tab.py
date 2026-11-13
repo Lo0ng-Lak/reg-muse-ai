@@ -1,14 +1,14 @@
-"""Tab Meta: đăng ký tài khoản Meta ở meta.ai + đăng nhập Muse.
+"""Tab Meta: đăng ký tài khoản Meta ở meta.ai.
 
 Đăng kí Meta chạy riêng: tạo tài khoản Meta rồi lưu vào
-meta_accounts.xlsx, KHÔNG tự qua Muse. Đăng nhập Muse là nút riêng
-(Đăng nhập Muse): chọn file Excel Meta đã đăng kí, tool lấy mail
-trong đó đăng nhập Muse rồi nộp thẻ đã lưu — không tạo mail mới.
-Setup chạy (proxy, luồng, kết nối, temp mail, số lượng) nằm ở
-SetupPanel riêng của tab này — kho proxy là proxies_meta.txt /
-bad-proxies-meta.txt, tách khỏi kho của tab Muse. Đăng kí Meta
-không dùng thẻ, không dùng mã mời. CAPTCHA giải tự động qua
-CapSolver, selfie up từ file — không có bước làm tay.
+meta_accounts.xlsx, KHÔNG tự qua Muse. Đăng nhập Muse bằng các
+tài khoản này là việc của TAB MUSE.AI: sang đó, chọn file Excel
+Meta rồi bấm Đăng nhập Muse. Setup chạy (proxy, luồng, kết nối,
+temp mail, số lượng) nằm ở SetupPanel riêng của tab này — kho
+proxy là proxies_meta.txt / bad-proxies-meta.txt, tách khỏi kho
+của tab Muse. Đăng kí Meta không dùng thẻ, không dùng mã mời.
+CAPTCHA giải tự động qua CapSolver, selfie up từ file — không
+có bước làm tay.
 """
 
 import threading
@@ -91,27 +91,8 @@ class MetaTab(ttk.Frame):
         )
         self.meta_start_button.grid(row=0, column=3, padx=(6, 0))
 
-        excel_row = ttk.Frame(self)
-        excel_row.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        excel_row.columnconfigure(1, weight=1)
-        ttk.Label(excel_row, text="File Excel Meta:").grid(
-            row=0, column=0, sticky="w"
-        )
-        self.meta_excel_entry = ttk.Entry(excel_row, width=36)
-        self.meta_excel_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
-        self.browse_excel_button = ttk.Button(
-            excel_row, text="Chọn file…", command=self._browse_meta_excel
-        )
-        self.browse_excel_button.grid(row=0, column=2)
-        self.muse_login_button = ttk.Button(
-            excel_row,
-            text="Đăng nhập Muse",
-            command=self._start_muse_login,
-        )
-        self.muse_login_button.grid(row=0, column=3, padx=(6, 0))
-
         buttons = ttk.Frame(self)
-        buttons.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
         self.open_sheet_button = ttk.Button(
             buttons,
             text="Mở sheet Meta",
@@ -130,9 +111,6 @@ class MetaTab(ttk.Frame):
         saved_selfie = storage._load_selfie_path_text()
         if saved_selfie:
             self.selfie_entry.insert(0, saved_selfie)
-        saved_excel = storage._load_meta_excel_path_text()
-        if saved_excel:
-            self.meta_excel_entry.insert(0, saved_excel)
 
     def _save_capsolver_key(self):
         """Lưu CapSolver API key vào Windows Credential Manager.
@@ -216,7 +194,7 @@ class MetaTab(ttk.Frame):
         """Nút Đăng kí Meta: chạy riêng lượt đăng ký tài khoản Meta.
 
         Chỉ đăng ký Meta ở meta.ai rồi lưu vào meta_accounts.xlsx
-        — KHÔNG tự qua Muse (đăng nhập Muse là nút riêng bên dưới).
+        — KHÔNG tự qua Muse (đăng nhập Muse là việc của tab Muse.ai).
         Dùng kho proxy / chế độ kết nối / số luồng / dịch vụ
         temp mail / số tài khoản CỦA TAB NÀY, nhưng không dùng
         thẻ và không dùng mã mời. Bắt buộc phải có CapSolver API
@@ -303,125 +281,9 @@ class MetaTab(ttk.Frame):
         )
         self.app.append_log(
             "Đăng kí Meta xong là lưu vào meta_accounts.xlsx, không "
-            "tự qua Muse — bấm nút Đăng nhập Muse để đăng nhập bằng "
-            "các tài khoản này."
+            "tự qua Muse — sang tab Muse.ai, chọn file này ở ô File "
+            "Excel Meta rồi bấm Đăng nhập Muse."
         )
-        self.coordinator.start(settings)
-
-    def _browse_meta_excel(self):
-        """Chọn file Excel Meta đã đăng kí để đăng nhập Muse."""
-        # Import lười để không bắt mọi test stub thêm filedialog.
-        from tkinter import filedialog
-
-        path = filedialog.askopenfilename(
-            title="Chọn file Excel Meta",
-            filetypes=[
-                ("Excel", "*.xlsx"),
-                ("Tất cả", "*.*"),
-            ],
-        )
-        if not path:
-            return
-        self.meta_excel_entry.delete(0, "end")
-        self.meta_excel_entry.insert(0, path)
-        try:
-            storage._save_meta_excel_path_text(path)
-        except OSError as error:
-            messagebox.showerror(
-                "Không lưu được đường dẫn", str(error)
-            )
-
-    def _start_muse_login(self):
-        """Nút Đăng nhập Muse: đăng nhập Muse bằng tài khoản Meta
-        đã đăng kí trong file Excel đã chọn.
-
-        Lấy email + bí mật hộp thư + dịch vụ theo từng dòng trong
-        file (cột Email Meta / Mật khẩu hộp thư / Nhà cung cấp),
-        KHÔNG tạo mail mới. Mỗi tài khoản đăng nhập bằng OTP rồi
-        nộp thẻ đã lưu; thành công thì đánh dấu cột Muse trong
-        file + ghi vào accounts.xlsx như tài khoản đăng ký mới.
-        Không quy đổi mã mời. Dùng kho proxy / kết nối / số luồng
-        CỦA TAB NÀY.
-        """
-        if self.coordinator.running:
-            return
-        excel_text = self.meta_excel_entry.get().strip()
-        if excel_text:
-            try:
-                storage._save_meta_excel_path_text(excel_text)
-            except OSError:
-                pass
-        if not excel_text or not Path(excel_text).is_file():
-            messagebox.showwarning(
-                "Thiếu file Excel Meta",
-                "Chọn file Excel Meta đã đăng kí ở ô File Excel Meta "
-                "— tool lấy mail trong đó đăng nhập Muse.",
-            )
-            return
-        pending = storage._pending_meta_logins(excel_text)
-        if not pending:
-            messagebox.showwarning(
-                "Không còn tài khoản",
-                "File Excel đã chọn không còn tài khoản Meta nào chưa "
-                "đăng nhập Muse (hoặc file không đọc được).",
-            )
-            return
-        try:
-            setup = self.panel.read_setup()
-        except SetupError as error:
-            messagebox.showwarning(error.title, error.message)
-            return
-        # Đăng nhập vẫn nộp thẻ đã lưu ở bước thẻ — chưa có thẻ thì
-        # mỗi tài khoản sẽ chờ nhập tay tới 4 phút.
-        if not storage._load_card_from_keyring():
-            if not messagebox.askokcancel(
-                "Chưa lưu thẻ",
-                "Chưa có thẻ nào được lưu (thẻ lưu ở tab Muse.ai). "
-                "Mỗi tài khoản đăng nhập xong tới bước thẻ sẽ chờ "
-                "bạn nhập tay trong cửa sổ Chromium (tối đa 4 phút). "
-                "Vẫn chạy?",
-            ):
-                return
-        settings = RunSettings(
-            total=setup["total"],
-            pool=setup["pool"],
-            per_proxy=setup["per_proxy"],
-            lanes=setup["lanes"],
-            provider_id=setup["provider_id"],
-            direct=setup["direct"],
-            meta_login=True,
-            meta_excel_path=excel_text,
-            card_limit=0,
-            card_used=0,
-            card_tracked=False,
-            bad_file=self.panel.bad_file,
-            bad_mapping=setup["bad_mapping"],
-            ip_target=self.panel,
-        )
-        self.app.on_run_started(self.panel)
-        self.app.append_log(
-            "--- Bắt đầu lượt ĐĂNG NHẬP MUSE bằng tài khoản Meta: "
-            f"{len(pending)} tài khoản chưa đăng nhập trong file "
-            f"{Path(excel_text).name} ---"
-        )
-        if setup["total"] == 0:
-            self.app.append_log(
-                "Đăng nhập hết các tài khoản chưa đăng nhập trong file."
-            )
-        else:
-            self.app.append_log(
-                f"Giới hạn lượt chạy này: {setup['total']} tài khoản."
-            )
-        if setup["direct"]:
-            self.app.append_log(
-                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
-                "IP của máy này, không qua proxy."
-            )
-        else:
-            self.app.append_log(
-                f"Kho proxy: {len(setup['pool'])} proxy, mỗi proxy "
-                f"{setup['per_proxy']} tài khoản."
-            )
         self.coordinator.start(settings)
 
     def _open_spreadsheet(self):
@@ -443,9 +305,6 @@ class MetaTab(ttk.Frame):
             self.selfie_entry,
             self.browse_selfie_button,
             self.meta_start_button,
-            self.meta_excel_entry,
-            self.browse_excel_button,
-            self.muse_login_button,
         ):
             widget.configure(state="disabled" if running else "normal")
         # Nút Số dư không bị khoá khi đang chạy (giống nút Kiểm

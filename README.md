@@ -410,18 +410,21 @@ solving service, using your own API key and balance.
 
 ### Muse login with a Meta account (Đăng nhập Muse)
 
-The **Đăng nhập Muse** button (Meta tab) logs into Muse with Meta
+The **Đăng nhập Muse** button (Muse.ai tab) logs into Muse with Meta
 accounts you already registered: pick the Meta Excel file with
 **Chọn file…** (the path is kept in gitignored `meta_excel.txt`),
 and the run reads each row's Email Meta / Mật khẩu hộp thư /
 Nhà cung cấp columns — **no new mailbox is created**. Each account
-logs in with an email OTP, then submits the saved card (from the
-Muse.ai tab) at the card step, exactly like a signup from there on.
+logs in with an email OTP, then submits the saved card at the card
+step, exactly like a signup from there on.
 A successful login is saved to `accounts.xlsx` — email, mailbox
 secret, session cookie and invite code as usual, plus the mailbox's
 `Link lấy OTP` — and marked in the Meta file's **Muse** column, so
 the next run skips it. (Muse accounts sign in with an email OTP, so
 there is no Muse password to save.) No invite
-code is redeemed in login mode. The run uses the Meta tab's proxy
+code is redeemed in login mode. The run uses the Muse.ai tab's proxy
 pool / VPN mode, lane count and account target (0 = log in all
-pending rows). The card cap is not enforced in login runs.
+pending rows). The card cap is not enforced in login runs. The
+Muse.ai tab has no Temp mail row — the mail comes from the Meta file
+(the old direct signup, **Bắt đầu đăng ký**, still creates fresh
+tempmail.plus mailboxes).

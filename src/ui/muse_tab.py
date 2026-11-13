@@ -1,11 +1,18 @@
 """Tab Muse.ai: đăng ký tài khoản Muse.ai theo lô.
 
-Setup chạy (proxy, luồng, kết nối, temp mail, số lượng) nằm ở
-SetupPanel riêng của tab này — kho proxy là proxies.txt /
-bad-proxies.txt (file cũ). Thẻ + mã mời chỉ có ở tab này.
+Cách đăng ký chính: đăng nhập Muse bằng tài khoản Meta đã đăng
+kí — chọn file Excel Meta (tab Meta tạo ra file đó), tool lấy
+mail trong file đăng nhập rồi nộp thẻ đã lưu, không tạo mail
+mới. Vì vậy tab này KHÔNG có ô Temp mail (mail lấy từ file).
+Nút Bắt đầu đăng ký là cách cũ: tạo mail tạm mới (tempmail.plus)
+rồi đăng ký trực tiếp. Setup chạy (proxy, luồng, kết nối, số
+lượng) nằm ở SetupPanel riêng của tab này — kho proxy là
+proxies.txt / bad-proxies.txt (file cũ). Thẻ + mã mời chỉ có ở
+tab này.
 """
 
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 import paths
@@ -29,10 +36,11 @@ class MuseTab(ttk.Frame):
         ttk.Label(
             self,
             text=(
-                "Email tạm lấy từ dịch vụ ở ô Temp mail bên dưới, không phải Gmail, và Muse.ai có thể "
-                "từ chối email tạm. Mỗi tài khoản: tạo mail → mở form đăng ký → "
-                "tự lấy mã xác minh → điền hồ sơ → thành công mới lưu lại, rồi "
-                "tự chuyển sang tài khoản tiếp theo."
+                "Đăng nhập Muse bằng tài khoản Meta đã đăng kí: chọn file Excel "
+                "Meta ở ô bên dưới (tab Meta tạo ra file đó), tool lấy mail trong "
+                "file đăng nhập rồi nộp thẻ đã lưu — không tạo mail mới. Nút Bắt "
+                "đầu đăng ký là cách cũ: tạo mail tạm mới rồi đăng ký trực tiếp "
+                "(Muse.ai có thể từ chối email tạm)."
             ),
             wraplength=720,
         ).grid(row=1, column=0, sticky="ew", pady=(6, 12))
@@ -43,11 +51,31 @@ class MuseTab(ttk.Frame):
             pool_file=paths.data_file("proxies.txt"),
             bad_file=paths.data_file("bad-proxies.txt"),
             pool_fallback_file=paths.data_file("proxy.txt"),
+            show_provider=False,
         )
         self.panel.grid(row=2, column=0, sticky="ew")
 
+        excel_row = ttk.Frame(self)
+        excel_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        excel_row.columnconfigure(1, weight=1)
+        ttk.Label(excel_row, text="File Excel Meta:").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.meta_excel_entry = ttk.Entry(excel_row, width=36)
+        self.meta_excel_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
+        self.browse_excel_button = ttk.Button(
+            excel_row, text="Chọn file…", command=self._browse_meta_excel
+        )
+        self.browse_excel_button.grid(row=0, column=2)
+        self.muse_login_button = ttk.Button(
+            excel_row,
+            text="Đăng nhập Muse",
+            command=self._start_muse_login,
+        )
+        self.muse_login_button.grid(row=0, column=3, padx=(6, 0))
+
         card_row = ttk.Frame(self)
-        card_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        card_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(card_row, text="Thẻ:").pack(side="left")
         self.card_number_entry = ttk.Entry(card_row, width=24)
         self.card_number_entry.pack(side="left", padx=(6, 8))
@@ -78,7 +106,7 @@ class MuseTab(ttk.Frame):
             self.card_zip_entry.insert(0, "10001")
 
         muse_row = ttk.Frame(self)
-        muse_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        muse_row.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(muse_row, text="Giới hạn / thẻ:").pack(side="left")
         self.card_limit_var = tk.IntVar(value=0)
         self.card_limit_spin = ttk.Spinbox(
@@ -104,9 +132,12 @@ class MuseTab(ttk.Frame):
             saved_invite = ""
         if saved_invite:
             self.invite_entry.insert(0, saved_invite.splitlines()[0].strip())
+        saved_excel = storage._load_meta_excel_path_text()
+        if saved_excel:
+            self.meta_excel_entry.insert(0, saved_excel)
 
         buttons = ttk.Frame(self)
-        buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        buttons.grid(row=6, column=0, sticky="ew", pady=(12, 0))
         self.start_button = ttk.Button(
             buttons, text="Bắt đầu đăng ký", command=self._start_registration
         )
@@ -334,6 +365,121 @@ class MuseTab(ttk.Frame):
             )
         self.coordinator.start(settings)
 
+    def _browse_meta_excel(self):
+        """Chọn file Excel Meta đã đăng kí để đăng nhập Muse."""
+        # Import lười để không bắt mọi test stub thêm filedialog.
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="Chọn file Excel Meta",
+            filetypes=[
+                ("Excel", "*.xlsx"),
+                ("Tất cả", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        self.meta_excel_entry.delete(0, "end")
+        self.meta_excel_entry.insert(0, path)
+        try:
+            storage._save_meta_excel_path_text(path)
+        except OSError as error:
+            messagebox.showerror(
+                "Không lưu được đường dẫn", str(error)
+            )
+
+    def _start_muse_login(self):
+        """Nút Đăng nhập Muse: đăng nhập Muse bằng tài khoản Meta
+        đã đăng kí trong file Excel đã chọn.
+
+        Lấy email + bí mật hộp thư + dịch vụ theo từng dòng trong
+        file (cột Email Meta / Mật khẩu hộp thư / Nhà cung cấp),
+        KHÔNG tạo mail mới. Mỗi tài khoản đăng nhập bằng OTP rồi
+        nộp thẻ đã lưu; thành công thì đánh dấu cột Muse trong
+        file + ghi vào accounts.xlsx như tài khoản đăng ký mới.
+        Không quy đổi mã mời. Dùng kho proxy / kết nối / số luồng
+        CỦA TAB NÀY.
+        """
+        if self.coordinator.running:
+            return
+        excel_text = self.meta_excel_entry.get().strip()
+        if excel_text:
+            try:
+                storage._save_meta_excel_path_text(excel_text)
+            except OSError:
+                pass
+        if not excel_text or not Path(excel_text).is_file():
+            messagebox.showwarning(
+                "Thiếu file Excel Meta",
+                "Chọn file Excel Meta đã đăng kí ở ô File Excel Meta "
+                "— tool lấy mail trong đó đăng nhập Muse.",
+            )
+            return
+        pending = storage._pending_meta_logins(excel_text)
+        if not pending:
+            messagebox.showwarning(
+                "Không còn tài khoản",
+                "File Excel đã chọn không còn tài khoản Meta nào chưa "
+                "đăng nhập Muse (hoặc file không đọc được).",
+            )
+            return
+        try:
+            setup = self.panel.read_setup()
+        except SetupError as error:
+            messagebox.showwarning(error.title, error.message)
+            return
+        # Đăng nhập vẫn nộp thẻ đã lưu ở bước thẻ — chưa có thẻ thì
+        # mỗi tài khoản sẽ chờ nhập tay tới 4 phút.
+        if not storage._load_card_from_keyring():
+            if not messagebox.askokcancel(
+                "Chưa lưu thẻ",
+                "Chưa có thẻ nào được lưu. Mỗi tài khoản đăng nhập "
+                "xong tới bước thẻ sẽ chờ bạn nhập tay trong cửa sổ "
+                "Chromium (tối đa 4 phút). Vẫn chạy?",
+            ):
+                return
+        settings = RunSettings(
+            total=setup["total"],
+            pool=setup["pool"],
+            per_proxy=setup["per_proxy"],
+            lanes=setup["lanes"],
+            provider_id=setup["provider_id"],
+            direct=setup["direct"],
+            meta_login=True,
+            meta_excel_path=excel_text,
+            card_limit=0,
+            card_used=0,
+            card_tracked=False,
+            bad_file=self.panel.bad_file,
+            bad_mapping=setup["bad_mapping"],
+            ip_target=self.panel,
+        )
+        self.app.on_run_started(self.panel)
+        self.app.append_log(
+            "--- Bắt đầu lượt ĐĂNG NHẬP MUSE bằng tài khoản Meta: "
+            f"{len(pending)} tài khoản chưa đăng nhập trong file "
+            f"{Path(excel_text).name} ---"
+        )
+        if setup["total"] == 0:
+            self.app.append_log(
+                "Đăng nhập hết các tài khoản chưa đăng nhập trong file."
+            )
+        else:
+            self.app.append_log(
+                f"Giới hạn lượt chạy này: {setup['total']} tài khoản."
+            )
+        if setup["direct"]:
+            self.app.append_log(
+                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
+                "IP của máy này, không qua proxy."
+            )
+        else:
+            self.app.append_log(
+                f"Kho proxy: {len(setup['pool'])} proxy, mỗi proxy "
+                f"{setup['per_proxy']} tài khoản."
+            )
+        self.coordinator.start(settings)
+
     def _open_spreadsheet(self):
         if not storage.SPREADSHEET_FILE.exists():
             messagebox.showwarning("Chưa có sheet", "Chưa tạo được file Excel.")
@@ -364,6 +510,9 @@ class MuseTab(ttk.Frame):
             self.save_card_button,
             self.delete_card_button,
             self.start_button,
+            self.meta_excel_entry,
+            self.browse_excel_button,
+            self.muse_login_button,
         ):
             widget.configure(state="disabled" if running else "normal")
         self.open_sheet_button.configure(
