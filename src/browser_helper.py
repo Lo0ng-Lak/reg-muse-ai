@@ -2291,7 +2291,7 @@ def _meta_try_login_buttons(page, candidates):
     """Thử bấm từng nút Log in tới khi trang chuyển sang auth.meta.com.
 
     Trả về True khi chuyển trang thành công, False khi đã thử hết
-    mà không nút nào chuyển được. Mỗi nút được 8 giây để chuyển
+    mà không nút nào chuyển được. Mỗi nút được 4 giây để chuyển
     trang — bấm đúng nút thì chuyển gần như ngay.
     """
     for target in candidates:
@@ -2301,7 +2301,7 @@ def _meta_try_login_buttons(page, candidates):
         except Exception:
             continue
         try:
-            page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=8000)
+            page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=4000)
             return True
         except Exception:
             continue
@@ -2332,7 +2332,7 @@ def _meta_testid_login(page):
         try:
             page.wait_for_timeout(UI_SETTLE_MS)
             target.click(timeout=BUTTON_TIMEOUT_MS)
-            page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=8000)
+            page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=4000)
             return True
         except Exception:
             continue
@@ -2345,8 +2345,8 @@ def _meta_click_login(page):
     Nút Log in thật trong header có data-testid="login-button"
     (quan sát DOM 2026-11-13) — thử nó trước mỗi vòng; nếu
     testid không còn thì thử từng nút trùng tên trong khung
-    hình. Bấm xong chờ chuyển sang auth.meta.com (mỗi nút 8
-    giây).
+    hình. Bấm xong chờ chuyển sang auth.meta.com (mỗi nút 4
+    giây — chuyển thật bắt đầu trong 1-2 giây).
 
     Vì sao phải thử lại: nút này là <button> thường, không có
     href — chuyển trang nhờ handler JS của React. Giao diện
@@ -2387,7 +2387,7 @@ def _meta_click_login(page):
         ) or _visible_candidates(locator)
         if candidates and _meta_try_login_buttons(page, candidates):
             break
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(1500)
     else:
         raise RuntimeError(
             f"Đã thử Log in {attempts} lần trong "
@@ -3099,7 +3099,9 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         )
     _status("Meta: đang mở meta.ai...")
     page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-    _meta_reload_on_app_error(page)
+    # Không chờ 6 giây kiểm tra lỗi ứng dụng trước khi bấm nữa
+    # (tốn cố định 6 giây mỗi tài khoản): _meta_click_login đã
+    # kiểm tra lỗi ở đầu mỗi vòng bấm và tự tải lại khi gặp.
     _meta_click_login(page)
     _status("Meta: đang chọn đăng ký bằng email...")
     _meta_pick_email_signup(page)
