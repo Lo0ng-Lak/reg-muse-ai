@@ -2373,14 +2373,21 @@ def _meta_click_button(page, names):
 def _meta_fill_code(page, code):
     """Điền mã xác minh vào form "Confirm your account" của Meta.
 
-    Form Meta là một ô duy nhất (placeholder "Code"), không
-    phải ô tách như Muse.ai, và KHÔNG tự gửi — phía gọi vẫn
-    bấm Continue sau khi điền.
+    Form Meta là một ô duy nhất (nhãn "Code"), không phải ô
+    tách như Muse.ai, và KHÔNG tự gửi — phía gọi vẫn bấm
+    Continue sau khi điền. Ô nhập của Meta dùng nhãn nổi
+    (floating label) nên thử placeholder -> label -> textbox
+    theo tên, giống ô email.
     """
-    field = page.get_by_placeholder("Code", exact=True)
-    if field.count():
-        field.first.fill(code)
-        return
+    for locator in (
+        page.get_by_placeholder("Code", exact=True),
+        page.get_by_label("Code"),
+        page.get_by_role("textbox", name="Code"),
+    ):
+        field = _first_visible(locator)
+        if field is not None:
+            field.fill(code)
+            return
     _fill_verification_code(page, code)
 
 
@@ -2476,6 +2483,47 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     )
 
 
+def _meta_find_email_field(page):
+    """Tìm ô nhập email ở auth.meta.com (nhiều cách định vị).
+
+    Ô email của Meta dùng nhãn nổi (floating label): chữ
+    "Mobile number or email" là <label> nằm phía trên ô nhập,
+    không phải thuộc tính placeholder của <input> — chỉ tìm
+    bằng placeholder thì không thấy gì dù form đã hiện (live
+    2026-11-13 10:20: qua được form mà tool không điền mail).
+    Thử lần lượt placeholder -> label -> textbox theo tên; trả
+    về locator đơn đầu tiên hiện ra, None khi không có ô nào.
+    """
+    for locator in (
+        page.get_by_placeholder("Mobile number or email"),
+        page.get_by_label("Mobile number or email"),
+        page.get_by_role("textbox", name="Mobile number or email"),
+    ):
+        found = _first_visible(locator)
+        if found is not None:
+            return found
+    return None
+
+
+def _meta_wait_email_field(page):
+    """Chờ ô nhập email ở auth.meta.com hiện ra rồi trả về nó."""
+    deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    while True:
+        if _page_closed(page):
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trong lúc chờ ô email."
+            )
+        found = _meta_find_email_field(page)
+        if found is not None:
+            return found
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Không thấy ô Mobile number or email sau "
+                f"{BUTTON_TIMEOUT_MS // 1000} giây."
+            )
+        page.wait_for_timeout(250)
+
+
 def _meta_pick_email_signup(page):
     """Vào form nhập email ở auth.meta.com (2 biến thể).
 
@@ -2487,7 +2535,6 @@ def _meta_pick_email_signup(page):
     email thì khỏi bấm chọn, thấy nút chọn thì bấm. Lỗi rõ ràng
     nếu 30 giây không thấy bên nào.
     """
-    email_field = page.get_by_placeholder("Mobile number or email")
     chooser = page.get_by_text("Use mobile number or email", exact=True)
     deadline = time.monotonic() + 30
     while True:
@@ -2495,7 +2542,7 @@ def _meta_pick_email_signup(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi vào form email."
             )
-        if _first_visible(email_field) is not None:
+        if _meta_find_email_field(page) is not None:
             return
         if _first_visible(chooser) is not None:
             _meta_click(page, chooser, "Use mobile number or email")
@@ -2539,11 +2586,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     _meta_click_login(page)
     _status("Meta: đang chọn đăng ký bằng email...")
     _meta_pick_email_signup(page)
-    email_field = _meta_wait_visible(
-        page,
-        page.get_by_placeholder("Mobile number or email"),
-        "ô Mobile number or email",
-    )
+    email_field = _meta_wait_email_field(page)
     email_field.fill(email)
     _meta_click(
         page,
