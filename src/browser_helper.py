@@ -1760,14 +1760,11 @@ def _try_send_otp_api(page, email, token_box):
     return True
 
 
-def _try_confirm_otp_api(page, code, token_box):
-    """Xác nhận OTP qua API. Trả (tos_content_version, requires_name)
-    khi ra bước hoàn tất hồ sơ, None khi lỗi (ghi log lý do) để phía
-    gọi rơi về điền mã vào form (form tự gửi khi đủ số).
-    requires_name: server có bắt nhập họ tên ở bước hoàn tất hồ sơ
-    không — trang tự đọc cờ này từ kết quả xác nhận OTP và chỉ gửi
-    first_name/last_name khi cờ bật (thiếu tên khi bị bắt thì
-    register-completion trả 400 invalidRequest)."""
+def _try_confirm_otp_api_full(page, code, token_box):
+    """Xác nhận OTP qua API, trả về toàn bộ dict JSON (None khi
+    lỗi). Phía gọi đọc registration_state trong đó để biết tài
+    khoản cần hoàn tất hồ sơ hay đã đăng ký xong (chế độ đăng
+    nhập Muse bằng tài khoản Meta)."""
     try:
         status, data, text = _api_post_authed(
             page, "/confirm-otp",
@@ -1795,13 +1792,29 @@ def _try_confirm_otp_api(page, code, token_box):
         _status("API xác nhận OTP trả về không phải JSON — dùng nút bấm.")
         return None
     state = data.get("registration_state")
-    tos = data.get("tos") or {}
-    tos_version = tos.get("content_version") if isinstance(tos, dict) else None
     requires_name = bool(data.get("requires_name"))
     _status(
         "API xác nhận OTP OK (trạng thái: "
         f"{state}; cần tên: {'có' if requires_name else 'không'})."
     )
+    return data
+
+
+def _try_confirm_otp_api(page, code, token_box):
+    """Xác nhận OTP qua API. Trả (tos_content_version, requires_name)
+    khi ra bước hoàn tất hồ sơ, None khi lỗi (ghi log lý do) để phía
+    gọi rơi về điền mã vào form (form tự gửi khi đủ số).
+    requires_name: server có bắt nhập họ tên ở bước hoàn tất hồ sơ
+    không — trang tự đọc cờ này từ kết quả xác nhận OTP và chỉ gửi
+    first_name/last_name khi cờ bật (thiếu tên khi bị bắt thì
+    register-completion trả 400 invalidRequest)."""
+    data = _try_confirm_otp_api_full(page, code, token_box)
+    if data is None:
+        return None
+    state = data.get("registration_state")
+    tos = data.get("tos") or {}
+    tos_version = tos.get("content_version") if isinstance(tos, dict) else None
+    requires_name = bool(data.get("requires_name"))
     if state != "completion_required" or not tos_version:
         _status(
             "Xác nhận OTP xong nhưng không ra bước hoàn tất hồ "
@@ -1881,6 +1894,65 @@ def _try_register_completion_api(page, tos_version, token_box,
         _status(f"API hoàn tất hồ sơ OK (trả về: {keys}; chuyển tới: {nxt}).")
     _status("Đã hoàn tất hồ sơ qua API.")
     return data if isinstance(data, dict) else {}
+
+
+def _bootstrap_from_completion(page, completion, done_label):
+    """Đồng bộ phiên web từ kết quả API (register-completion hoặc
+    confirm-otp ở chế độ đăng nhập): gửi form bootstrap như trang
+    tự làm để trình duyệt nhận cookie phiên; không có token phiên
+    thì mở thẳng redirect_to server trả về."""
+    frl_token = None
+    session = completion.get("auth_meta_session")
+    if isinstance(session, dict):
+        frl_token = session.get("frl_access_token")
+    redirect_to = completion.get("redirect_to")
+    if isinstance(frl_token, str) and frl_token:
+        _status(f"{done_label} — đang đồng bộ phiên web...")
+        bootstrapped = _bootstrap_session(page, frl_token, redirect_to)
+    else:
+        _status(
+            f"{done_label} nhưng không có token phiên — mở thẳng "
+            "trang đích thay thế."
+        )
+        bootstrapped = False
+    if not bootstrapped:
+        path = _resolve_redirect_path(redirect_to)
+        _status(f"{done_label} — tới bước tiếp theo ({path})...")
+        page.goto(
+            SIGNUP_URL.rstrip("/") + path,
+            wait_until="domcontentloaded",
+            timeout=PAGE_TIMEOUT_MS,
+        )
+
+
+def _wait_for_profile_or_card(page, timeout_ms=15000):
+    """Chờ một trong hai màn hình sau khi mã OTP đã xác nhận ở
+    chế độ đăng nhập: form hồ sơ ("profile" — tài khoản Meta
+    chưa hoàn tất hồ sơ Muse, cần điền) hoặc bước nhập thẻ
+    ("card" — tài khoản đã đăng ký xong, đi thẳng tới thẻ).
+    Trả về None khi hết giờ mà không thấy màn hình nào.
+    """
+    card_markers = (
+        "card number",
+        "card details",
+        "enter your card",
+        "add a card",
+        "payment method",
+    )
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return None
+        if _profile_form_present(page):
+            return "profile"
+        try:
+            body = page.locator("body").inner_text(timeout=2000).lower()
+        except Exception:
+            body = ""
+        if any(marker in body for marker in card_markers):
+            return "card"
+        page.wait_for_timeout(500)
+    return None
 
 
 def _try_fill_profile_form(page, timeout_ms=20000):
@@ -2465,6 +2537,61 @@ def _meta_checkpoint_visible(page):
         return False
 
 
+def _meta_selfie_page_visible(page):
+    """Đang ở trang up selfie không: ô file đang HIỆN, hoặc tiêu
+    đề "Upload a verification selfie" / vùng "Upload image" đang
+    hiện. Ô file có trong DOM nhưng ẨN thì CHƯA đủ làm tín hiệu
+    — Meta có thể đã render sẵn bước selfie trong lúc còn ở bước
+    CAPTCHA; ô ẩn chỉ được dùng lúc UP (set_input_files đặt được
+    file vào ô ẩn), không dùng làm tín hiệu trang. Tín hiệu này
+    giữ cho nhánh selfie không bấm nhầm nút Continue của bước
+    khác (OTP, checkpoint)."""
+    try:
+        file_input = page.locator('input[type="file"]')
+        if file_input.count() and file_input.first.is_visible():
+            return True
+    except Exception:
+        pass
+    for label in ("Upload a verification selfie", "Upload image"):
+        try:
+            found = page.get_by_text(label, exact=True)
+            if found.count() and found.first.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _meta_upload_selfie(page, selfie_path):
+    """Up ảnh selfie lên trang Meta.
+
+    Trả (True, "") khi đã đặt file vào ô up (ô file bị ẩn vẫn
+    đặt được — set_input_files không cần ô hiện). Không có ô
+    file trong DOM thì bấm vùng "Upload image" để mở hộp chọn
+    file của hệ thống rồi đặt file vào đó. Trả (False, lý do)
+    khi không up được — phía gọi thử lại ở lần lặp sau (người
+    dùng có thể up tay trong lúc chờ).
+    """
+    try:
+        file_input = page.locator('input[type="file"]')
+        if file_input.count() > 0:
+            _status("Meta: đang up ảnh selfie...")
+            file_input.first.set_input_files(str(selfie_path))
+            return True, ""
+    except Exception as error:
+        return False, f"ô up file lỗi ({_short_error(error)})"
+    try:
+        with page.expect_file_chooser(timeout=5000) as chooser_info:
+            page.get_by_text("Upload image", exact=True).click(
+                timeout=5000
+            )
+        _status("Meta: đang up ảnh selfie...")
+        chooser_info.value.set_files(str(selfie_path))
+        return True, ""
+    except Exception:
+        return False, "không thấy ô up ảnh"
+
+
 def _meta_finish_after_otp(page, api_key, selfie_path):
     """Sau bước OTP: xử lý CAPTCHA + selfie rồi đợi vào tài khoản.
 
@@ -2473,15 +2600,22 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     CAPTCHA hiện ngay sau OTP. Sau CAPTCHA là bước up ảnh
     selfie, rồi mới vào tài khoản. Vòng lặp thăm dò lần lượt:
     trang lỗi ứng dụng (tải lại) → đã đăng nhập chưa → có
-    checkpoint "Confirm you're human" không (bấm Continue để
-    hiện CAPTCHA) → có CAPTCHA chưa giải không (giải qua
-    CapSolver; đã giải rồi thì chỉ bấm tiếp, không giải lại)
-    → có ô up selfie không → có phải về trang chủ không (bấm
-    Log in lại). Hết giờ thì lỗi rõ kèm URL hiện tại để chụp
-    màn hình bổ sung.
+    CAPTCHA chưa giải không (giải qua CapSolver; đã giải rồi
+    thì chỉ bấm tiếp, không giải lại) → có checkpoint
+    "Confirm you're human" không (bấm Continue để hiện CAPTCHA
+    — tối đa 3 lần) → có ô up selfie không → có phải về trang
+    chủ không (bấm Log in lại). CAPTCHA kiểm tra TRƯỚC
+    checkpoint: ở màn checkpoint, ô captcha đã hiện cùng nút
+    Continue, và nút này bấm được nhưng không làm gì khi chưa
+    giải captcha — bấm Continue trước sẽ kẹt vòng lặp bấm mãi
+    mà không bao giờ tới bước giải (live 2026-11-13 11:14).
+    Hết giờ thì lỗi rõ kèm URL hiện tại để chụp màn hình bổ
+    sung.
     """
     deadline = time.monotonic() + META_POST_OTP_TIMEOUT_SECONDS
     selfie_done = False
+    selfie_uploaded = False
+    selfie_error_logged = False
     relogin_tried = False
     error_reloads = 0
     # Loại CAPTCHA đã giải xong: widget vẫn nằm trên trang sau
@@ -2489,6 +2623,7 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     # hiện lại — KHÔNG giải lại (tốn tiền), chỉ thử bấm tiếp.
     captcha_solved = set()
     captcha_stuck = 0
+    checkpoint_clicks = 0
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError(
@@ -2515,17 +2650,8 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
             if _meta_logged_in(page):
                 return
             continue
-        if _meta_checkpoint_visible(page):
-            clicked = _meta_click_button(page, ("Continue",))
-            if clicked:
-                _status(
-                    "Meta: đã bấm Continue ở trang kiểm tra "
-                    "'Confirm you're human'."
-                )
-                page.wait_for_timeout(2000)
-                continue
-            # Không bấm được Continue (nút đã biến mất) -> rơi
-            # xuống kiểm tra CAPTCHA/selfie bên dưới.
+        # CAPTCHA trước checkpoint (xem docstring): ở màn
+        # checkpoint, ô captcha đã hiện cùng nút Continue.
         detected = capsolver.detect_captcha(page)
         if detected is not None and detected["kind"] not in captcha_solved:
             try:
@@ -2569,26 +2695,61 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                     "chuyển tiếp (nút Continue vẫn chưa bật) — hãy "
                     "chụp màn hình gửi lại để bổ sung cách xử lý."
                 )
-        if not selfie_done:
-            file_input = page.locator('input[type="file"]')
-            try:
-                visible = (
-                    file_input.count() and file_input.first.is_visible()
+        if _meta_checkpoint_visible(page):
+            # Không có CAPTCHA (đã kiểm tra ở trên) mà vẫn ở
+            # checkpoint: bấm Continue để hiện CAPTCHA. Bấm quá
+            # 3 lần mà trang không chuyển thì lỗi rõ thay vì
+            # bấm mãi tới hết 7 phút.
+            if checkpoint_clicks >= 3:
+                raise RuntimeError(
+                    "Đã bấm Continue 3 lần ở trang kiểm tra "
+                    "'Confirm you're human' nhưng trang không "
+                    "chuyển tiếp và không hiện CAPTCHA — hãy chụp "
+                    "màn hình gửi lại để bổ sung cách xử lý."
                 )
-            except Exception:
-                visible = False
-            if visible:
-                _status("Meta: đang up ảnh selfie...")
-                file_input.first.set_input_files(str(selfie_path))
-                selfie_done = True
-                page.wait_for_timeout(2000)
-                clicked = _meta_click_button(
-                    page, ("Continue", "Upload", "Confirm", "Submit")
+            clicked = _meta_click_button(page, ("Continue",))
+            if clicked:
+                checkpoint_clicks += 1
+                _status(
+                    "Meta: đã bấm Continue ở trang kiểm tra "
+                    "'Confirm you're human'."
                 )
-                if clicked:
-                    _status(f"Meta: đã bấm {clicked} sau khi up selfie.")
                 page.wait_for_timeout(2000)
                 continue
+            # Không bấm được Continue (nút đã biến mất) -> rơi
+            # xuống kiểm tra selfie bên dưới.
+        if not selfie_done and _meta_selfie_page_visible(page):
+            # Đang ở trang up selfie. Up file (nếu chưa up) rồi
+            # bấm nút xác nhận — nút có thể hiện muộn sau khi
+            # ảnh tải lên (live 2026-11-13: ảnh preview + nút
+            # Continue chỉ hiện sau khi up xong), nên thử lại ở
+            # các lần lặp sau thay vì bỏ qua. Nút xác nhận vẫn
+            # bấm dù file do người dùng up tay (ô file có thể đã
+            # biến mất khỏi DOM nhưng nút Continue vẫn hiện).
+            if not selfie_uploaded:
+                uploaded, reason = _meta_upload_selfie(
+                    page, selfie_path
+                )
+                if uploaded:
+                    selfie_uploaded = True
+                elif not selfie_error_logged:
+                    selfie_error_logged = True
+                    _status(
+                        "Meta: chưa up được ảnh selfie "
+                        f"({reason}) — đang chờ ô up ảnh hiện "
+                        "(bạn có thể up tay trong lúc chờ)."
+                    )
+            page.wait_for_timeout(1500)
+            clicked = _meta_click_button(
+                page, ("Continue", "Confirm", "Submit")
+            )
+            if clicked:
+                selfie_done = True
+                _status(f"Meta: đã bấm {clicked} sau khi up selfie.")
+                page.wait_for_timeout(2000)
+            else:
+                page.wait_for_timeout(2000)
+            continue
         if not relogin_tried:
             login = page.get_by_role("button", name="Log in", exact=True)
             candidates = _in_viewport_candidates(
