@@ -341,12 +341,13 @@ gave it, its limit, its usage count and its status.
 one card per line, in this format:
 
 ```
-số thẻ|MM/YY|CVV|ZIP|nhãn
+số thẻ|MM/YY|CVV
 ```
 
-ZIP and the label may be left out (ZIP defaults to 10001, the label
-auto-numbers as Thẻ 1, Thẻ 2, …). Example line:
-`4111111111111111|12/28|123|10001|Thẻ chính`. **Nhập kho thẻ** stores
+ZIP defaults to 10001 and the label auto-numbers as Thẻ 1, Thẻ 2, …;
+ZIP and the label can also be given as 4th and 5th fields
+(`số thẻ|MM/YY|CVV|ZIP|nhãn`). Example line:
+`4111111111111111|12/28|123`. **Nhập kho thẻ** stores
 each valid line straight into Credential Manager. Lines that fail are
 reported by line number only (e.g. "dòng 3: số thẻ không hợp lệ") —
 the line content and card digits are never shown or logged — and the

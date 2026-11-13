@@ -3376,69 +3376,65 @@ def _meta_click_birthday_continue(page, birth_date, meta_password):
 def _is_page_load_error(error):
     """Lỗi tải trang ở bước page.goto mở meta.ai — cùng lớp với
     net::ERR_HTTP_RESPONSE_CODE_FAILURE trong log của chủ tool
-    (2026-11-13 16:55).
+    (2026-11-13 16:55) và HTTP ERROR 407 (lỗi xác thực proxy,
+    ảnh chụp màn hình của chủ tool 2026-11-13).
 
     Playwright báo lỗi goto dạng "Page.goto: net::ERR_... at
-    <url>" hoặc "Page.goto: Timeout ... exceeded.". Chỉ nhận
-    đúng lớp lỗi điều hướng này, không nhận lỗi khác (trang đã
-    đóng, lỗi ứng dụng...) — các lỗi khác vẫn thử lại đủ 5 lần
-    như cũ.
+    <url>" hoặc "Page.goto: Timeout ... exceeded.". Riêng 407
+    có khi hiện dạng "HTTP ERROR 407" (không có mã net::ERR_)
+    hoặc proxy trả thẳng response 407 mà goto không raise —
+    trường hợp sau _open_meta_ai tự tạo lỗi cùng dạng để nhận
+    diện. Chỉ nhận đúng lớp lỗi điều hướng này, không nhận lỗi
+    khác (trang đã đóng, lỗi ứng dụng...).
     """
     first = _short_error(error)
     if "Page.goto:" not in first:
         return False
-    return "net::ERR_" in first or "Timeout" in first or "timeout" in first
+    return (
+        "net::ERR_" in first
+        or "407" in first
+        or "ERR_PROXY_AUTH" in first
+        or "Timeout" in first
+        or "timeout" in first
+    )
 
 
 def _open_meta_ai(page):
     """Mở meta.ai, thử lại tối đa 5 lần như cũ.
 
-    Quy tắc mới (2026-11-13, theo yêu cầu của chủ tool): lỗi
-    tải trang ở bước page.goto (cùng lớp với
-    net::ERR_HTTP_RESPONSE_CODE_FAILURE) mà gặp 2 lần liên tiếp
-    thì dừng thử lại ngay và báo PROXY_LOAD_FAIL — lượt chạy đổi
-    proxy và đưa proxy này vào kho proxy lỗi. Một lần lỗi đơn lẻ
-    không đánh dấu proxy hỏng. Các lỗi khác vẫn thử lại đủ 5 lần
-    như cũ.
+    Quy tắc strike (2026-11-13, chủ tool sửa lại — "không
+    phải" quy tắc bỏ proxy sau 2 lần thử): một lượt chạy
+    helper mở meta.ai, thử lại tối đa 5 lần trên cùng một
+    proxy. Nếu cả 5 lần đều lỗi tải trang (HTTP 407,
+    ERR_HTTP_RESPONSE_CODE_FAILURE, hoặc cùng lớp lỗi điều
+    hướng Page.goto) thì báo PROXY_LOAD_FAIL — lượt chạy tính
+    1 strike cho proxy này. Đủ 2 strike (2 lượt chạy liên
+    tiếp đều hỏng hết 5 lần) mới bỏ proxy; strike 1 thì lượt
+    sau vẫn dùng đúng proxy đó. Một lần lỗi đơn lẻ không đánh
+    dấu gì — chỉ khi hết cả 5 lần thử mới tính strike.
     """
     goto_error = None
-    load_fail_streak = 0
     for attempt in range(_META_RELOADS_BEFORE_SELFIE + 1):
         try:
-            page.goto(
+            response = page.goto(
                 META_URL,
                 wait_until="domcontentloaded",
                 timeout=PAGE_TIMEOUT_MS,
             )
+            if response is not None and response.status == 407:
+                # Proxy trả 407 (Proxy Authentication Required):
+                # Chromium hiện trang lỗi "HTTP ERROR 407" mà
+                # goto có khi không raise — tự tạo lỗi cùng dạng
+                # Page.goto để đi đúng đường thử lại / strike.
+                raise RuntimeError(
+                    "Page.goto: HTTP ERROR 407 at https://www.meta.ai/"
+                )
             return
         except Exception as error:
             # Mở trang lần đầu lỗi (proxy sập tunnel, timeout...)
             # thì thử lại tối đa 5 lần (chủ trương 2026-11-13
             # 16:17) thay vì bỏ tài khoản ngay.
             goto_error = error
-            if _is_page_load_error(error):
-                load_fail_streak += 1
-                if load_fail_streak >= 2:
-                    # Proxy này không tải nổi meta.ai: báo tín
-                    # hiệu để lượt chạy đổi proxy + đưa vào kho
-                    # lỗi, thay vì đốt thêm 3 lần thử vô ích.
-                    # (Không in dòng proxy vào đây: dòng proxy
-                    # chứa user/password; lượt chạy đã biết proxy
-                    # đang dùng và tự ghi vào kho lỗi.)
-                    _status(
-                        "PROXY_LOAD_FAIL: mở meta.ai lỗi tải trang "
-                        "2 lần liên tiếp "
-                        f"({_short_error(error)}) — đổi proxy và "
-                        "đưa proxy này vào kho proxy lỗi."
-                    )
-                    raise RuntimeError(
-                        "Không mở được meta.ai sau 2 lần thử liên "
-                        "tiếp (lỗi tải trang: "
-                        f"{_short_error(goto_error)}) — proxy này "
-                        "sẽ bị đổi và đưa vào kho proxy lỗi."
-                    )
-            else:
-                load_fail_streak = 0
             if attempt >= _META_RELOADS_BEFORE_SELFIE:
                 break
             _status(
@@ -3447,6 +3443,22 @@ def _open_meta_ai(page):
                 f"{attempt + 1}/{_META_RELOADS_BEFORE_SELFIE}..."
             )
             page.wait_for_timeout(2000)
+    if _is_page_load_error(goto_error):
+        # Hết 5 lần thử đều lỗi tải trang: 1 strike cho proxy
+        # này. Lượt chạy đọc tín hiệu này để đếm strike; đủ 2
+        # strike mới đổi proxy + đưa vào kho lỗi.
+        _status(
+            "PROXY_LOAD_FAIL: mở meta.ai lỗi tải trang hết "
+            f"{_META_RELOADS_BEFORE_SELFIE} lần thử "
+            f"({_short_error(goto_error)}) — tính 1 strike cho "
+            "proxy này (đủ 2 strike mới bỏ proxy)."
+        )
+        raise RuntimeError(
+            "Không mở được meta.ai sau "
+            f"{_META_RELOADS_BEFORE_SELFIE} lần thử lại "
+            f"(lỗi tải trang: {_short_error(goto_error)}) — tính "
+            "1 strike cho proxy này."
+        )
     raise RuntimeError(
         "Không mở được meta.ai sau "
         f"{_META_RELOADS_BEFORE_SELFIE} lần thử lại "

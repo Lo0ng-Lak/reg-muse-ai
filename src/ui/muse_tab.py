@@ -98,10 +98,11 @@ class MuseTab(ttk.Frame):
             vault_frame,
             text=(
                 "Nhập nhiều thẻ cùng lúc — dán danh sách vào ô dưới, mỗi "
-                "dòng một thẻ, định dạng: số thẻ|MM/YY|CVV|ZIP|nhãn. "
-                "ZIP và nhãn có thể bỏ trống (ZIP mặc định 10001, nhãn "
-                "tự đặt Thẻ 1, Thẻ 2…). Dòng sai được báo theo số dòng, "
-                "không hiện số thẻ. Ô dán được xoá ngay sau khi nhập."
+                "dòng một thẻ, định dạng: số thẻ|MM/YY|CVV. "
+                "ZIP mặc định 10001, nhãn tự đặt Thẻ 1, Thẻ 2…; có thể "
+                "thêm ZIP và nhãn làm trường thứ 4 và thứ 5 "
+                "(số thẻ|MM/YY|CVV|ZIP|nhãn). Dòng sai được báo theo số "
+                "dòng, không hiện số thẻ. Ô dán được xoá ngay sau khi nhập."
             ),
             wraplength=700,
         ).grid(row=1, column=0, sticky="w", pady=(8, 4))
@@ -243,8 +244,9 @@ class MuseTab(ttk.Frame):
     def _import_bulk_cards(self):
         """Nhập nhiều thẻ cùng lúc từ ô dán (mỗi dòng một thẻ).
 
-        Định dạng dòng: số thẻ|MM/YY|CVV|ZIP|nhãn (ZIP và nhãn
-        có thể bỏ trống). Thẻ hợp lệ ghi thẳng vào Windows
+        Định dạng dòng: số thẻ|MM/YY|CVV (ZIP mặc định 10001,
+        nhãn tự đặt; có thể thêm ZIP và nhãn làm trường thứ 4
+        và thứ 5). Thẻ hợp lệ ghi thẳng vào Windows
         Credential Manager (mỗi thẻ một mục riêng). Ô dán được
         XOÁ NGAY sau khi đọc — dù thành công hay lỗi — để số
         thẻ không nằm lại trên màn hình; dòng lỗi chỉ báo theo
@@ -258,7 +260,7 @@ class MuseTab(ttk.Frame):
             messagebox.showwarning(
                 "Chưa có thẻ để nhập",
                 "Dán danh sách thẻ vào ô trên — mỗi dòng một thẻ, "
-                "định dạng: số thẻ|MM/YY|CVV|ZIP|nhãn.",
+                "định dạng: số thẻ|MM/YY|CVV.",
             )
             return
         try:

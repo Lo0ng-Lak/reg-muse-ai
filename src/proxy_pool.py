@@ -33,8 +33,9 @@ def _line_flags_waitlist(line):
     return line.startswith("WAITLIST:")
 
 def _line_flags_load_fail(line):
-    """Dòng tín hiệu từ browser_helper: mở meta.ai lỗi tải trang
-    2 lần liên tiếp trên cùng một proxy."""
+    """Dòng tín hiệu từ browser_helper: một lượt chạy helper mở
+    meta.ai lỗi tải trang hết 5 lần thử trên cùng một proxy
+    (1 strike cho proxy đó; đủ 2 strike mới bỏ proxy)."""
     return line.startswith("PROXY_LOAD_FAIL")
 
 def _proxy_key(value):
@@ -131,6 +132,14 @@ class _ProxyRotation:
     báo proxy bị Meta chặn tạo tài khoản — thì tài khoản sau dùng
     proxy kế tiếp; hết kho thì quay vòng lại từ đầu. Hạn mức tính
     theo lượt thử, bất kể thành công hay thất bại.
+
+    Strike lỗi tải trang (2026-11-13): một lượt chạy helper mở
+    meta.ai lỗi hết 5 lần thử = 1 strike cho proxy đó
+    (record_load_fail_strike). Đủ 2 strike liên tiếp mới bỏ
+    proxy; mở được meta.ai thì xoá strike
+    (clear_load_fail_strikes). Bộ đếm chỉ sống trong một lượt
+    chạy (tạo mới mỗi lần _run_lane/_run_login_lane chạy), khoá
+    theo nguyên dòng proxy qua _proxy_key.
     """
 
     def __init__(self, pool, per_proxy):
@@ -140,6 +149,22 @@ class _ProxyRotation:
         self.used = 0
         self.cycles = 0
         self.retired = set()
+        self.load_fail_strikes = {}
+
+    def record_load_fail_strike(self, line):
+        """Ghi 1 strike cho proxy (một lượt chạy helper mở meta.ai
+        lỗi tải trang hết 5 lần thử). Trả về tổng số strike của
+        proxy này trong lượt chạy."""
+        key = _proxy_key(line)
+        strikes = self.load_fail_strikes.get(key, 0) + 1
+        self.load_fail_strikes[key] = strikes
+        return strikes
+
+    def clear_load_fail_strikes(self, line):
+        """Xoá strike của proxy — gọi khi một lượt chạy helper mở
+        được meta.ai (proxy đã chứng minh còn tải được trang):
+        strike chỉ tính các lần hỏng LIÊN TIẾP."""
+        self.load_fail_strikes.pop(_proxy_key(line), None)
 
     def current(self):
         return self.cursor, self.pool[self.cursor]

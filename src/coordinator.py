@@ -621,6 +621,12 @@ class Coordinator:
                     settings.meta,
                     card_id=card.card_id if card is not None else "",
                 )
+                if settings.meta and not load_failed:
+                    # Mở được meta.ai (dù tài khoản này thành hay
+                    # bại ở bước sau): proxy đã chứng minh còn tải
+                    # được trang — xoá strike cũ, strike chỉ tính
+                    # các lần hỏng LIÊN TIẾP.
+                    rotation.clear_load_fail_strikes(line)
                 if helper_ok:
                     saved = False
                     save_error = None
@@ -746,16 +752,39 @@ class Coordinator:
                             "đổi sang proxy kế từ tài khoản sau.",
                         )
                     )
+                # Strike lỗi tải trang (2026-11-13): một lượt chạy
+                # helper mở meta.ai lỗi hết 5 lần thử = 1 strike.
+                # Đủ 2 strike (2 lượt chạy liên tiếp đều hỏng) mới
+                # bỏ proxy; strike 1 thì lần sau vẫn dùng đúng
+                # proxy này (không retire, không xoay theo hạn
+                # mức) để lấy strike 2 nếu vẫn hỏng.
+                load_fail_strikes = 0
                 if load_failed and not settings.direct:
+                    load_fail_strikes = rotation.record_load_fail_strike(line)
+                    if load_fail_strikes >= 2:
+                        strike_note = "hỏng lần 2/2, bỏ proxy này."
+                    else:
+                        strike_note = (
+                            "hỏng lần 1/2, lần sau vẫn dùng proxy này."
+                        )
                     self.events.put(
                         (
                             "log",
-                            f"{lane_tag}Proxy #{proxy_index + 1} mở meta.ai lỗi "
-                            "tải trang 2 lần liên tiếp — đổi sang proxy kế "
-                            "từ tài khoản sau.",
+                            f"{lane_tag}Proxy #{proxy_index + 1} "
+                            f"({proxy_pool._proxy_display(line)}) mở meta.ai "
+                            "lỗi tải trang hết 5 lần thử — "
+                            f"{strike_note}",
                         )
                     )
-                if burned or waitlisted or load_failed:
+                drop_proxy = burned or waitlisted or (
+                    load_failed and load_fail_strikes >= 2
+                )
+                hold_proxy = (
+                    load_failed
+                    and not settings.direct
+                    and load_fail_strikes < 2
+                )
+                if drop_proxy or (settings.direct and load_failed):
                     if settings.direct:
                         # IP máy là IP duy nhất của cả lượt chạy:
                         # không có proxy khác để đổi, chạy tiếp
@@ -767,7 +796,7 @@ class Coordinator:
                             else "rơi vào 'Join the waitlist' "
                             "(khu vực không hỗ trợ)"
                             if waitlisted
-                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
+                            else "mở meta.ai lỗi tải trang (hết 5 lần thử)"
                         )
                         self.events.put(
                             (
@@ -783,17 +812,18 @@ class Coordinator:
                         # Proxy này hỏng ở cấp IP: Meta chặn tạo tài
                         # khoản, hoặc IP thoát rơi vào khu vực chưa
                         # hỗ trợ (waitlist), hoặc không tải nổi
-                        # meta.ai 2 lần liên tiếp. Đưa vào kho proxy
-                        # lỗi để loại khỏi mọi đợt chạy sau, và loại
-                        # ngay trong đợt này (kể cả khi xoay vòng
-                        # quay lại).
+                        # meta.ai hết 5 lần thử ở 2 lượt chạy liên
+                        # tiếp. Đưa vào kho proxy lỗi để loại khỏi
+                        # mọi đợt chạy sau, và loại ngay trong đợt
+                        # này (kể cả khi xoay vòng quay lại).
                         reason = (
                             "bị Meta chặn tạo tài khoản"
                             if burned
                             else "bị 'Join the waitlist' (khu vực "
                             "không hỗ trợ)"
                             if waitlisted
-                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
+                            else "mở meta.ai lỗi tải trang hết 5 lần thử "
+                            "(hỏng lần 2/2)"
                         )
                         if self._mark_proxy_bad(line):
                             self.events.put(
@@ -806,7 +836,7 @@ class Coordinator:
                                 )
                             )
                         rotation.retire_current()
-                else:
+                elif not hold_proxy:
                     rotation.advance_after_account(burned=burned)
                 if (share == 0 or index < share) and not self.stop_event.is_set():
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
@@ -1041,6 +1071,11 @@ class Coordinator:
                         card_id=card.card_id if card is not None else "",
                     )
                 )
+                if not load_failed:
+                    # Đăng nhập Muse luôn mở meta.ai: mở được thì
+                    # proxy còn tốt — xoá strike cũ, strike chỉ
+                    # tính các lần hỏng LIÊN TIẾP.
+                    rotation.clear_load_fail_strikes(line)
                 if helper_ok:
                     saved = False
                     save_error = None
@@ -1134,16 +1169,39 @@ class Coordinator:
                             "đổi sang proxy kế từ tài khoản sau.",
                         )
                     )
+                # Strike lỗi tải trang (2026-11-13): một lượt chạy
+                # helper mở meta.ai lỗi hết 5 lần thử = 1 strike.
+                # Đủ 2 strike (2 lượt chạy liên tiếp đều hỏng) mới
+                # bỏ proxy; strike 1 thì lần sau vẫn dùng đúng
+                # proxy này (không retire, không xoay theo hạn
+                # mức) để lấy strike 2 nếu vẫn hỏng.
+                load_fail_strikes = 0
                 if load_failed and not settings.direct:
+                    load_fail_strikes = rotation.record_load_fail_strike(line)
+                    if load_fail_strikes >= 2:
+                        strike_note = "hỏng lần 2/2, bỏ proxy này."
+                    else:
+                        strike_note = (
+                            "hỏng lần 1/2, lần sau vẫn dùng proxy này."
+                        )
                     self.events.put(
                         (
                             "log",
-                            f"{lane_tag}Proxy #{proxy_index + 1} mở meta.ai lỗi "
-                            "tải trang 2 lần liên tiếp — đổi sang proxy kế "
-                            "từ tài khoản sau.",
+                            f"{lane_tag}Proxy #{proxy_index + 1} "
+                            f"({proxy_pool._proxy_display(line)}) mở meta.ai "
+                            "lỗi tải trang hết 5 lần thử — "
+                            f"{strike_note}",
                         )
                     )
-                if burned or waitlisted or load_failed:
+                drop_proxy = burned or waitlisted or (
+                    load_failed and load_fail_strikes >= 2
+                )
+                hold_proxy = (
+                    load_failed
+                    and not settings.direct
+                    and load_fail_strikes < 2
+                )
+                if drop_proxy or (settings.direct and load_failed):
                     if settings.direct:
                         reason = (
                             "bị Meta chặn đăng nhập"
@@ -1151,7 +1209,7 @@ class Coordinator:
                             else "rơi vào 'Join the waitlist' "
                             "(khu vực không hỗ trợ)"
                             if waitlisted
-                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
+                            else "mở meta.ai lỗi tải trang (hết 5 lần thử)"
                         )
                         self.events.put(
                             (
@@ -1170,7 +1228,8 @@ class Coordinator:
                             else "bị 'Join the waitlist' (khu vực "
                             "không hỗ trợ)"
                             if waitlisted
-                            else "mở meta.ai lỗi tải trang 2 lần liên tiếp"
+                            else "mở meta.ai lỗi tải trang hết 5 lần thử "
+                            "(hỏng lần 2/2)"
                         )
                         if self._mark_proxy_bad(line):
                             self.events.put(
@@ -1183,7 +1242,7 @@ class Coordinator:
                                 )
                             )
                         rotation.retire_current()
-                else:
+                elif not hold_proxy:
                     rotation.advance_after_account(burned=burned)
                 if index < len(rows) and not self.stop_event.is_set():
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
