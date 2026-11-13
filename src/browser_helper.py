@@ -3033,11 +3033,12 @@ def _meta_click_birthday_continue(page, birth_date, meta_password):
             states.append(f"{label}: {shown}")
         try:
             pwd = page.locator('input[type="password"]')
-            pwd_state = (
-                "đã điền"
-                if pwd.count() and pwd.first.input_value()
-                else "chưa điền"
-            )
+            if not pwd.count():
+                pwd_state = "không có ô"
+            elif pwd.first.input_value():
+                pwd_state = "đã điền"
+            else:
+                pwd_state = "chưa điền"
         except Exception:
             pwd_state = "không đọc được"
         try:
@@ -3058,7 +3059,7 @@ def _meta_click_birthday_continue(page, birth_date, meta_password):
             _select_birth_date(page, birth_date)
             try:
                 pwd_field = page.locator('input[type="password"]')
-                if pwd_field.count():
+                if pwd_field.count() and meta_password:
                     pwd_field.first.fill(meta_password)
             except Exception:
                 pass
@@ -3120,9 +3121,24 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     password_field = page.get_by_placeholder("Password")
     if not password_field.count():
         password_field = page.locator('input[type="password"]')
-    meta_password = _random_meta_password()
-    password_field.first.fill(meta_password)
-    _status("Meta: đã điền xong ngày sinh + mật khẩu, đang bấm Continue...")
+    meta_password = ""
+    if password_field.count():
+        meta_password = _random_meta_password()
+        password_field.first.fill(meta_password)
+        _status(
+            "Meta: đã điền xong ngày sinh + mật khẩu, "
+            "đang bấm Continue..."
+        )
+    else:
+        # Có tài khoản Meta không hỏi mật khẩu ở bước này
+        # (live 2026-11-13 14:37: form chỉ có ngày sinh,
+        # Continue đã bật) — không có ô thì bỏ qua, bấm
+        # Continue luôn. Code cũ chờ ô mật khẩu 45 giây dù
+        # form đã đủ nên đứng im (cũng là vụ 14:26).
+        _status(
+            "Meta: không có ô mật khẩu — bỏ qua, "
+            "đang bấm Continue..."
+        )
     _meta_click_birthday_continue(page, birth_date, meta_password)
     _status("Meta: đang xác nhận tạo tài khoản...")
     _meta_wait_visible(
