@@ -394,6 +394,12 @@ challenge there waits for you to solve it in the browser. The Meta
 flow solves its CAPTCHAs through CapSolver, a paid third-party
 solving service, using your own API key and balance.
 
+If Meta's page fails to open (proxy tunnel error, timeout) or shows
+an Application Error, the helper retries instead of dropping the
+account at once: up to 5 times before the selfie step (including
+the first page open), and up to 20 times after the selfie has been
+uploaded.
+
 ### Muse login with a Meta account (Đăng nhập Muse)
 
 The **Đăng nhập Muse** button (Muse.ai tab) logs into Muse with Meta
@@ -401,8 +407,10 @@ accounts you already registered: pick the Meta Excel file with
 **Chọn file…** (the path is kept in gitignored `meta_excel.txt`),
 and the run reads each row's Email Meta / Mật khẩu hộp thư /
 Nhà cung cấp columns — **no new mailbox is created**. Each account
-logs in with an email OTP, then submits the saved card at the card
-step, exactly like a signup from there on. After the OTP, Meta may
+logs in with an email OTP (Meta's "Check your email" screen does
+not auto-submit, so the helper clicks "Log in" after filling the
+code), then submits the saved card at the card step, exactly like
+a signup from there on. After the OTP, Meta may
 show a "Confirm you're human" checkpoint
 (auth.meta.com/checkpoints/...) — the helper clicks Continue and
 solves the CAPTCHA through CapSolver (using the key saved on the
@@ -423,7 +431,7 @@ the next run skips it. (Muse accounts sign in with an email OTP, so
 there is no Muse password to save.) No invite
 code is redeemed in login mode. The run uses the Muse.ai tab's proxy
 pool / VPN mode, lane count and account target (0 = log in all
-pending rows). The card cap is not enforced in login runs. The
+pending rows). The
 Muse.ai tab has no Temp mail row — the mail comes from the Meta file
 (the old direct signup, **Bắt đầu đăng ký**, still creates fresh
 tempmail.plus mailboxes).

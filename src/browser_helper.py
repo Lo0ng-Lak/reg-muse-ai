@@ -44,6 +44,11 @@ CAPSOLVER_KEY_FIELD = "api_key"
 # Thời gian chờ tối đa cho chặng sau OTP trong luồng Meta
 # (CAPTCHA + selfie + vào tài khoản): 7 phút.
 META_POST_OTP_TIMEOUT_SECONDS = 420
+# Tải lại trang khi Meta lỗi (chủ trương 2026-11-13 16:17): chưa
+# gửi mặt thì tối đa 5 lần (cả lúc mới mở trang lẫn khi đang làm
+# dở trước bước selfie); gửi mặt xong thì tối đa 20 lần.
+_META_RELOADS_BEFORE_SELFIE = 5
+_META_RELOADS_AFTER_SELFIE = 20
 # API native của muse.ai (phần auth mà trang đăng ký tự gọi).
 # Chỉ gọi được TỪ TRONG trình duyệt (fetch cùng origin) — gọi
 # từ ngoài bằng curl bị 403 Forbidden ngay từ send-otp (đã thử
@@ -2549,22 +2554,35 @@ def _meta_click_login(page):
     locator = page.get_by_role("button", name="Log in", exact=True)
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
     attempts = 0
+    error_reloads = 0
     while time.monotonic() < deadline:
         if _page_closed(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi bấm được Log in."
             )
         if _meta_app_error_visible(page):
-            # Lỗi ứng dụng ngay lúc mới vào (chưa làm gì: chưa nhập
-            # mail, chưa OTP) — bỏ tài khoản này luôn, không tải
-            # lại thử (chủ trương 2026-11-13: mới bắt đầu mà lỗi
-            # thì tắt đi, bắt đầu cái khác; chỉ sau khi đã up
-            # selfie mới cố tải lại cho bằng được).
-            raise RuntimeError(
-                "Trang meta.ai lỗi ứng dụng (Application Error) ngay "
-                "lúc mới vào — bỏ tài khoản này, chuyển sang tài "
-                "khoản khác."
+            # Lỗi ứng dụng lúc mới vào (chưa làm gì: chưa nhập
+            # mail, chưa OTP) — tải lại tối đa 5 lần (chủ trương
+            # 2026-11-13 16:17), hết 5 lần vẫn lỗi thì bỏ tài
+            # khoản này.
+            if error_reloads >= _META_RELOADS_BEFORE_SELFIE:
+                raise RuntimeError(
+                    "Trang meta.ai lỗi ứng dụng (Application Error) "
+                    "ngay lúc mới vào — đã tải lại "
+                    f"{_META_RELOADS_BEFORE_SELFIE} lần mà vẫn lỗi, "
+                    "bỏ tài khoản này."
+                )
+            error_reloads += 1
+            _status(
+                "Meta: vừa mở đã lỗi ứng dụng — tải lại trang "
+                f"(lần {error_reloads}/{_META_RELOADS_BEFORE_SELFIE})..."
             )
+            try:
+                page.reload(wait_until="domcontentloaded")
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            continue
         attempts += 1
         if _meta_testid_login(page):
             break
@@ -2904,32 +2922,30 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 "Cửa sổ Chromium đã đóng trước khi xong đăng ký Meta."
             )
         if _meta_app_error_visible(page):
-            if selfie_ever_uploaded:
-                # Đã up selfie rồi: tài khoản gần xong — tải lại
-                # tới khi trang hết lỗi, không giới hạn 3 lần (chỉ
-                # giới hạn bởi deadline của vòng sau-OTP). Tải lại
-                # làm mất trạng thái trang nên up lại ảnh từ đầu
-                # (file up lại không tốn gì; Meta có thể đã mất
-                # bản up trước khi trang sập).
-                selfie_uploaded = False
-                selfie_done = False
-                _status(
-                    "Meta: trang lỗi sau khi đã up selfie — tải lại "
-                    "trang (thử tới khi được), sẽ up lại ảnh..."
-                )
-                try:
-                    page.reload(wait_until="domcontentloaded")
-                except Exception:
-                    pass
-                page.wait_for_timeout(2000)
-                continue
-            if error_reloads >= 3:
+            # Tải lại khi trang lỗi (chủ trương 2026-11-13 16:17):
+            # chưa gửi mặt thì tối đa 5 lần, gửi mặt xong thì tối
+            # đa 20 lần. Tải lại làm mất trạng thái trang nên sau
+            # khi đã up selfie thì up lại ảnh từ đầu (file up lại
+            # không tốn gì; Meta có thể đã mất bản up trước khi
+            # trang sập).
+            max_reloads = (
+                _META_RELOADS_AFTER_SELFIE
+                if selfie_ever_uploaded
+                else _META_RELOADS_BEFORE_SELFIE
+            )
+            if error_reloads >= max_reloads:
                 raise RuntimeError(
                     "Trang Meta báo lỗi ứng dụng (Application Error) "
-                    "sau 3 lần tải lại."
+                    f"sau {max_reloads} lần tải lại."
                 )
             error_reloads += 1
-            _status("Meta: trang báo lỗi ứng dụng — tải lại trang...")
+            if selfie_ever_uploaded:
+                selfie_uploaded = False
+                selfie_done = False
+            _status(
+                "Meta: trang báo lỗi ứng dụng — tải lại trang "
+                f"(lần {error_reloads}/{max_reloads})..."
+            )
             try:
                 page.reload(wait_until="domcontentloaded")
             except Exception:
@@ -3080,7 +3096,12 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 )
                 if uploaded:
                     selfie_uploaded = True
-                    selfie_ever_uploaded = True
+                    if not selfie_ever_uploaded:
+                        # Gửi mặt xong: ngân sách tải lại mới (20
+                        # lần) tính từ lúc này, không trừ các lần
+                        # đã tải lại trước khi up mặt.
+                        error_reloads = 0
+                        selfie_ever_uploaded = True
                 elif not selfie_error_logged:
                     selfie_error_logged = True
                     _status(
@@ -3308,7 +3329,35 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
             "chọn lại ở app chính rồi chạy lại."
         )
     _status("Meta: đang mở meta.ai...")
-    page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+    goto_error = None
+    for attempt in range(_META_RELOADS_BEFORE_SELFIE + 1):
+        try:
+            page.goto(
+                META_URL,
+                wait_until="domcontentloaded",
+                timeout=PAGE_TIMEOUT_MS,
+            )
+            goto_error = None
+            break
+        except Exception as error:
+            # Mở trang lần đầu lỗi (proxy sập tunnel, timeout...)
+            # thì thử lại tối đa 5 lần (chủ trương 2026-11-13
+            # 16:17) thay vì bỏ tài khoản ngay.
+            goto_error = error
+            if attempt >= _META_RELOADS_BEFORE_SELFIE:
+                break
+            _status(
+                "Meta: mở meta.ai lỗi "
+                f"({_short_error(error)}) — thử lại lần "
+                f"{attempt + 1}/{_META_RELOADS_BEFORE_SELFIE}..."
+            )
+            page.wait_for_timeout(2000)
+    if goto_error is not None:
+        raise RuntimeError(
+            "Không mở được meta.ai sau "
+            f"{_META_RELOADS_BEFORE_SELFIE} lần thử lại "
+            f"({_short_error(goto_error)})."
+        )
     # Không chờ 6 giây kiểm tra lỗi ứng dụng trước khi bấm nữa
     # (tốn cố định 6 giây mỗi tài khoản): _meta_click_login đã
     # kiểm tra lỗi ở đầu mỗi vòng bấm và tự tải lại khi gặp.
@@ -3593,6 +3642,10 @@ def main():
             _status("Đã nhận mã xác minh, đang điền mã...")
             _fill_verification_code(page, code)
             page.wait_for_timeout(UI_SETTLE_MS)
+            # Màn OTP của Meta (đăng nhập bằng tài khoản Meta) không
+            # tự gửi — bấm "Log in" để nộp mã. Form của Muse.ai tự
+            # gửi nên hàm này ở đó không làm gì.
+            _submit_meta_login_code(page)
             # Form mã của Muse.ai TỰ GỬI ngay khi nhập đủ số: trang tự nhảy
             # sang bước hồ sơ mà không cần bấm Confirm. TUYỆT ĐỐI không bấm
             # nút "Confirm" nào khi form hồ sơ đã hiện mà chưa điền: nút
@@ -4238,6 +4291,38 @@ def _fill_verification_code(page, code):
     raise RuntimeError(
         "Form mã xác minh của Muse.ai không khớp với định dạng mã nhận được."
     )
+
+
+def _submit_meta_login_code(page):
+    """Bấm nút "Log in" trên màn OTP của Meta sau khi đã điền mã.
+
+    Đăng nhập Muse bằng tài khoản Meta có thể qua màn "Check
+    your email" của auth.meta.com thay vì form của Muse.ai — màn
+    đó KHÔNG tự gửi, phải bấm "Log in" sau khi điền mã (gặp live
+    2026-11-13 16:10). Chỉ bấm khi ô mã vẫn còn (form chưa tự
+    gửi) và nút "Log in" hiện + bấm được — form của Muse.ai tự
+    gửi nên không có nút đó, gọi hàm này ở đó là không làm gì.
+    """
+    fields = _verification_input(page)
+    if not fields:
+        return
+    try:
+        button = page.get_by_role("button", name="Log in", exact=True)
+    except Exception:
+        return
+    if button.count() == 0:
+        return
+    # Nút chỉ bật sau khi mã đã vào ô (React cập nhật trạng thái)
+    # — đợi tối đa ~5 giây.
+    for _ in range(10):
+        try:
+            if button.first.is_visible() and button.first.is_enabled():
+                button.first.click(timeout=5000)
+                _status("Đã bấm Log in sau khi điền mã.")
+                return
+        except Exception:
+            return
+        page.wait_for_timeout(500)
 
 
 def _show_error(title, detail):

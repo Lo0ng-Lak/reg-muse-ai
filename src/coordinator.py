@@ -917,6 +917,7 @@ class Coordinator:
                 if helper_ok:
                     saved = False
                     save_error = None
+                    mark_error = None
                     with shared_lock:
                         try:
                             storage._append_spreadsheet_row(
@@ -938,13 +939,26 @@ class Coordinator:
                         except RuntimeError as error:
                             shared["fail"] += 1
                             save_error = error
+                        if saved:
+                            # Đánh dấu DƯỚI KHÓA CHUNG: ghi sheet là
+                            # đọc-cả-file rồi ghi-lại, hai luồng cùng
+                            # ghi là luồng sau đè mất dấu của luồng
+                            # trước, lượt sau lấy trùng mail (live
+                            # 2026-11-13: 5 luồng chạy song song).
+                            try:
+                                storage._mark_meta_logged_in(
+                                    settings.meta_excel_path, address
+                                )
+                            except RuntimeError as error:
+                                mark_error = error
                     if saved:
-                        try:
-                            storage._mark_meta_logged_in(
-                                settings.meta_excel_path, address
+                        if mark_error is not None:
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{display}/{label_total}] {mark_error}",
+                                )
                             )
-                        except RuntimeError as error:
-                            self.events.put(("log", f"[{display}/{label_total}] {error}"))
                         self.events.put(
                             (
                                 "log",
