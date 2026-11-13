@@ -2988,6 +2988,78 @@ def _meta_pick_email_signup(page):
         page.wait_for_timeout(250)
 
 
+def _meta_click_birthday_continue(page, birth_date, meta_password):
+    """Bấm Continue ở trang ngày sinh của Meta.
+
+    Live 2026-11-13 14:26: các ô ngày sinh hiện đủ giá trị mà nút
+    Continue vẫn tắt trong DOM (aria-disabled) — code cũ cứ chờ
+    90 giây trong im lặng rồi mới lỗi. Bản này kiểm tra nút ngay:
+    chưa bật thì ghi log trạng thái từng ô + mật khẩu + nút, thử
+    chọn lại ngày sinh + mật khẩu một lần, vẫn tắt thì lỗi rõ kèm
+    trạng thái thay vì đứng im.
+    """
+    for attempt in range(2):
+        button = page.get_by_role("button", name="Continue", exact=True)
+        target = _first_in_viewport(page, button) or _first_visible(
+            button
+        )
+        if target is not None:
+            page.wait_for_timeout(UI_SETTLE_MS)
+            target.click(timeout=BUTTON_TIMEOUT_MS)
+            return
+        states = []
+        for label in ("Month", "Day", "Year"):
+            control = page.get_by_role(
+                "combobox", name=re.compile(f"^(Select )?{label}$", re.I)
+            )
+            try:
+                shown = (
+                    control.first.inner_text().strip().replace("\n", " ")
+                    if control.count()
+                    else "không thấy ô"
+                )
+            except Exception:
+                shown = "không đọc được"
+            states.append(f"{label}: {shown}")
+        try:
+            pwd = page.locator('input[type="password"]')
+            pwd_state = (
+                "đã điền"
+                if pwd.count() and pwd.first.input_value()
+                else "chưa điền"
+            )
+        except Exception:
+            pwd_state = "không đọc được"
+        try:
+            disabled = (
+                button.first.get_attribute("aria-disabled")
+                if button.count()
+                else "không thấy nút"
+            )
+        except Exception:
+            disabled = "không đọc được"
+        _status(
+            "Meta: nút Continue chưa bật sau khi điền xong "
+            f"({'; '.join(states)}; mật khẩu: {pwd_state}; "
+            f"aria-disabled: {disabled})."
+        )
+        if attempt == 0:
+            _status("Meta: chọn lại ngày sinh + mật khẩu một lần...")
+            _select_birth_date(page, birth_date)
+            try:
+                pwd_field = page.locator('input[type="password"]')
+                if pwd_field.count():
+                    pwd_field.first.fill(meta_password)
+            except Exception:
+                pass
+            page.wait_for_timeout(1000)
+            continue
+        raise RuntimeError(
+            "Nút Continue vẫn chưa bật sau khi điền ngày sinh + "
+            "mật khẩu (xem dòng trạng thái ở trên)."
+        )
+
+
 def _run_meta_registration(page, email, mailbox, existing_ids):
     """Đăng ký một tài khoản Meta ở meta.ai (chế độ --meta).
 
@@ -3038,12 +3110,10 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     password_field = page.get_by_placeholder("Password")
     if not password_field.count():
         password_field = page.locator('input[type="password"]')
-    password_field.first.fill(_random_meta_password())
-    _meta_click(
-        page,
-        page.get_by_role("button", name="Continue", exact=True),
-        "Continue",
-    )
+    meta_password = _random_meta_password()
+    password_field.first.fill(meta_password)
+    _status("Meta: đã điền xong ngày sinh + mật khẩu, đang bấm Continue...")
+    _meta_click_birthday_continue(page, birth_date, meta_password)
     _status("Meta: đang xác nhận tạo tài khoản...")
     _meta_wait_visible(
         page,
@@ -3598,6 +3668,7 @@ def _select_birth_date(page, birth_date):
                 _wait_for_birthday_value(
                     page, control, option_value, value, label
                 )
+                _status(f"Đã chọn {label} sinh: {value}.")
                 continue
             _click_when_ready(page, control, label)
         else:
@@ -3621,6 +3692,7 @@ def _select_birth_date(page, birth_date):
                 value=option_value, timeout=BUTTON_TIMEOUT_MS
             )
         _wait_for_birthday_value(page, control, option_value, value, label)
+        _status(f"Đã chọn {label} sinh: {value}.")
 
 
 def _wait_for_birthday_value(page, control, option_value, value, label):
