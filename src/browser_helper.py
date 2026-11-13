@@ -2592,6 +2592,88 @@ def _meta_upload_selfie(page, selfie_path):
         return False, "không thấy ô up ảnh"
 
 
+# Kẹt ở checkpoint mà không phát hiện được captcha quá từng này
+# giây thì ghi file chẩn đoán một lần (xem _meta_dump_captcha_state).
+_CAPTCHA_DUMP_AFTER_SECONDS = 60
+
+
+def _meta_dump_captcha_state(page):
+    """Ghi trạng thái phát hiện CAPTCHA ra file debug.
+
+    Dùng khi kẹt ở checkpoint mà detector không thấy captcha dù ô
+    captcha hiện rõ trên màn hình (live 2026-11-13 14:05): cần biết
+    widget có nằm trong document chính không (detector phải thấy)
+    hay nằm trong iframe lồng/shadow DOM (detector mù — phải quét
+    theo frame). Trả về tóm tắt 1 dòng để ghi log; chi tiết ghi
+    vào captcha_debug.txt cùng thư mục với accounts.xlsx. Không
+    bao giờ ném lỗi (chẩn đoán không được phá lượt chạy).
+    """
+    info = {
+        "url": "",
+        "iframes": [],
+        "frames": [],
+        "grecaptcha": "?",
+        "recaptcha_div": False,
+        "body": "",
+    }
+    try:
+        info["url"] = page.url
+    except Exception:
+        pass
+    try:
+        found = page.evaluate(
+            "() => ({"
+            " iframes: Array.from(document.querySelectorAll('iframe'))"
+            "  .map(f => f.src || ''),"
+            " grecaptcha: typeof window.grecaptcha,"
+            " recaptchaDiv: !!document.querySelector('.g-recaptcha'),"
+            " body: (document.body ? document.body.innerText : '')"
+            "  .slice(0, 300),"
+            "})"
+        )
+        if isinstance(found, dict):
+            info["iframes"] = found.get("iframes") or []
+            info["grecaptcha"] = found.get("grecaptcha") or "?"
+            info["recaptcha_div"] = bool(found.get("recaptchaDiv"))
+            info["body"] = found.get("body") or ""
+    except Exception:
+        pass
+    try:
+        info["frames"] = [f.url for f in page.frames]
+    except Exception:
+        pass
+    lines = [
+        f"URL: {info['url']}",
+        f"iframe trong document chính: {len(info['iframes'])}",
+    ]
+    for src in info["iframes"]:
+        lines.append(f"  - {src[:200]}")
+    lines.append(f"frame (page.frames): {len(info['frames'])}")
+    for url in info["frames"]:
+        lines.append(f"  - {url[:200]}")
+    lines.append(f"window.grecaptcha: {info['grecaptcha']}")
+    lines.append(
+        "div .g-recaptcha: "
+        f"{'có' if info['recaptcha_div'] else 'không'}"
+    )
+    lines.append(f"nội dung trang (300 ký tự đầu): {info['body']}")
+    try:
+        data_dir = Path.home() / "AppData" / "Local" / "MuseAIHelper"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "captcha_debug.txt").write_text(
+            "\n".join(lines), encoding="utf-8"
+        )
+    except Exception:
+        pass
+    return (
+        f"iframe chính: {len(info['iframes'])}, "
+        f"frame: {len(info['frames'])}, "
+        f"grecaptcha: {info['grecaptcha']}, "
+        "div .g-recaptcha: "
+        f"{'có' if info['recaptcha_div'] else 'không'}"
+    )
+
+
 def _meta_finish_after_otp(page, api_key, selfie_path):
     """Sau bước OTP: xử lý CAPTCHA + selfie rồi đợi vào tài khoản.
 
@@ -2624,6 +2706,8 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     captcha_solved = set()
     captcha_stuck = 0
     checkpoint_clicks = 0
+    checkpoint_seen_at = None
+    captcha_dump_done = False
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError(
@@ -2654,8 +2738,23 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
         # checkpoint, ô captcha đã hiện cùng nút Continue.
         detected = capsolver.detect_captcha(page)
         if detected is not None and detected["kind"] not in captcha_solved:
+            # Báo TRƯỚC khi giải: bước này chờ CapSolver 10–60 giây
+            # (tối đa 180 giây) mà trong lúc chờ log im lặng — nhìn
+            # như đứng yên (live 2026-11-13 11:36). Dòng này + nhịp
+            # 30 giây trong solve_task_full để biết tool còn làm việc.
+            _status(
+                f"Meta: phát hiện CAPTCHA ({detected['kind']}) — "
+                "đang gửi CapSolver giải, chờ tối đa "
+                f"{capsolver.SOLVE_TIMEOUT_SECONDS} giây..."
+            )
             try:
-                kind = capsolver.solve_detected(page, api_key, detected)
+                kind = capsolver.solve_detected(
+                    page, api_key, detected,
+                    on_progress=lambda s: _status(
+                        "Meta: vẫn đang chờ CapSolver giải CAPTCHA "
+                        f"({s}s)..."
+                    ),
+                )
             except (capsolver.CapSolverError, TimeoutError) as error:
                 raise RuntimeError(
                     "Giải CAPTCHA qua CapSolver lỗi: "
@@ -2700,6 +2799,25 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
             # checkpoint: bấm Continue để hiện CAPTCHA. Bấm quá
             # 3 lần mà trang không chuyển thì lỗi rõ thay vì
             # bấm mãi tới hết 7 phút.
+            if detected is None and not captcha_dump_done:
+                # Kẹt ở checkpoint quá lâu mà detector không thấy
+                # captcha: ghi file chẩn đoán một lần để biết
+                # widget nằm ở đâu (xem _meta_dump_captcha_state).
+                if checkpoint_seen_at is None:
+                    checkpoint_seen_at = time.monotonic()
+                elif (
+                    time.monotonic() - checkpoint_seen_at
+                    >= _CAPTCHA_DUMP_AFTER_SECONDS
+                ):
+                    captcha_dump_done = True
+                    summary = _meta_dump_captcha_state(page)
+                    _status(
+                        "Meta: ở checkpoint quá "
+                        f"{_CAPTCHA_DUMP_AFTER_SECONDS} giây mà "
+                        "không phát hiện được CAPTCHA — đã ghi "
+                        "captcha_debug.txt "
+                        f"({summary}); gửi file đó để chẩn đoán."
+                    )
             if checkpoint_clicks >= 3:
                 raise RuntimeError(
                     "Đã bấm Continue 3 lần ở trang kiểm tra "
@@ -2718,6 +2836,8 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 continue
             # Không bấm được Continue (nút đã biến mất) -> rơi
             # xuống kiểm tra selfie bên dưới.
+        else:
+            checkpoint_seen_at = None
         if not selfie_done and _meta_selfie_page_visible(page):
             # Đang ở trang up selfie. Up file (nếu chưa up) rồi
             # bấm nút xác nhận — nút có thể hiện muộn sau khi

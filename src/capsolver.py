@@ -163,15 +163,21 @@ def get_task_result(api_key, task_id):
     return data.get("status"), data.get("solution")
 
 
-def solve_task_full(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
+def solve_task_full(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS,
+                    on_progress=None, progress_every_seconds=30):
     """Tạo task rồi poll tới khi có solution đầy đủ (hoặc lỗi).
 
     Trả về dict solution (chứa token + có thể kèm recaptcha-ca-e
     / recaptcha-ca-t để đặt cookie). Hết giờ -> TimeoutError;
     API lỗi -> CapSolverError; task failed -> CapSolverError.
+    on_progress (nếu có) được gọi mỗi progress_every_seconds
+    giây với số giây đã chờ — để phía gọi in nhịp log trong lúc
+    chờ, tránh nhìn như tool đứng yên.
     """
     task_id = create_task(api_key, task)
-    deadline = time.monotonic() + timeout_seconds
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    next_progress = started + progress_every_seconds
     while True:
         status, solution = get_task_result(api_key, task_id)
         if status == "ready":
@@ -182,6 +188,9 @@ def solve_task_full(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
             )
         if status == "failed":
             raise CapSolverError("CapSolver giải thất bại (task failed).")
+        if on_progress is not None and time.monotonic() >= next_progress:
+            on_progress(int(time.monotonic() - started))
+            next_progress += progress_every_seconds
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 f"CapSolver chưa giải xong sau {timeout_seconds} giây."
@@ -474,11 +483,16 @@ def _set_solution_cookies(page, solution):
 
 
 def solve_detected(page, api_key, detected,
-                     timeout_seconds=SOLVE_TIMEOUT_SECONDS):
+                     timeout_seconds=SOLVE_TIMEOUT_SECONDS,
+                     on_progress=None):
     """Giải một CAPTCHA đã phát hiện bằng detect_captcha: tạo
     task, chờ solution đầy đủ, đặt cookie đi kèm (nếu có), chèn
-    token vào trang. Trả về kind đã giải."""
-    solution = solve_task_full(api_key, _task_for(detected), timeout_seconds)
+    token vào trang. Trả về kind đã giải. on_progress (nếu có)
+    được gọi định kỳ trong lúc chờ CapSolver (xem solve_task_full).
+    """
+    solution = solve_task_full(api_key, _task_for(detected),
+                               timeout_seconds,
+                               on_progress=on_progress)
     _task_type, token_keys = TASK_TYPES.get(
         detected["kind"], ("", ("gRecaptchaResponse", "token"))
     )
