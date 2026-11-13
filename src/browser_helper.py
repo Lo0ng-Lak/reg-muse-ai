@@ -2293,6 +2293,20 @@ def _meta_click_login(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi bấm được Log in."
             )
+        if _meta_app_error_visible(page):
+            # Trang sập SAU khi đã mở (lỗi React xuất hiện muộn):
+            # tải lại rồi thử tiếp vòng sau (giới hạn bởi deadline
+            # 90 giây của vòng bấm này).
+            _status(
+                "Meta: trang lỗi ứng dụng trong lúc chờ Log in — "
+                "tải lại trang..."
+            )
+            try:
+                page.reload(wait_until="domcontentloaded")
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            continue
         attempts += 1
         if _meta_testid_login(page):
             break
@@ -2413,13 +2427,20 @@ def _meta_app_error_visible(page):
 def _meta_reload_on_app_error(page, max_reloads=3):
     """Tải lại meta.ai nếu vừa mở đã gặp màn hình "Application
     Error" (React error boundary — live 2026-11-13, lỗi ngay lúc
-    mới vào trang, không phải lỗi ở bước sau). Chờ 2 giây sau
-    mỗi lần tải lại để React kịp vẽ lại (hoặc lỗi lại). Quá số
-    lần cho phép mà vẫn lỗi thì lỗi rõ.
+    mới vào trang, không phải lỗi ở bước sau). Lỗi React có thể
+    xuất hiện MUỘN (vài giây sau khi trang vẽ xong, nhất là qua
+    proxy chậm) nên thăm dò liên tục 6 giây mỗi lượt thay vì
+    kiểm tra một lần. Quá số lần cho phép mà vẫn lỗi thì lỗi rõ.
     """
     for attempt in range(max_reloads + 1):
-        page.wait_for_timeout(2000)
-        if not _meta_app_error_visible(page):
+        deadline = time.monotonic() + 6
+        error_seen = False
+        while time.monotonic() < deadline:
+            if _meta_app_error_visible(page):
+                error_seen = True
+                break
+            page.wait_for_timeout(500)
+        if not error_seen:
             return
         if attempt >= max_reloads:
             raise RuntimeError(
@@ -2453,7 +2474,8 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     selfie, rồi mới vào tài khoản. Vòng lặp thăm dò lần lượt:
     trang lỗi ứng dụng (tải lại) → đã đăng nhập chưa → có
     checkpoint "Confirm you're human" không (bấm Continue để
-    hiện CAPTCHA) → có CAPTCHA không (giải qua CapSolver)
+    hiện CAPTCHA) → có CAPTCHA chưa giải không (giải qua
+    CapSolver; đã giải rồi thì chỉ bấm tiếp, không giải lại)
     → có ô up selfie không → có phải về trang chủ không (bấm
     Log in lại). Hết giờ thì lỗi rõ kèm URL hiện tại để chụp
     màn hình bổ sung.
@@ -2462,6 +2484,11 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     selfie_done = False
     relogin_tried = False
     error_reloads = 0
+    # Loại CAPTCHA đã giải xong: widget vẫn nằm trên trang sau
+    # khi giải (ô tick đã đánh dấu) nên mỗi lần lặp đều phát
+    # hiện lại — KHÔNG giải lại (tốn tiền), chỉ thử bấm tiếp.
+    captcha_solved = set()
+    captcha_stuck = 0
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError(
@@ -2499,14 +2526,17 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 continue
             # Không bấm được Continue (nút đã biến mất) -> rơi
             # xuống kiểm tra CAPTCHA/selfie bên dưới.
-        try:
-            kind = capsolver.solve_page_captcha(page, api_key)
-        except (capsolver.CapSolverError, TimeoutError) as error:
-            raise RuntimeError(
-                "Giải CAPTCHA qua CapSolver lỗi: "
-                f"{_short_error(error)}"
-            )
-        if kind:
+        detected = capsolver.detect_captcha(page)
+        if detected is not None and detected["kind"] not in captcha_solved:
+            try:
+                kind = capsolver.solve_detected(page, api_key, detected)
+            except (capsolver.CapSolverError, TimeoutError) as error:
+                raise RuntimeError(
+                    "Giải CAPTCHA qua CapSolver lỗi: "
+                    f"{_short_error(error)}"
+                )
+            captcha_solved.add(detected["kind"])
+            captcha_stuck = 0
             _status(f"Meta: đã giải CAPTCHA ({kind}) qua CapSolver.")
             page.wait_for_timeout(1500)
             clicked = _meta_click_button(
@@ -2516,6 +2546,29 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 _status(f"Meta: đã bấm {clicked} sau CAPTCHA.")
             page.wait_for_timeout(2000)
             continue
+        if detected is not None:
+            # CAPTCHA đã giải rồi mà trang vẫn đứng yên (nút
+            # Continue chưa bật sau khi token vào): thử bấm lại,
+            # KHÔNG giải lại. Kẹt quá lâu thì lỗi rõ thay vì chờ
+            # hết 7 phút.
+            clicked = _meta_click_button(
+                page, ("Continue", "Verify", "Submit", "Confirm")
+            )
+            if clicked:
+                _status(
+                    f"Meta: đã bấm {clicked} sau CAPTCHA "
+                    "(đã giải trước đó)."
+                )
+                captcha_stuck = 0
+                page.wait_for_timeout(2000)
+                continue
+            captcha_stuck += 1
+            if captcha_stuck >= 6:
+                raise RuntimeError(
+                    "Đã giải CAPTCHA qua CapSolver nhưng trang không "
+                    "chuyển tiếp (nút Continue vẫn chưa bật) — hãy "
+                    "chụp màn hình gửi lại để bổ sung cách xử lý."
+                )
         if not selfie_done:
             file_input = page.locator('input[type="file"]')
             try:

@@ -20,7 +20,8 @@ Tài liệu API (đối chiếu 2026-11-13):
   -> {errorId: 0, status: "ready"|"processing", solution}
 - POST https://api.capsolver.com/getBalance {clientKey}
   -> {errorId: 0, balance}
-Loại task: ReCaptchaV2TaskProxyLess, HCaptchaTaskProxyless,
+Loại task: ReCaptchaV2TaskProxyLess,
+ReCaptchaV2EnterpriseTaskProxyLess, HCaptchaTaskProxyless,
 AntiTurnstileTaskProxyLess, FunCaptchaTaskProxyless.
 """
 
@@ -40,6 +41,14 @@ REQUEST_TIMEOUT_SECONDS = 30
 # dưới khoá token.
 TASK_TYPES = {
     "recaptcha2": ("ReCaptchaV2TaskProxyLess", ("gRecaptchaResponse", "token")),
+    # reCAPTCHA Enterprise (Meta dùng ở checkpoint "Confirm you're
+    # human", live 2026-11-13): ô tick giống v2 nhưng iframe là
+    # recaptcha/enterprise/anchor, token phải giải bằng task
+    # Enterprise riêng — task v2 thường không qua được.
+    "recaptcha2_enterprise": (
+        "ReCaptchaV2EnterpriseTaskProxyLess",
+        ("gRecaptchaResponse", "token"),
+    ),
     "hcaptcha": ("HCaptchaTaskProxyless", ("gRecaptchaResponse", "token")),
     "turnstile": ("AntiTurnstileTaskProxyLess", ("token", "gRecaptchaResponse")),
     "funcaptcha": ("FunCaptchaTaskProxyless", ("token", "gRecaptchaResponse")),
@@ -168,13 +177,23 @@ _DETECT_JS = """() => {
     const el = document.querySelector(sel);
     return el ? (el.getAttribute(attr) || "") : "";
   };
+  const frames = Array.from(document.querySelectorAll("iframe"));
+  // reCAPTCHA Enterprise trước: ô tick của nó cũng nằm trong
+  // div .g-recaptcha, nhưng iframe là enterprise/anchor — phải
+  // nhận ra Enterprise để giải bằng task Enterprise riêng.
+  for (const f of frames) {
+    const src = f.src || "";
+    if (src.includes("recaptcha/enterprise/anchor")) {
+      const m = src.match(/[?&]k=([^&]+)/);
+      if (m) return {kind: "recaptcha2_enterprise", sitekey: decodeURIComponent(m[1])};
+    }
+  }
   let key = pick(".g-recaptcha", "data-sitekey");
   if (key) return {kind: "recaptcha2", sitekey: key};
   key = pick(".h-captcha", "data-sitekey");
   if (key) return {kind: "hcaptcha", sitekey: key};
   key = pick(".cf-turnstile", "data-sitekey");
   if (key) return {kind: "turnstile", sitekey: key};
-  const frames = Array.from(document.querySelectorAll("iframe"));
   for (const f of frames) {
     const src = f.src || "";
     if (src.includes("recaptcha/api2/anchor")) {
@@ -199,7 +218,8 @@ def detect_captcha(page):
 
     Trả về {"kind", "sitekey", "website_url"} hoặc None nếu
     không thấy loại nào quen thuộc. kind là một trong:
-    recaptcha2, hcaptcha, turnstile, funcaptcha.
+    recaptcha2, recaptcha2_enterprise, hcaptcha, turnstile,
+    funcaptcha.
     """
     try:
         found = page.evaluate(_DETECT_JS)
@@ -239,7 +259,7 @@ _INJECT_JS = """([kind, token]) => {
     el.dispatchEvent(new Event("change", {bubbles: true}));
     return true;
   };
-  if (kind === "recaptcha2") {
+  if (kind === "recaptcha2" || kind === "recaptcha2_enterprise") {
     const ok = setField(document.getElementById("g-recaptcha-response"));
     const widget = document.querySelector(".g-recaptcha");
     const cb = widget && widget.getAttribute("data-callback");
@@ -273,18 +293,25 @@ def inject_token(page, kind, token):
         return False
 
 
+def solve_detected(page, api_key, detected,
+                     timeout_seconds=SOLVE_TIMEOUT_SECONDS):
+    """Giải một CAPTCHA đã phát hiện bằng detect_captcha: tạo
+    task, chờ token, chèn vào trang. Trả về kind đã giải."""
+    token = solve_task(api_key, _task_for(detected), timeout_seconds)
+    inject_token(page, detected["kind"], token)
+    return detected["kind"]
+
+
 def solve_page_captcha(page, api_key, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
     """Giải CAPTCHA trên trang (nếu có) qua CapSolver.
 
-    Trả về kind đã giải ("recaptcha2"/"hcaptcha"/"turnstile"/
-    "funcaptcha"), hoặc None khi trang không có CAPTCHA quen
-    thuộc nào. Lỗi giải (key sai, hết tiền, hết giờ) ném ra
-    ngoài để phía gọi quyết định (luồng Meta: tài khoản đó
-    thất bại, không chờ tay).
+    Trả về kind đã giải ("recaptcha2"/"recaptcha2_enterprise"/
+    "hcaptcha"/"turnstile"/"funcaptcha"), hoặc None khi trang
+    không có CAPTCHA quen thuộc nào. Lỗi giải (key sai, hết
+    tiền, hết giờ) ném ra ngoài để phía gọi quyết định (luồng
+    Meta: tài khoản đó thất bại, không chờ tay).
     """
     detected = detect_captcha(page)
     if detected is None:
         return None
-    token = solve_task(api_key, _task_for(detected), timeout_seconds)
-    inject_token(page, detected["kind"], token)
-    return detected["kind"]
+    return solve_detected(page, api_key, detected, timeout_seconds)
