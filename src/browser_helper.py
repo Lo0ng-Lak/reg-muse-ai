@@ -2399,6 +2399,51 @@ def _meta_fill_code(page, code):
     _fill_verification_code(page, code)
 
 
+def _meta_app_error_visible(page):
+    """Màn hình "Application Error" của Meta (React error
+    boundary, live 2026-11-13) — trang đã chết, chỉ tải lại
+    mới cứu được."""
+    try:
+        heading = page.get_by_text("Application Error", exact=True)
+        return heading.count() > 0 and heading.first.is_visible()
+    except Exception:
+        return False
+
+
+def _meta_reload_on_app_error(page, max_reloads=3):
+    """Tải lại meta.ai nếu vừa mở đã gặp màn hình "Application
+    Error" (React error boundary — live 2026-11-13, lỗi ngay lúc
+    mới vào trang, không phải lỗi ở bước sau). Chờ 2 giây sau
+    mỗi lần tải lại để React kịp vẽ lại (hoặc lỗi lại). Quá số
+    lần cho phép mà vẫn lỗi thì lỗi rõ.
+    """
+    for attempt in range(max_reloads + 1):
+        page.wait_for_timeout(2000)
+        if not _meta_app_error_visible(page):
+            return
+        if attempt >= max_reloads:
+            raise RuntimeError(
+                "Trang meta.ai báo lỗi ứng dụng (Application Error) "
+                f"sau {max_reloads} lần tải lại."
+            )
+        _status("Meta: vừa mở meta.ai đã lỗi ứng dụng — tải lại trang...")
+        try:
+            page.reload(wait_until="domcontentloaded")
+        except Exception:
+            pass
+
+
+def _meta_checkpoint_visible(page):
+    """Màn hình checkpoint "Confirm you're human to use your
+    account" (auth.meta.com/checkpoints/..., live 2026-11-13)
+    — bấm Continue thì mới hiện CAPTCHA thật."""
+    try:
+        heading = page.get_by_text("Confirm you're human")
+        return heading.count() > 0 and heading.first.is_visible()
+    except Exception:
+        return False
+
+
 def _meta_finish_after_otp(page, api_key, selfie_path):
     """Sau bước OTP: xử lý CAPTCHA + selfie rồi đợi vào tài khoản.
 
@@ -2406,7 +2451,9 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     hình đầu meta.ai — bấm Log in lại thì gặp CAPTCHA; (B)
     CAPTCHA hiện ngay sau OTP. Sau CAPTCHA là bước up ảnh
     selfie, rồi mới vào tài khoản. Vòng lặp thăm dò lần lượt:
-    đã đăng nhập chưa → có CAPTCHA không (giải qua CapSolver)
+    trang lỗi ứng dụng (tải lại) → đã đăng nhập chưa → có
+    checkpoint "Confirm you're human" không (bấm Continue để
+    hiện CAPTCHA) → có CAPTCHA không (giải qua CapSolver)
     → có ô up selfie không → có phải về trang chủ không (bấm
     Log in lại). Hết giờ thì lỗi rõ kèm URL hiện tại để chụp
     màn hình bổ sung.
@@ -2414,11 +2461,26 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     deadline = time.monotonic() + META_POST_OTP_TIMEOUT_SECONDS
     selfie_done = False
     relogin_tried = False
+    error_reloads = 0
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi xong đăng ký Meta."
             )
+        if _meta_app_error_visible(page):
+            if error_reloads >= 3:
+                raise RuntimeError(
+                    "Trang Meta báo lỗi ứng dụng (Application Error) "
+                    "sau 3 lần tải lại."
+                )
+            error_reloads += 1
+            _status("Meta: trang báo lỗi ứng dụng — tải lại trang...")
+            try:
+                page.reload(wait_until="domcontentloaded")
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            continue
         if _meta_logged_in(page):
             # Xác nhận lần hai sau 2 giây để loại lần đọc lúc
             # trang đang chuyển (nút Log in chưa kịp hiện lại).
@@ -2426,6 +2488,17 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
             if _meta_logged_in(page):
                 return
             continue
+        if _meta_checkpoint_visible(page):
+            clicked = _meta_click_button(page, ("Continue",))
+            if clicked:
+                _status(
+                    "Meta: đã bấm Continue ở trang kiểm tra "
+                    "'Confirm you're human'."
+                )
+                page.wait_for_timeout(2000)
+                continue
+            # Không bấm được Continue (nút đã biến mất) -> rơi
+            # xuống kiểm tra CAPTCHA/selfie bên dưới.
         try:
             kind = capsolver.solve_page_captcha(page, api_key)
         except (capsolver.CapSolverError, TimeoutError) as error:
@@ -2591,6 +2664,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         )
     _status("Meta: đang mở meta.ai...")
     page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
+    _meta_reload_on_app_error(page)
     _meta_click_login(page)
     _status("Meta: đang chọn đăng ký bằng email...")
     _meta_pick_email_signup(page)
