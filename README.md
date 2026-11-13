@@ -161,7 +161,8 @@ connection mode, temp-mail provider and target count:
 - **Muse.ai** tab: proxy pool in `proxies.txt`, bad proxies in
   `bad-proxies.txt` (the files from before — your existing pool carries
   over untouched), plus the card row, per-card limit and invite-code
-  chain. Accounts go to `accounts.xlsx`.
+  chain. The card-storage feature may be upgraded to a multi-card vault.
+  Accounts go to `accounts.xlsx`.
 - **Meta (meta.ai)** tab: proxy pool in `proxies_meta.txt`, bad proxies
   in `bad-proxies-meta.txt`, plus the CapSolver key and selfie image.
   Accounts go to `meta_accounts.xlsx`. See "Meta account registration"
@@ -323,7 +324,7 @@ suspect the VPN dropped). If the IP exits outside the US, the log
 warns you — but the run is **never blocked** by the check: a failed
 lookup or a non-US IP only logs a warning and the run continues.
 
-### Your card: entered once, kept in Windows Credential Manager
+### Card storage: current single-card mode, upgradeable to a multi-card vault
 
 The **Thẻ** row in the window takes a card number, expiry (MM/YY), CVV and
 ZIP. **Lưu thẻ** stores them in Windows Credential Manager — the same
@@ -334,6 +335,14 @@ reads it back from Credential Manager, fills the form, verifies the number
 landed intact, and clicks Confirm; if the fill fails for any reason, the
 run falls back to waiting for manual entry. **Xoá thẻ** removes the saved
 card. Leave the ZIP empty to use 10001.
+
+**Future upgrade option — multi-card storage vault:** The current single-card
+storage feature can be upgraded to a vault that holds multiple payment-card
+references, allows authorized users to add, view, select, and remove cards,
+and tracks their status. A `cards.txt` file may serve as an inventory of
+card identifiers; full card details should remain in secure storage rather
+than plaintext. This is an upgrade requirement, not a feature implemented
+in the current application.
 
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
 The Excel sheet contains mailbox passwords and live session cookies in
