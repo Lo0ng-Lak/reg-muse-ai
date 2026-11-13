@@ -6,6 +6,7 @@ coordinator mà không cần mở giao diện.
 
 import json
 import re
+import secrets
 import time
 from datetime import datetime
 
@@ -45,6 +46,18 @@ CARD_SERVICE = "MuseAIHelper:card"
 CARD_FIELDS = ("number", "expiry", "cvv", "zip")
 
 CARD_SUCCESS_COUNT_FIELD = "card_success_count"
+
+# Kho thẻ (nhiều thẻ): mỗi thẻ một mục riêng trong Windows
+# Credential Manager, tên dịch vụ là CARD_SERVICE_PREFIX + id
+# thẻ (id ngẫu nhiên, không phải số thẻ). Danh mục kho (id +
+# nhãn + giới hạn từng thẻ) và thẻ đang chọn tay nằm ở dịch vụ
+# riêng CARD_VAULT_INDEX_SERVICE — trong đó KHÔNG có chữ số
+# nào của thẻ; số lần dùng thành công của từng thẻ nằm trong
+# chính mục của thẻ đó (trường card_success_count).
+CARD_SERVICE_PREFIX = "MuseAIHelper:card:"
+CARD_VAULT_INDEX_SERVICE = "MuseAIHelper:cards"
+CARD_VAULT_INDEX_FIELD = "index"
+CARD_VAULT_ACTIVE_FIELD = "active"
 
 SPREADSHEET_HEADERS = [
     "Thời gian tạo",
@@ -625,6 +638,336 @@ def _delete_card_from_keyring():
             keyring.delete_password(CARD_SERVICE, field)
         except Exception:
             pass
+
+def _vault_service(card_id):
+    """Tên dịch vụ Credential Manager của một thẻ trong kho."""
+    return f"{CARD_SERVICE_PREFIX}{card_id}"
+
+def _new_card_id(existing_ids):
+    """Id thẻ mới: "card-" + 8 ký tự hex ngẫu nhiên, không trùng
+    với id đã có. Id này không suy ra được từ số thẻ."""
+    taken = set(existing_ids or ())
+    for _ in range(10):
+        candidate = "card-" + secrets.token_hex(4)
+        if candidate not in taken:
+            return candidate
+    raise RuntimeError("Không tạo được id thẻ mới (trùng lặp liên tục).")
+
+def _load_vault_index():
+    """Danh mục kho thẻ: list dict {"id", "label", "limit"} theo
+    thứ tự dùng (thẻ đầu dùng trước). Không có chữ số thẻ nào
+    trong danh mục. Lần đầu đọc mà kho trống thì thử nhập thẻ
+    đơn cũ (xem _migrate_legacy_card)."""
+    _migrate_legacy_card()
+    try:
+        raw = keyring.get_password(
+            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
+        )
+    except Exception:
+        raw = None
+    if not raw:
+        return []
+    try:
+        entries = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    cleaned = []
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            try:
+                limit = max(0, min(int(entry.get("limit") or 0), 100))
+            except (TypeError, ValueError):
+                limit = 0
+            cleaned.append(
+                {
+                    "id": str(entry["id"]),
+                    "label": str(entry.get("label") or "").strip()
+                    or "Thẻ",
+                    "limit": limit,
+                }
+            )
+    return cleaned
+
+def _save_vault_index(entries):
+    keyring.set_password(
+        CARD_VAULT_INDEX_SERVICE,
+        CARD_VAULT_INDEX_FIELD,
+        json.dumps(
+            [
+                {
+                    "id": str(entry["id"]),
+                    "label": str(entry.get("label") or "").strip(),
+                    "limit": max(0, min(int(entry.get("limit") or 0), 100)),
+                }
+                for entry in entries
+            ],
+            ensure_ascii=False,
+        ),
+    )
+
+def _load_vault_active():
+    """Id thẻ đang chọn tay ("" là tự động xoay theo thứ tự kho)."""
+    try:
+        value = keyring.get_password(
+            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_ACTIVE_FIELD
+        )
+    except Exception:
+        value = None
+    return (value or "").strip()
+
+def _save_vault_active(card_id):
+    keyring.set_password(
+        CARD_VAULT_INDEX_SERVICE, CARD_VAULT_ACTIVE_FIELD, card_id or ""
+    )
+
+def _load_vault_card(card_id):
+    """Thẻ trong kho theo id ({} nếu chưa có) — chỉ đọc từ
+    Credential Manager, cùng hình dạng với thẻ đơn cũ."""
+    service = _vault_service(card_id)
+    card = {}
+    for field in CARD_FIELDS:
+        try:
+            value = keyring.get_password(service, field)
+        except Exception:
+            value = None
+        if value:
+            card[field] = value
+    return card if card.get("number") else {}
+
+def _save_vault_card(card_id, card):
+    service = _vault_service(card_id)
+    for field in CARD_FIELDS:
+        keyring.set_password(service, field, card[field])
+
+def _delete_vault_card(card_id):
+    """Xoá một thẻ khỏi kho: mục Credential Manager của thẻ (cả
+    4 trường + bộ đếm), mục của nó trong danh mục kho, và lựa
+    chọn tay nếu đang chọn đúng thẻ này."""
+    service = _vault_service(card_id)
+    for field in CARD_FIELDS + (CARD_SUCCESS_COUNT_FIELD,):
+        try:
+            keyring.delete_password(service, field)
+        except Exception:
+            pass
+    entries = _load_vault_index()
+    kept = [entry for entry in entries if entry["id"] != card_id]
+    if len(kept) != len(entries):
+        _save_vault_index(kept)
+    if _load_vault_active() == card_id:
+        _save_vault_active("")
+
+def _load_vault_card_success_count(card_id):
+    """Số tài khoản thành công đã dùng thẻ này (0 nếu chưa có).
+
+    Chỉ là một con số đếm, không chứa chữ số nào của thẻ, và
+    được khóa theo id thẻ — không bao giờ theo số thẻ.
+    """
+    try:
+        value = keyring.get_password(
+            _vault_service(card_id), CARD_SUCCESS_COUNT_FIELD
+        )
+    except Exception:
+        value = None
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+def _save_vault_card_success_count(card_id, count):
+    try:
+        keyring.set_password(
+            _vault_service(card_id),
+            CARD_SUCCESS_COUNT_FIELD,
+            str(max(0, int(count))),
+        )
+    except Exception:
+        pass
+
+def _set_vault_card_limit(card_id, limit):
+    """Đặt giới hạn / thẻ cho một thẻ trong kho (0 = không giới
+    hạn, kẹp 0–100). Trả về True khi thẻ có trong kho."""
+    limit = max(0, min(int(limit), 100))
+    entries = _load_vault_index()
+    for entry in entries:
+        if entry["id"] == card_id:
+            entry["limit"] = limit
+            _save_vault_index(entries)
+            return True
+    return False
+
+def _load_vault():
+    """Toàn bộ kho thẻ cho giao diện: list dict {"id", "label",
+    "limit", "used"} theo thứ tự kho. Không có chữ số thẻ nào
+    trong kết quả — giao diện chỉ hiện nhãn + giới hạn + số lần
+    dùng. Thẻ đơn cũ (nếu có) được nhập vào kho ở lần đọc đầu
+    tiên (xem _migrate_legacy_card)."""
+    entries = _load_vault_index()
+    vault = []
+    for entry in entries:
+        vault.append(
+            {
+                "id": entry["id"],
+                "label": entry["label"],
+                "limit": entry["limit"],
+                "used": _load_vault_card_success_count(entry["id"]),
+            }
+        )
+    return vault
+
+def _parse_bulk_card_line(line, taken_labels, taken_numbers):
+    """Phân tích MỘT dòng nhập thẻ hàng loạt.
+
+    Định dạng dòng (phân cách bằng |):
+        số_thẻ|MM/YY|CVV|ZIP|nhãn
+    - Bắt buộc: số thẻ (12–19 chữ số, khoảng trắng trong số được
+      bỏ qua), hạn MM/YY (tháng 01–12), CVV (3–4 chữ số).
+    - Không bắt buộc: ZIP (mặc định 10001), nhãn (mặc định "Thẻ N").
+    Trả về (card_dict, None) khi hợp lệ, (None, lý_do) khi không —
+    lý_do chỉ nêu loại lỗi, KHÔNG bao giờ chứa chữ số thẻ hay nội
+    dung dòng. taken_labels / taken_numbers là tập nhãn và số thẻ
+    đã có (trong kho + trong đợt nhập này) để chặn trùng.
+    """
+    parts = [part.strip() for part in line.split("|")]
+    if len(parts) < 3:
+        return None, "thiếu trường (cần ít nhất số thẻ|MM/YY|CVV)"
+    if len(parts) > 5:
+        return None, "quá nhiều trường (tối đa 5: số thẻ|MM/YY|CVV|ZIP|nhãn)"
+    number = "".join(ch for ch in parts[0] if ch.isdigit())
+    expiry_digits = "".join(ch for ch in parts[1] if ch.isdigit())
+    cvv = "".join(ch for ch in parts[2] if ch.isdigit())
+    zip_code = (
+        "".join(ch for ch in parts[3] if ch.isdigit())
+        if len(parts) > 3 and parts[3]
+        else "10001"
+    )
+    if not 12 <= len(number) <= 19:
+        return None, "số thẻ không hợp lệ (cần 12–19 chữ số)"
+    if (
+        len(expiry_digits) != 4
+        or not 1 <= int(expiry_digits[:2]) <= 12
+    ):
+        return None, "hạn không hợp lệ (dạng MM/YY, tháng 01–12)"
+    if len(cvv) not in (3, 4):
+        return None, "CVV không hợp lệ (cần 3–4 chữ số)"
+    if len(zip_code) != 5:
+        return None, "ZIP không hợp lệ (cần 5 chữ số)"
+    if number in taken_numbers:
+        return None, "số thẻ đã có trong kho"
+    label = parts[4].strip() if len(parts) > 4 and parts[4] else ""
+    if label and label in taken_labels:
+        return None, "nhãn trùng với thẻ đã có"
+    card = {
+        "number": number,
+        "expiry": f"{expiry_digits[:2]}/{expiry_digits[2:]}",
+        "cvv": cvv,
+        "zip": zip_code,
+        "label": label,
+    }
+    return card, None
+
+def _import_bulk_cards(text):
+    """Nhập nhiều thẻ từ văn bản nhiều dòng vào kho (mỗi dòng một
+    thẻ, xem _parse_bulk_card_line để biết định dạng).
+
+    Thẻ hợp lệ được ghi thẳng vào Credential Manager (mỗi thẻ một
+    mục riêng) và thêm vào danh mục kho với giới hạn 0 (không giới
+    hạn). Dòng lỗi được bỏ qua — KHÔNG dừng cả đợt nhập.
+    Trả về (added_labels, errors): added_labels là nhãn các thẻ
+    đã thêm (theo thứ tự dòng), errors là list (số_dòng, lý_do)
+    — số dòng tính theo văn bản đã dán (kể cả dòng trống), lý do
+    không chứa chữ số thẻ hay nội dung dòng. Dòng trống được bỏ
+    qua lặng lẽ, không tính là lỗi.
+    """
+    entries = _load_vault_index()
+    taken_labels = {entry["label"] for entry in entries}
+    taken_numbers = set()
+    for entry in entries:
+        existing = _load_vault_card(entry["id"])
+        if existing.get("number"):
+            taken_numbers.add(existing["number"])
+    added_labels = []
+    errors = []
+    next_auto = len(entries) + 1
+    for line_no, raw_line in enumerate((text or "").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        card, reason = _parse_bulk_card_line(
+            line, taken_labels, taken_numbers
+        )
+        if reason is not None:
+            errors.append((line_no, reason))
+            continue
+        label = card.pop("label")
+        if not label:
+            while f"Thẻ {next_auto}" in taken_labels:
+                next_auto += 1
+            label = f"Thẻ {next_auto}"
+            next_auto += 1
+        card_id = _new_card_id([entry["id"] for entry in entries])
+        try:
+            _save_vault_card(card_id, card)
+            _save_vault_card_success_count(card_id, 0)
+        except Exception:
+            errors.append((line_no, "không ghi được vào Credential Manager"))
+            continue
+        entries.append({"id": card_id, "label": label, "limit": 0})
+        taken_labels.add(label)
+        taken_numbers.add(card["number"])
+        added_labels.append(label)
+    if added_labels:
+        _save_vault_index(entries)
+    return added_labels, errors
+    entries = _load_vault_index()
+    vault = []
+    for entry in entries:
+        vault.append(
+            {
+                "id": entry["id"],
+                "label": entry["label"],
+                "limit": entry["limit"],
+                "used": _load_vault_card_success_count(entry["id"]),
+            }
+        )
+    return vault
+
+def _migrate_legacy_card():
+    """Nhập thẻ đơn cũ (dịch vụ MuseAIHelper:card) vào kho, một
+    lần duy nhất: khi danh mục kho còn trống mà thẻ đơn cũ còn
+    đó, chuyển nó thành thẻ đầu tiên của kho (nhãn "Thẻ 1",
+    giới hạn 0 = không giới hạn, giữ nguyên bộ đếm thành công),
+    rồi xoá thẻ đơn cũ để kho là nơi duy nhất giữ thẻ. Chỉ xoá
+    bản cũ sau khi bản mới đã ghi xong. Trả về True nếu đã nhập.
+    """
+    try:
+        raw = keyring.get_password(
+            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
+        )
+    except Exception:
+        raw = None
+    if raw:
+        return False
+    legacy = _load_card_from_keyring()
+    if not legacy:
+        return False
+    legacy_count = _load_card_success_count()
+    card_id = _new_card_id(())
+    try:
+        _save_vault_card(card_id, legacy)
+        _save_vault_card_success_count(card_id, legacy_count)
+        _save_vault_index(
+            [{"id": card_id, "label": "Thẻ 1", "limit": 0}]
+        )
+    except Exception:
+        return False
+    _delete_card_from_keyring()
+    try:
+        keyring.delete_password(CARD_SERVICE, CARD_SUCCESS_COUNT_FIELD)
+    except Exception:
+        pass
+    return True
 
 def _write_redeem_code(code, suffix=""):
     """Ghi mã mời cần quy đổi cho tài khoản sắp chạy vào redeem.txt.

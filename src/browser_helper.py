@@ -75,6 +75,16 @@ LANE_SUFFIX = ""
 # chạy Chromium thẳng, không qua proxy. main() gán từ _load_proxy().
 DIRECT_MODE = False
 CARD_SERVICE = "MuseAIHelper:card"
+# Kho thẻ: mỗi thẻ một mục Credential Manager riêng
+# "MuseAIHelper:card:<id>" (id dạng card-<hex>, không phải số
+# thẻ). Danh mục kho ở mục "MuseAIHelper:cards": trường "index"
+# là JSON list {id, label, limit}, trường "active" là id thẻ
+# đang chọn tay ("" = tự động xoay). Mục đơn cũ CARD_SERVICE
+# chỉ còn dùng làm dự phòng khi chạy helper độc lập.
+CARD_SERVICE_PREFIX = "MuseAIHelper:card:"
+CARD_VAULT_INDEX_SERVICE = "MuseAIHelper:cards"
+CARD_VAULT_INDEX_FIELD = "index"
+CARD_VAULT_ACTIVE_FIELD = "active"
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
 BUTTON_TIMEOUT_MS = 90000
@@ -321,17 +331,78 @@ def _ensure_profile_form(page):
         )
 
 
-def _saved_card():
-    """Thẻ người dùng đã lưu trong ứng dụng (Windows Credential Manager)."""
+def _load_card_service(service):
+    """Đọc 4 trường thẻ (number, expiry, cvv, zip) từ một mục
+    Credential Manager. Trả về dict rỗng khi thiếu số thẻ."""
     card = {}
     for field in ("number", "expiry", "cvv", "zip"):
         try:
-            value = keyring.get_password(CARD_SERVICE, field)
+            value = keyring.get_password(service, field)
         except Exception:
             value = None
         if value:
             card[field] = value
     return card if card.get("number") else {}
+
+
+def _vault_card_ids():
+    """Id các thẻ trong kho, theo thứ tự kho (đọc từ trường index)."""
+    try:
+        raw = keyring.get_password(
+            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
+        )
+    except Exception:
+        return []
+    if not raw:
+        return []
+    try:
+        entries = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    return [
+        str(entry.get("id", ""))
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("id")
+    ]
+
+
+def _vault_active_card_id():
+    """Id thẻ đang chọn tay trong kho ("" = tự động xoay)."""
+    try:
+        value = keyring.get_password(
+            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_ACTIVE_FIELD
+        )
+    except Exception:
+        return ""
+    return value or ""
+
+
+def _saved_card(card_id=None):
+    """Thẻ dùng ở bước xác minh thẻ, theo thứ tự ưu tiên:
+    1. thẻ kho có id truyền vào (--card của coordinator, là thẻ
+       đã giữ chỗ cho tài khoản này);
+    2. thẻ đang chọn tay trong kho (trường active);
+    3. thẻ đầu tiên trong kho;
+    4. thẻ đơn cũ (mục MuseAIHelper:card) — để helper chạy độc
+       lập vẫn dùng được thẻ đã lưu trước khi có kho.
+    Trả về dict rỗng khi không có thẻ nào — bước thẻ chờ nhập tay.
+    Không chữ số nào của thẻ được in ra log."""
+    if card_id:
+        card = _load_card_service(CARD_SERVICE_PREFIX + card_id)
+        if card:
+            return card
+    active = _vault_active_card_id()
+    if active:
+        card = _load_card_service(CARD_SERVICE_PREFIX + active)
+        if card:
+            return card
+    for vault_id in _vault_card_ids():
+        card = _load_card_service(CARD_SERVICE_PREFIX + vault_id)
+        if card:
+            return card
+    return _load_card_service(CARD_SERVICE)
 
 
 def _fill_card_form(page, card):
@@ -3471,6 +3542,14 @@ def main():
     # thay vì tạo tài khoản Muse mới. OTP vẫn gửi về hộp thư của
     # mail đó; từ bước nhập thẻ trở đi giữ nguyên như đăng ký.
     muse_login = "--muse-login" in flags
+    # --card <id>: id kho của thẻ đã giữ chỗ cho tài khoản này
+    # (coordinator truyền khi chạy nhiều luồng; id dạng
+    # card-<hex>, không phải số thẻ, không trùng với số luồng).
+    card_id = ""
+    for i, arg in enumerate(flags):
+        if arg == "--card" and i + 1 < len(flags):
+            card_id = flags[i + 1]
+            break
     for arg in flags:
         if arg.isdigit():
             # Luồng song song: đọc đúng file proxy/redeem của luồng này.
@@ -3811,7 +3890,7 @@ def main():
                     "waitlist — bước tiếp theo chưa rõ, hãy chụp màn "
                     "hình gửi lại để bổ sung vào tool."
                 )
-            card = _saved_card()
+            card = _saved_card(card_id)
             auto_filled = False
             if card:
                 try:

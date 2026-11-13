@@ -69,6 +69,105 @@ def _invite_from_line(line):
 
 
 @dataclass
+class CardRunState:
+    """Một thẻ trong kho, với giới hạn + số lần dùng của lượt chạy.
+
+    limit = 0 là không giới hạn. used đếm tài khoản thành công
+    đã dùng thẻ này (đọc từ kho lúc bắt đầu lượt chạy, ghi lại
+    vào kho sau mỗi lần thành công). in_flight là số tài khoản
+    đang chạy dở giữ chỗ trên thẻ này — giữ chỗ ngay lúc kiểm
+    tra để các luồng không cùng vượt giới hạn.
+    """
+
+    card_id: str
+    label: str
+    limit: int = 0
+    used: int = 0
+    in_flight: int = 0
+
+    def exhausted(self):
+        return (
+            self.limit > 0
+            and (self.used + self.in_flight) >= self.limit
+        )
+
+
+class _CardVaultRun:
+    """Kho thẻ của một lượt chạy, theo thứ tự dùng.
+
+    Mọi phương thức đều phải gọi khi đang giữ khóa chung của
+    lượt chạy (các vòng lặp đã giữ khóa ở bước giữ chỗ).
+    Chế độ tay (manual=True) chỉ dùng thẻ đầu tiên trong danh
+    sách; chế độ tự động dùng thẻ đầu tiên còn giới hạn, theo
+    thứ tự kho — hết giới hạn thì tự xoay sang thẻ kế.
+    """
+
+    def __init__(self, cards, manual=False):
+        self.cards = list(cards)
+        self.manual = manual
+        self.current = None
+
+    def reserve(self):
+        """Giữ chỗ cho tài khoản sắp chạy.
+
+        Trả về (card, switched_from, stop):
+        - card: thẻ sẽ dùng cho tài khoản này, hoặc None khi lượt
+          chạy không có thẻ trong kho (bước thẻ chờ nhập tay).
+        - switched_from: thẻ trước đó khi vừa xoay sang thẻ khác.
+        - stop: True khi mọi thẻ (thẻ tay chọn, hoặc toàn kho ở
+          chế độ tự động) đều đã đủ giới hạn — lượt chạy phải dừng.
+        """
+        if not self.cards:
+            return None, None, False
+        candidates = self.cards[:1] if self.manual else self.cards
+        for card in candidates:
+            if not card.exhausted():
+                switched_from = (
+                    self.current
+                    if self.current is not None and self.current is not card
+                    else None
+                )
+                self.current = card
+                card.in_flight += 1
+                return card, switched_from, False
+        return None, None, True
+
+    def release(self, card):
+        if card is not None:
+            card.in_flight = max(0, card.in_flight - 1)
+
+    def record_success(self, card):
+        """Một tài khoản vừa thành công bằng thẻ này: tăng bộ đếm
+        và ghi lại vào kho (khóa theo id thẻ, không theo số thẻ)."""
+        if card is None:
+            return
+        card.used += 1
+        storage._save_vault_card_success_count(card.card_id, card.used)
+
+    def note_for(self, card):
+        """Ghi chú tiến độ cho thẻ đang dùng ('' khi không có thẻ)."""
+        if card is None:
+            return ""
+        limit = card.limit if card.limit > 0 else "∞"
+        return f" · Thẻ {card.label}: {card.used}/{limit}"
+
+    def stop_message(self):
+        """Thông báo dừng khi mọi thẻ đã đủ giới hạn."""
+        if self.manual and self.cards:
+            card = self.cards[0]
+            return (
+                f"Thẻ {card.label} đã đủ giới hạn {card.limit} tài khoản "
+                "thành công — dừng lượt chạy. Chọn thẻ khác ở kho thẻ "
+                "(hoặc tăng giới hạn) rồi chạy lại."
+            )
+        return (
+            "Tất cả thẻ trong kho đã đủ giới hạn — dừng lượt chạy. "
+            "Tăng giới hạn từng thẻ hoặc nhập thêm thẻ mới vào kho "
+            "thẻ rồi chạy lại."
+        )
+
+
+@dataclass
 class RunSettings:
     """Toàn bộ setup của một lượt chạy, đọc từ tab đã bấm Bắt đầu."""
 
@@ -85,9 +184,13 @@ class RunSettings:
     meta_excel_path: str = ""
     invite: str = ""
     single_invite: bool = False
-    card_limit: int = 0
-    card_used: int = 0
-    card_tracked: bool = False
+    # Kho thẻ của lượt chạy: list[CardRunState] theo thứ tự kho.
+    # Rỗng là không có thẻ lưu — bước thẻ chờ nhập tay, không
+    # tính giới hạn. manual_card=True là chỉ dùng thẻ đầu tiên
+    # trong danh sách (thẻ đang chọn tay ở kho); False là tự
+    # động xoay sang thẻ kế khi thẻ đang dùng đủ giới hạn.
+    cards: list = field(default_factory=list)
+    manual_card: bool = False
     # Kho proxy lỗi của tab đã bấm chạy: file + mapping đã đồng bộ
     # từ ô Proxy lỗi lúc bấm Bắt đầu.
     bad_file: Path | None = None
@@ -214,13 +317,14 @@ class Coordinator:
         # single_invite bật thì KHÔNG nối chuỗi: MỌI tài khoản
         # của MỌI luồng đều quy đổi đúng mã trong ô Mã mời (mã
         # hạt giống); mã từng tài khoản tự lấy được chỉ ghi vào
-        # sheet. Thẻ
-        # thì cả các luồng dùng CHUNG một thẻ đã lưu; bộ đếm
-        # giới hạn thẻ tính gộp toàn cục (đếm cả số tài khoản
-        # đang chạy dở để không vượt giới hạn). Ở chế độ IP máy
-        # (direct), pool chỉ có câu đánh dấu DIRECT: mọi luồng
-        # đều dùng chung 1 IP của máy — số luồng chạy đúng như
-        # đã đặt (chủ tool chấp nhận rủi ro IP bị chặn); mỗi
+        # sheet. Thẻ thì các luồng dùng CHUNG kho thẻ: thẻ đang
+        # chọn tay thì mọi luồng dùng đúng thẻ đó, còn tự động thì
+        # các luồng xoay chung qua các thẻ trong kho theo thứ tự;
+        # bộ đếm giới hạn từng thẻ tính gộp toàn cục (đếm cả số
+        # tài khoản đang chạy dở để không vượt giới hạn). Ở chế độ
+        # IP máy (direct), pool chỉ có câu đánh dấu DIRECT: mọi
+        # luồng đều dùng chung 1 IP của máy — số luồng chạy đúng
+        # như đã đặt (chủ tool chấp nhận rủi ro IP bị chặn); mỗi
         # luồng vẫn có file proxy riêng (proxy.txt, proxy-2.txt,
         # ...) đều chứa câu DIRECT.
         if settings.meta_login:
@@ -253,8 +357,7 @@ class Coordinator:
         shared = {
             "success": 0,
             "fail": 0,
-            "card_used": settings.card_used,
-            "in_flight": 0,
+            "vault": _CardVaultRun(settings.cards, settings.manual_card),
             "card_stop_logged": False,
         }
         shared_lock = threading.Lock()
@@ -389,36 +492,34 @@ class Coordinator:
                     )
                 )
                 break
+            card = None
             with shared_lock:
-                card_hit = (
-                    settings.card_tracked
-                    and settings.card_limit > 0
-                    and shared["card_used"] + shared["in_flight"]
-                    >= settings.card_limit
-                )
+                vault = shared["vault"]
+                # Giữ chỗ ngay trong cùng một khóa với phép kiểm
+                # tra: hai luồng không thể cùng thấy "còn chỗ"
+                # rồi cùng chạy vượt giới hạn thẻ. Khi thẻ đang
+                # dùng đủ giới hạn, reserve() tự xoay sang thẻ
+                # kế còn giới hạn; hết kho thì trả stop=True.
+                # Chỗ được trả lại ở finally cuối vòng lặp.
+                card, switched_from, card_hit = vault.reserve()
                 log_card_stop = (
                     card_hit and not shared["card_stop_logged"]
                 )
                 if log_card_stop:
                     shared["card_stop_logged"] = True
-                if not card_hit:
-                    # Giữ chỗ ngay trong cùng một khóa với phép
-                    # kiểm tra: hai luồng không thể cùng thấy
-                    # "còn chỗ" rồi cùng chạy vượt giới hạn thẻ.
-                    # Chỗ được trả lại ở finally cuối vòng lặp.
-                    shared["in_flight"] += 1
             if card_hit:
                 if log_card_stop:
-                    self.events.put(
-                        (
-                            "log",
-                            f"Thẻ đang lưu đã đủ {settings.card_limit} tài "
-                            "khoản thành công — dừng lượt chạy. "
-                            "Muốn chạy tiếp thì đổi thẻ ở hàng Thẻ "
-                            "rồi bấm Lưu thẻ (bộ đếm reset về 0).",
-                        )
-                    )
+                    self.events.put(("log", vault.stop_message()))
                 break
+            if switched_from is not None:
+                self.events.put(
+                    (
+                        "log",
+                        f"{lane_tag}Thẻ {switched_from.label} đã đủ "
+                        f"giới hạn — tự động chuyển sang thẻ "
+                        f"{card.label}.",
+                    )
+                )
             try:
                 index += 1
                 display = f"L{lane_no} · {index}" if multi else index
@@ -451,12 +552,7 @@ class Coordinator:
                 with shared_lock:
                     s_now = shared["success"]
                     f_now = shared["fail"]
-                    c_now = shared["card_used"]
-                card_note = (
-                    f" · Thẻ: {c_now}/{settings.card_limit}"
-                    if settings.card_tracked
-                    else ""
-                )
+                card_note = shared["vault"].note_for(card)
                 self.events.put(
                     (
                         "progress",
@@ -518,7 +614,12 @@ class Coordinator:
                     except OSError:
                         pass
                 helper_ok, burned, waitlisted, cookie, own_invite = self._run_helper(
-                    helper, address, display, label_total, settings.meta
+                    helper,
+                    address,
+                    display,
+                    label_total,
+                    settings.meta,
+                    card_id=card.card_id if card is not None else "",
                 )
                 if helper_ok:
                     saved = False
@@ -553,12 +654,11 @@ class Coordinator:
                                 )
                             saved = True
                             shared["success"] += 1
-                            if settings.card_tracked:
-                                # Tài khoản chỉ được lưu sau khi qua
-                                # bước thẻ, nên đây đúng là 1 lượt
-                                # dùng thẻ đang lưu.
-                                shared["card_used"] += 1
-                                storage._save_card_success_count(shared["card_used"])
+                            # Tài khoản chỉ được lưu sau khi qua bước
+                            # thẻ, nên đây đúng là 1 lượt dùng thẻ
+                            # đang giữ chỗ. Không có thẻ trong kho
+                            # (nhập tay ở bước thẻ) thì không đếm.
+                            shared["vault"].record_success(card)
                         except RuntimeError as error:
                             shared["fail"] += 1
                             save_error = error
@@ -697,7 +797,7 @@ class Coordinator:
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
             finally:
                 with shared_lock:
-                    shared["in_flight"] -= 1
+                    shared["vault"].release(card)
 
     def _run_login_loop(self, settings):
         """Lượt đăng nhập Muse bằng tài khoản Meta đã đăng ký.
@@ -733,8 +833,7 @@ class Coordinator:
         shared = {
             "success": 0,
             "fail": 0,
-            "card_used": settings.card_used,
-            "in_flight": 0,
+            "vault": _CardVaultRun(settings.cards, settings.manual_card),
             "card_stop_logged": False,
         }
         shared_lock = threading.Lock()
@@ -816,30 +915,34 @@ class Coordinator:
                     )
                 )
                 break
+            card = None
             with shared_lock:
-                card_hit = (
-                    settings.card_tracked
-                    and settings.card_limit > 0
-                    and shared["card_used"] + shared["in_flight"]
-                    >= settings.card_limit
-                )
+                vault = shared["vault"]
+                # Giữ chỗ ngay trong cùng một khóa với phép kiểm
+                # tra: hai luồng không thể cùng thấy "còn chỗ"
+                # rồi cùng chạy vượt giới hạn thẻ. Khi thẻ đang
+                # dùng đủ giới hạn, reserve() tự xoay sang thẻ
+                # kế còn giới hạn; hết kho thì trả stop=True.
+                # Chỗ được trả lại ở finally cuối vòng lặp.
+                card, switched_from, card_hit = vault.reserve()
                 log_card_stop = (
                     card_hit and not shared["card_stop_logged"]
                 )
                 if log_card_stop:
                     shared["card_stop_logged"] = True
-                if not card_hit:
-                    shared["in_flight"] += 1
             if card_hit:
                 if log_card_stop:
-                    self.events.put(
-                        (
-                            "log",
-                            f"Thẻ đang lưu đã đủ {settings.card_limit} tài "
-                            "khoản thành công — dừng lượt chạy.",
-                        )
-                    )
+                    self.events.put(("log", vault.stop_message()))
                 break
+            if switched_from is not None:
+                self.events.put(
+                    (
+                        "log",
+                        f"{lane_tag}Thẻ {switched_from.label} đã đủ "
+                        f"giới hạn — tự động chuyển sang thẻ "
+                        f"{card.label}.",
+                    )
+                )
             try:
                 display = f"L{lane_no} · {index}" if multi else index
                 proxy_index, line = rotation.current()
@@ -871,12 +974,7 @@ class Coordinator:
                 with shared_lock:
                     s_now = shared["success"]
                     f_now = shared["fail"]
-                    c_now = shared["card_used"]
-                card_note = (
-                    f" · Thẻ: {c_now}/{settings.card_limit}"
-                    if settings.card_tracked
-                    else ""
-                )
+                card_note = shared["vault"].note_for(card)
                 self.events.put(
                     (
                         "progress",
@@ -925,6 +1023,7 @@ class Coordinator:
                     self._run_helper(
                         helper, address, display, label_total,
                         muse_login=True,
+                        card_id=card.card_id if card is not None else "",
                     )
                 )
                 if helper_ok:
@@ -944,11 +1043,11 @@ class Coordinator:
                             )
                             saved = True
                             shared["success"] += 1
-                            if settings.card_tracked:
-                                shared["card_used"] += 1
-                                storage._save_card_success_count(
-                                    shared["card_used"]
-                                )
+                            # Tài khoản chỉ được lưu sau khi qua bước
+                            # thẻ, nên đây đúng là 1 lượt dùng thẻ
+                            # đang giữ chỗ. Không có thẻ trong kho
+                            # (nhập tay ở bước thẻ) thì không đếm.
+                            shared["vault"].record_success(card)
                         except RuntimeError as error:
                             shared["fail"] += 1
                             save_error = error
@@ -1062,16 +1161,20 @@ class Coordinator:
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
             finally:
                 with shared_lock:
-                    shared["in_flight"] -= 1
+                    shared["vault"].release(card)
 
     def _run_helper(self, helper, address, index, total, meta=False,
-                      muse_login=False):
+                      muse_login=False, card_id=""):
         suffix = getattr(self._lane_local, "suffix", "")
         command = [sys.executable, str(helper), address, "--auto"]
         if meta:
             command.append("--meta")
         if muse_login:
             command.append("--muse-login")
+        if card_id:
+            # Thẻ kho đã giữ chỗ cho tài khoản này: helper chỉ
+            # đọc đúng thẻ đó (id kho, không phải số thẻ).
+            command.extend(["--card", card_id])
         if suffix:
             command.append(suffix.lstrip("-"))
         try:

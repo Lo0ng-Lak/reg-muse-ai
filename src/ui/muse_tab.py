@@ -17,7 +17,7 @@ from tkinter import messagebox, ttk
 
 import paths
 import storage
-from coordinator import RunSettings
+from coordinator import CardRunState, RunSettings
 from ui.setup_panel import SetupError, SetupPanel
 
 
@@ -74,46 +74,84 @@ class MuseTab(ttk.Frame):
         )
         self.muse_login_button.grid(row=0, column=3, padx=(6, 0))
 
-        card_row = ttk.Frame(self)
-        card_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(card_row, text="Thẻ:").pack(side="left")
-        self.card_number_entry = ttk.Entry(card_row, width=24)
-        self.card_number_entry.pack(side="left", padx=(6, 8))
-        ttk.Label(card_row, text="Hạn:").pack(side="left")
-        self.card_expiry_entry = ttk.Entry(card_row, width=7)
-        self.card_expiry_entry.pack(side="left", padx=(4, 8))
-        ttk.Label(card_row, text="CVV:").pack(side="left")
-        self.card_cvv_entry = ttk.Entry(card_row, width=5)
-        self.card_cvv_entry.pack(side="left", padx=(4, 8))
-        ttk.Label(card_row, text="ZIP:").pack(side="left")
-        self.card_zip_entry = ttk.Entry(card_row, width=7)
-        self.card_zip_entry.pack(side="left", padx=(4, 10))
-        self.save_card_button = ttk.Button(
-            card_row, text="Lưu thẻ", command=self._save_card
+        vault_frame = ttk.LabelFrame(self, text="Kho thẻ", padding=10)
+        vault_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        vault_frame.columnconfigure(0, weight=1)
+        self.vault_tree = ttk.Treeview(
+            vault_frame,
+            columns=("limit", "used", "status"),
+            show="tree headings",
+            height=5,
+            selectmode="browse",
         )
-        self.save_card_button.pack(side="left")
-        self.delete_card_button = ttk.Button(
-            card_row, text="Xoá thẻ", command=self._delete_card
+        self.vault_tree.heading("#0", text="Tên thẻ")
+        self.vault_tree.heading("limit", text="Giới hạn")
+        self.vault_tree.heading("used", text="Đã dùng")
+        self.vault_tree.heading("status", text="Trạng thái")
+        self.vault_tree.column("#0", width=180)
+        self.vault_tree.column("limit", width=70, anchor="center")
+        self.vault_tree.column("used", width=70, anchor="center")
+        self.vault_tree.column("status", width=140)
+        self.vault_tree.grid(row=0, column=0, sticky="ew")
+        self.vault_tree.bind("<<TreeviewSelect>>", self._on_vault_select)
+        ttk.Label(
+            vault_frame,
+            text=(
+                "Nhập nhiều thẻ cùng lúc — dán danh sách vào ô dưới, mỗi "
+                "dòng một thẻ, định dạng: số thẻ|MM/YY|CVV|ZIP|nhãn. "
+                "ZIP và nhãn có thể bỏ trống (ZIP mặc định 10001, nhãn "
+                "tự đặt Thẻ 1, Thẻ 2…). Dòng sai được báo theo số dòng, "
+                "không hiện số thẻ. Ô dán được xoá ngay sau khi nhập."
+            ),
+            wraplength=700,
+        ).grid(row=1, column=0, sticky="w", pady=(8, 4))
+        self.bulk_card_text = tk.Text(vault_frame, height=4, width=80)
+        self.bulk_card_text.grid(row=2, column=0, sticky="ew")
+        self.import_bulk_button = ttk.Button(
+            vault_frame,
+            text="Nhập kho thẻ",
+            command=self._import_bulk_cards,
         )
-        self.delete_card_button.pack(side="left", padx=(6, 0))
-        saved_card = storage._load_card_from_keyring()
-        if saved_card:
-            self.card_number_entry.insert(0, saved_card.get("number", ""))
-            self.card_expiry_entry.insert(0, saved_card.get("expiry", ""))
-            self.card_cvv_entry.insert(0, saved_card.get("cvv", ""))
-            self.card_zip_entry.insert(0, saved_card.get("zip", ""))
-        else:
-            self.card_zip_entry.insert(0, "10001")
+        self.import_bulk_button.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        vault_actions = ttk.Frame(vault_frame)
+        vault_actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.select_card_button = ttk.Button(
+            vault_actions,
+            text="Chọn thẻ này",
+            command=self._select_vault_card,
+        )
+        self.select_card_button.pack(side="left")
+        self.auto_rotate_button = ttk.Button(
+            vault_actions,
+            text="Tự động xoay",
+            command=self._auto_rotate_cards,
+        )
+        self.auto_rotate_button.pack(side="left", padx=(6, 0))
+        self.delete_vault_card_button = ttk.Button(
+            vault_actions,
+            text="Xoá thẻ",
+            command=self._delete_vault_card,
+        )
+        self.delete_vault_card_button.pack(side="left", padx=(6, 0))
+        ttk.Label(vault_actions, text="Giới hạn / thẻ:").pack(
+            side="left", padx=(12, 0)
+        )
+        self.card_limit_var = tk.IntVar(value=0)
+        self.card_limit_spin = ttk.Spinbox(
+            vault_actions, from_=0, to=100, width=5,
+            textvariable=self.card_limit_var,
+        )
+        self.card_limit_spin.pack(side="left", padx=(6, 6))
+        self.save_limit_button = ttk.Button(
+            vault_actions,
+            text="Lưu giới hạn",
+            command=self._save_vault_limit,
+        )
+        self.save_limit_button.pack(side="left")
+        self._refresh_vault()
 
         muse_row = ttk.Frame(self)
         muse_row.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(muse_row, text="Giới hạn / thẻ:").pack(side="left")
-        self.card_limit_var = tk.IntVar(value=0)
-        self.card_limit_spin = ttk.Spinbox(
-            muse_row, from_=0, to=100, width=5,
-            textvariable=self.card_limit_var,
-        )
-        self.card_limit_spin.pack(side="left", padx=(6, 12))
         ttk.Label(muse_row, text="Mã mời:").pack(side="left")
         self.invite_entry = ttk.Entry(muse_row, width=10)
         self.invite_entry.pack(side="left", padx=(6, 12))
@@ -154,73 +192,276 @@ class MuseTab(ttk.Frame):
         )
         self.open_sheet_button.pack(side="left", padx=(8, 0))
 
-    def _save_card(self):
-        """Lưu thẻ vào Windows Credential Manager (không ghi ra file).
+    def _refresh_vault(self):
+        """Vẽ lại danh sách kho thẻ từ Credential Manager.
 
-        Chỉ giữ trong khoá bảo mật của Windows; không chữ số
-        nào của thẻ được in ra log.
+        Chỉ hiện nhãn + giới hạn + số lần dùng + trạng thái —
+        không chữ số nào của thẻ xuất hiện ở giao diện. Trạng
+        thái: "Đang chọn" (thẻ chọn tay), "Đủ giới hạn", "Sẵn
+        sàng (∞)" (không giới hạn), "Sẵn sàng".
         """
-        def digits(text):
-            return "".join(ch for ch in text if ch.isdigit())
+        for item in self.vault_tree.get_children():
+            self.vault_tree.delete(item)
+        active = storage._load_vault_active()
+        self._vault_cards = storage._load_vault()
+        for card in self._vault_cards:
+            if card["id"] == active:
+                status = "Đang chọn"
+            elif card["limit"] > 0 and card["used"] >= card["limit"]:
+                status = "Đủ giới hạn"
+            elif card["limit"] == 0:
+                status = "Sẵn sàng (∞)"
+            else:
+                status = "Sẵn sàng"
+            limit = card["limit"] if card["limit"] > 0 else "∞"
+            self.vault_tree.insert(
+                "",
+                "end",
+                iid=card["id"],
+                text=card["label"],
+                values=(limit, card["used"], status),
+            )
 
-        number = digits(self.card_number_entry.get())
-        expiry_digits = digits(self.card_expiry_entry.get())
-        cvv = digits(self.card_cvv_entry.get())
-        zip_code = digits(self.card_zip_entry.get()) or "10001"
-        valid = (
-            12 <= len(number) <= 19
-            and len(expiry_digits) == 4
-            and 1 <= int(expiry_digits[:2]) <= 12
-            and len(cvv) in (3, 4)
-            and len(zip_code) == 5
-        )
-        if not valid:
+    def _vault_selection(self):
+        """Thẻ đang chọn trong danh sách kho (dict id/label/limit/
+        used), hoặc None khi chưa chọn thẻ nào."""
+        selected = self.vault_tree.selection()
+        if not selected:
+            return None
+        card_id = selected[0]
+        for card in getattr(self, "_vault_cards", []):
+            if card["id"] == card_id:
+                return card
+        return None
+
+    def _on_vault_select(self, event):
+        card = self._vault_selection()
+        if card is None:
+            return
+        self.card_limit_var.set(card["limit"])
+
+    def _import_bulk_cards(self):
+        """Nhập nhiều thẻ cùng lúc từ ô dán (mỗi dòng một thẻ).
+
+        Định dạng dòng: số thẻ|MM/YY|CVV|ZIP|nhãn (ZIP và nhãn
+        có thể bỏ trống). Thẻ hợp lệ ghi thẳng vào Windows
+        Credential Manager (mỗi thẻ một mục riêng). Ô dán được
+        XOÁ NGAY sau khi đọc — dù thành công hay lỗi — để số
+        thẻ không nằm lại trên màn hình; dòng lỗi chỉ báo theo
+        số dòng, không hiện nội dung dòng hay chữ số thẻ.
+        """
+        if self.coordinator.running:
+            return
+        text = self.bulk_card_text.get("1.0", "end")
+        self.bulk_card_text.delete("1.0", "end")
+        if not text.strip():
             messagebox.showwarning(
-                "Thẻ chưa hợp lệ",
-                "Kiểm tra lại: số thẻ 12–19 chữ số, hạn dạng MM/YY, "
-                "CVV 3–4 chữ số, ZIP 5 chữ số.",
+                "Chưa có thẻ để nhập",
+                "Dán danh sách thẻ vào ô trên — mỗi dòng một thẻ, "
+                "định dạng: số thẻ|MM/YY|CVV|ZIP|nhãn.",
             )
             return
-        card = {
-            "number": number,
-            "expiry": f"{expiry_digits[:2]}/{expiry_digits[2:]}",
-            "cvv": cvv,
-            "zip": zip_code,
-        }
-        old_card = storage._load_card_from_keyring()
         try:
-            storage._save_card_to_keyring(card)
+            added, errors = storage._import_bulk_cards(text)
         except Exception as error:
             messagebox.showerror(
-                "Không lưu được thẻ",
+                "Không nhập được thẻ",
                 f"Không ghi được vào Windows Credential Manager: {error}",
             )
             return
-        if old_card.get("number") != number:
-            # Đổi sang thẻ khác: giới hạn tính theo từng thẻ nên
-            # bộ đếm tài khoản thành công của thẻ cũ reset về 0.
-            storage._save_card_success_count(0)
-        self.card_zip_entry.delete(0, "end")
-        self.card_zip_entry.insert(0, zip_code)
+        self._refresh_vault()
+        summary = []
+        if added:
+            summary.append(
+                f"Đã thêm {len(added)} thẻ vào kho: {', '.join(added)}."
+            )
+        if errors:
+            detail = "; ".join(
+                f"dòng {line_no}: {reason}" for line_no, reason in errors
+            )
+            summary.append(f"{len(errors)} dòng lỗi — {detail}.")
+        if not added and not errors:
+            summary.append("Không có dòng thẻ nào để nhập.")
+        message = " ".join(summary)
+        if added and not errors:
+            self.app.append_log(
+                message + " Thẻ đã lưu vào Windows Credential Manager."
+            )
+        elif added:
+            messagebox.showwarning("Nhập thẻ xong (có dòng lỗi)", message)
+            self.app.append_log(message)
+        else:
+            messagebox.showwarning("Không thêm được thẻ nào", message)
+            self.app.append_log(message)
+
+    def _select_vault_card(self):
+        """Chọn tay một thẻ: lượt chạy chỉ dùng thẻ này (kể cả
+        khi thẻ khác còn giới hạn)."""
+        if self.coordinator.running:
+            return
+        card = self._vault_selection()
+        if card is None:
+            messagebox.showwarning(
+                "Chưa chọn thẻ",
+                "Chọn một thẻ trong danh sách kho thẻ trước.",
+            )
+            return
+        storage._save_vault_active(card["id"])
+        self._refresh_vault()
         self.app.append_log(
-            "Đã lưu thẻ vào Windows Credential Manager — tool sẽ tự "
-            "điền ở bước xác minh thẻ, không cần gõ lại."
+            f"Đã chọn thẻ {card['label']} — lượt chạy chỉ dùng thẻ "
+            "này (đủ giới hạn là tự dừng, không tự chuyển thẻ khác)."
         )
 
-    def _delete_card(self):
-        storage._delete_card_from_keyring()
-        storage._save_card_success_count(0)
-        for entry in (
-            self.card_number_entry,
-            self.card_expiry_entry,
-            self.card_cvv_entry,
-            self.card_zip_entry,
-        ):
-            entry.delete(0, "end")
-        self.card_zip_entry.insert(0, "10001")
+    def _auto_rotate_cards(self):
+        """Bỏ chọn tay: lượt chạy dùng các thẻ trong kho theo thứ
+        tự, thẻ nào đủ giới hạn thì tự chuyển sang thẻ kế."""
+        if self.coordinator.running:
+            return
+        storage._save_vault_active("")
+        self._refresh_vault()
         self.app.append_log(
-            "Đã xoá thẻ đã lưu — bước thẻ sẽ chờ bạn nhập tay."
+            "Đã chuyển sang tự động xoay — lượt chạy dùng các thẻ "
+            "trong kho theo thứ tự, thẻ nào đủ giới hạn thì tự "
+            "chuyển sang thẻ kế; hết kho là tự dừng."
         )
+
+    def _delete_vault_card(self):
+        """Xoá thẻ khỏi kho (cả mục Credential Manager lẫn danh
+        mục). Hộp xác nhận chỉ nêu nhãn thẻ, không nêu số thẻ."""
+        if self.coordinator.running:
+            return
+        card = self._vault_selection()
+        if card is None:
+            messagebox.showwarning(
+                "Chưa chọn thẻ",
+                "Chọn một thẻ trong danh sách kho thẻ trước.",
+            )
+            return
+        if not messagebox.askokcancel(
+            "Xoá thẻ",
+            f"Xoá thẻ {card['label']} khỏi kho thẻ? Thẻ sẽ bị xoá "
+            "khỏi Windows Credential Manager và không dùng được nữa.",
+        ):
+            return
+        storage._delete_vault_card(card["id"])
+        self._refresh_vault()
+        self.app.append_log(f"Đã xoá thẻ {card['label']} khỏi kho thẻ.")
+
+    def _save_vault_limit(self):
+        """Đặt giới hạn / thẻ cho thẻ đang chọn (0 = không giới hạn)."""
+        if self.coordinator.running:
+            return
+        card = self._vault_selection()
+        if card is None:
+            messagebox.showwarning(
+                "Chưa chọn thẻ",
+                "Chọn một thẻ trong danh sách kho thẻ trước.",
+            )
+            return
+        try:
+            limit = int(self.card_limit_var.get())
+        except (tk.TclError, ValueError):
+            limit = 0
+        limit = max(0, min(limit, 100))
+        if not storage._set_vault_card_limit(card["id"], limit):
+            messagebox.showerror(
+                "Không lưu được giới hạn", "Thẻ này không còn trong kho."
+            )
+            self._refresh_vault()
+            return
+        self._refresh_vault()
+        limit_text = f"{limit} tài khoản" if limit > 0 else "không giới hạn"
+        self.app.append_log(
+            f"Đã đặt giới hạn thẻ {card['label']}: {limit_text}."
+        )
+
+    def _run_cards(self):
+        """Kho thẻ của lượt chạy sắp bắt đầu.
+
+        Trả về (cards, manual): cards là list CardRunState theo
+        thứ tự kho (thẻ chọn tay thì chỉ có đúng thẻ đó);
+        manual=True là chỉ dùng thẻ chọn tay, False là tự động
+        xoay. Kho trống thì ([], False) — bước thẻ chờ nhập tay.
+        """
+        vault = storage._load_vault()
+        active = storage._load_vault_active()
+        if active:
+            chosen = [card for card in vault if card["id"] == active]
+            if not chosen:
+                storage._save_vault_active("")
+            else:
+                return (
+                    [
+                        CardRunState(
+                            card_id=chosen[0]["id"],
+                            label=chosen[0]["label"],
+                            limit=chosen[0]["limit"],
+                            used=chosen[0]["used"],
+                        )
+                    ],
+                    True,
+                )
+        return (
+            [
+                CardRunState(
+                    card_id=card["id"],
+                    label=card["label"],
+                    limit=card["limit"],
+                    used=card["used"],
+                )
+                for card in vault
+            ],
+            False,
+        )
+
+    def _check_cards_before_run(self, cards, manual):
+        """Chặn chạy khi thẻ (chọn tay) hoặc toàn kho đã đủ giới
+        hạn. Trả về True khi được chạy tiếp."""
+        if not cards:
+            return True
+        if manual:
+            card = cards[0]
+            if card.limit > 0 and card.used >= card.limit:
+                messagebox.showwarning(
+                    "Thẻ đã đủ giới hạn",
+                    f"Thẻ {card.label} đã dùng cho {card.used} tài "
+                    f"khoản thành công (giới hạn {card.limit} / thẻ). "
+                    "Chọn thẻ khác ở kho thẻ (nút Chọn thẻ này) "
+                    "hoặc tăng giới hạn rồi chạy lại.",
+                )
+                return False
+            return True
+        if all(
+            card.limit > 0 and card.used >= card.limit for card in cards
+        ):
+            messagebox.showwarning(
+                "Tất cả thẻ đã đủ giới hạn",
+                "Tất cả thẻ trong kho đã đủ giới hạn. Tăng giới hạn "
+                "từng thẻ hoặc nhập thêm thẻ mới vào kho thẻ rồi "
+                "chạy lại.",
+            )
+            return False
+        return True
+
+    def _log_run_cards(self, cards, manual):
+        """Ghi log kho thẻ của lượt chạy (chỉ nhãn + số đếm)."""
+        if not cards:
+            return
+        if manual:
+            card = cards[0]
+            limit = card.limit if card.limit > 0 else "∞"
+            self.app.append_log(
+                f"Thẻ đang chọn: {card.label} — {card.used}/{limit} "
+                "tài khoản thành công; đủ giới hạn là lượt chạy tự "
+                "dừng, không tự chuyển thẻ khác."
+            )
+        else:
+            self.app.append_log(
+                f"Kho thẻ: {len(cards)} thẻ — dùng theo thứ tự, thẻ "
+                "nào đủ giới hạn thì tự chuyển sang thẻ kế; hết kho "
+                "là lượt chạy tự dừng."
+            )
 
     def _sync_invite_code(self):
         """Lưu mã mời (nếu có) vào invite.txt để lần sau tự điền lại."""
@@ -253,27 +494,11 @@ class MuseTab(ttk.Frame):
         except SetupError as error:
             messagebox.showwarning(error.title, error.message)
             return
-        try:
-            card_limit = int(self.card_limit_var.get())
-        except (tk.TclError, ValueError):
-            card_limit = 0
-        card_limit = max(0, min(card_limit, 100))
-        # Giới hạn tính theo thẻ ĐANG LƯU (một thẻ duy nhất): chỉ
-        # đếm khi có thẻ lưu sẵn; không có thẻ lưu thì bước thẻ là
-        # nhập tay nên giới hạn này không áp dụng. Để 0 là không
-        # giới hạn.
-        saved_card = storage._load_card_from_keyring()
-        card_tracked = bool(saved_card) and card_limit > 0
-        card_used = (
-            storage._load_card_success_count() if card_tracked else 0
-        )
-        if card_tracked and card_used >= card_limit:
-            messagebox.showwarning(
-                "Thẻ đã đủ giới hạn",
-                f"Thẻ đang lưu đã dùng cho {card_used} tài khoản thành "
-                f"công (giới hạn {card_limit} / thẻ). Đổi thẻ ở hàng "
-                "Thẻ rồi bấm Lưu thẻ để bộ đếm reset về 0, rồi chạy lại.",
-            )
+        # Kho thẻ: thẻ chọn tay thì chỉ dùng thẻ đó, còn không thì
+        # tự động xoay theo thứ tự kho; kho trống thì bước thẻ chờ
+        # nhập tay, không tính giới hạn.
+        cards, manual_card = self._run_cards()
+        if not self._check_cards_before_run(cards, manual_card):
             return
         invite = self._sync_invite_code()
         if not invite:
@@ -301,9 +526,8 @@ class MuseTab(ttk.Frame):
             meta=False,
             invite=invite,
             single_invite=single_invite,
-            card_limit=card_limit,
-            card_used=card_used,
-            card_tracked=card_tracked,
+            cards=cards,
+            manual_card=manual_card,
             bad_file=self.panel.bad_file,
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
@@ -357,12 +581,7 @@ class MuseTab(ttk.Frame):
                     "mã nào (ô Mã mời trống, sheet cũng không có), "
                     "nên các tài khoản sẽ không quy đổi mã mời nào."
                 )
-        if card_tracked:
-            self.app.append_log(
-                f"Giới hạn thẻ đang lưu: {card_used}/{card_limit} tài "
-                "khoản thành công — đủ giới hạn là lượt chạy tự dừng, "
-                "không tự đổi thẻ."
-            )
+        self._log_run_cards(cards, manual_card)
         self.coordinator.start(settings)
 
     def _browse_meta_excel(self):
@@ -428,35 +647,18 @@ class MuseTab(ttk.Frame):
         except SetupError as error:
             messagebox.showwarning(error.title, error.message)
             return
-        # Đăng nhập vẫn nộp thẻ đã lưu ở bước thẻ — chưa có thẻ thì
-        # mỗi tài khoản sẽ chờ nhập tay tới 4 phút.
-        saved_card = storage._load_card_from_keyring()
-        if not saved_card:
+        # Đăng nhập vẫn nộp thẻ trong kho ở bước thẻ — kho trống
+        # thì mỗi tài khoản sẽ chờ nhập tay tới 4 phút.
+        cards, manual_card = self._run_cards()
+        if not cards:
             if not messagebox.askokcancel(
-                "Chưa lưu thẻ",
-                "Chưa có thẻ nào được lưu. Mỗi tài khoản đăng nhập "
+                "Chưa có thẻ trong kho",
+                "Chưa có thẻ nào trong kho. Mỗi tài khoản đăng nhập "
                 "xong tới bước thẻ sẽ chờ bạn nhập tay trong cửa sổ "
                 "Chromium (tối đa 4 phút). Vẫn chạy?",
             ):
                 return
-        # Giới hạn / thẻ áp dụng như lượt đăng ký: đủ giới hạn thì
-        # lượt chạy tự dừng, đổi thẻ tay rồi chạy tiếp.
-        try:
-            card_limit = int(self.card_limit_var.get())
-        except (tk.TclError, ValueError):
-            card_limit = 0
-        card_limit = max(0, min(card_limit, 100))
-        card_tracked = bool(saved_card) and card_limit > 0
-        card_used = (
-            storage._load_card_success_count() if card_tracked else 0
-        )
-        if card_tracked and card_used >= card_limit:
-            messagebox.showwarning(
-                "Thẻ đã đủ giới hạn",
-                f"Thẻ đang lưu đã dùng cho {card_used} tài khoản thành "
-                f"công (giới hạn {card_limit} / thẻ). Đổi thẻ ở hàng "
-                "Thẻ rồi bấm Lưu thẻ để bộ đếm reset về 0, rồi chạy lại.",
-            )
+        if not self._check_cards_before_run(cards, manual_card):
             return
         settings = RunSettings(
             total=setup["total"],
@@ -467,9 +669,8 @@ class MuseTab(ttk.Frame):
             direct=setup["direct"],
             meta_login=True,
             meta_excel_path=excel_text,
-            card_limit=card_limit,
-            card_used=card_used,
-            card_tracked=card_tracked,
+            cards=cards,
+            manual_card=manual_card,
             bad_file=self.panel.bad_file,
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
@@ -498,12 +699,7 @@ class MuseTab(ttk.Frame):
                 f"Kho proxy: {len(setup['pool'])} proxy, mỗi proxy "
                 f"{setup['per_proxy']} tài khoản."
             )
-        if card_tracked:
-            self.app.append_log(
-                f"Giới hạn thẻ đang lưu: {card_used}/{card_limit} tài "
-                "khoản thành công — đủ giới hạn là lượt chạy tự dừng, "
-                "không tự đổi thẻ."
-            )
+        self._log_run_cards(cards, manual_card)
         self.coordinator.start(settings)
 
     def _open_spreadsheet(self):
@@ -529,12 +725,13 @@ class MuseTab(ttk.Frame):
             state="disabled" if running else "normal"
         )
         for widget in (
-            self.card_number_entry,
-            self.card_expiry_entry,
-            self.card_cvv_entry,
-            self.card_zip_entry,
-            self.save_card_button,
-            self.delete_card_button,
+            self.vault_tree,
+            self.bulk_card_text,
+            self.import_bulk_button,
+            self.select_card_button,
+            self.auto_rotate_button,
+            self.delete_vault_card_button,
+            self.save_limit_button,
             self.start_button,
             self.meta_excel_entry,
             self.browse_excel_button,

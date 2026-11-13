@@ -20,8 +20,8 @@ class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Muse.ai Account Helper")
-        self.geometry("820x720")
-        self.minsize(680, 600)
+        self.geometry("820x980")
+        self.minsize(680, 720)
         self.coordinator = Coordinator()
         self._lane_progress = {}
         self.active_panel = None
@@ -33,12 +33,24 @@ class MainWindow(tk.Tk):
             "Bắt đầu. Chỉ tài khoản đăng ký thành công mới được lưu "
             "vào sheet Excel."
         )
-        if storage._load_card_from_keyring():
-            self.append_log(
-                "Đã có thẻ lưu sẵn — tool sẽ tự điền ở bước xác minh thẻ. "
-                f"Thẻ này đã dùng cho {storage._load_card_success_count()} tài khoản "
-                "thành công (xem / đổi ở ô 'Giới hạn / thẻ:')."
+        vault = storage._load_vault()
+        if vault:
+            active = storage._load_vault_active()
+            chosen = next(
+                (card for card in vault if card["id"] == active), None
             )
+            if chosen is not None:
+                limit = chosen["limit"] if chosen["limit"] > 0 else "∞"
+                self.append_log(
+                    f"Kho thẻ: {len(vault)} thẻ — đang chọn thẻ "
+                    f"{chosen['label']} ({chosen['used']}/{limit} tài "
+                    "khoản thành công). Lượt chạy chỉ dùng thẻ này."
+                )
+            else:
+                self.append_log(
+                    f"Kho thẻ: {len(vault)} thẻ — tự động xoay theo thứ "
+                    "tự, thẻ nào đủ giới hạn thì chuyển sang thẻ kế."
+                )
 
     def _build_ui(self):
         root = ttk.Frame(self, padding=16)

@@ -160,9 +160,8 @@ connection mode, temp-mail provider and target count:
 
 - **Muse.ai** tab: proxy pool in `proxies.txt`, bad proxies in
   `bad-proxies.txt` (the files from before — your existing pool carries
-  over untouched), plus the card row, per-card limit and invite-code
-  chain. The card-storage feature may be upgraded to a multi-card vault.
-  Accounts go to `accounts.xlsx`.
+  over untouched), plus the card vault (bulk import, per-card limit,
+  auto-rotation) and invite-code chain. Accounts go to `accounts.xlsx`.
 - **Meta (meta.ai)** tab: proxy pool in `proxies_meta.txt`, bad proxies
   in `bad-proxies-meta.txt`, plus the CapSolver key and selfie image.
   Accounts go to `meta_accounts.xlsx`. See "Meta account registration"
@@ -276,8 +275,10 @@ slice. Each lane keeps its **own invite chain** with one shared start:
 the **first account of every lane** redeems the code in the Mã mời
 field (the code you set in the tool); from the second account on, each
 lane continues with the codes its own accounts harvest, exactly as in
-single-lane mode. All lanes share the **one
-saved card**, and the per-card success limit counts globally across
+single-lane mode. All lanes share the **card vault**: in auto-rotation
+mode the lanes draw from the vault in order and rotate to the next card
+when one hits its per-card limit; in manual mode every lane uses the
+selected card. Each card's success limit counts globally across
 lanes (slots are reserved atomically, so the limit is never overshot).
 Lanes need at least as many proxies as lanes; with fewer proxies the
 lane count is reduced to the pool size. Per-lane state lives in
@@ -324,25 +325,57 @@ suspect the VPN dropped). If the IP exits outside the US, the log
 warns you — but the run is **never blocked** by the check: a failed
 lookup or a non-US IP only logs a warning and the run continues.
 
-### Card storage: current single-card mode, upgradeable to a multi-card vault
+### Card vault (kho thẻ)
 
-The **Thẻ** row in the window takes a card number, expiry (MM/YY), CVV and
-ZIP. **Lưu thẻ** stores them in Windows Credential Manager — the same
-OS-protected store the app already uses for its passwords. The card is
-never written to a file, never added to the Excel sheet, and no digit of
-it ever appears in the on-screen log. At the card step the signup browser
-reads it back from Credential Manager, fills the form, verifies the number
-landed intact, and clicks Confirm; if the fill fails for any reason, the
-run falls back to waiting for manual entry. **Xoá thẻ** removes the saved
-card. Leave the ZIP empty to use 10001.
+The **Kho thẻ** panel in the window holds multiple cards. Each card is
+stored as its own entry in Windows Credential Manager — the same
+OS-protected store the app already uses for its passwords — under
+`MuseAIHelper:card:<id>` (the id is a random `card-<hex>`, never derived
+from the card number). The vault index (labels + per-card limits, no
+card numbers) lives in the `MuseAIHelper:cards` entry. A card is never
+written to a file, never added to the Excel sheet, and no digit of it
+ever appears in the on-screen log; the panel shows only the label you
+gave it, its limit, its usage count and its status.
 
-**Future upgrade option — multi-card storage vault:** The current single-card
-storage feature can be upgraded to a vault that holds multiple payment-card
-references, allows authorized users to add, view, select, and remove cards,
-and tracks their status. A `cards.txt` file may serve as an inventory of
-card identifiers; full card details should remain in secure storage rather
-than plaintext. This is an upgrade requirement, not a feature implemented
-in the current application.
+**Bulk import (nhập nhiều thẻ cùng lúc):** paste a list into the box,
+one card per line, in this format:
+
+```
+số thẻ|MM/YY|CVV|ZIP|nhãn
+```
+
+ZIP and the label may be left out (ZIP defaults to 10001, the label
+auto-numbers as Thẻ 1, Thẻ 2, …). Example line:
+`4111111111111111|12/28|123|10001|Thẻ chính`. **Nhập kho thẻ** stores
+each valid line straight into Credential Manager. Lines that fail are
+reported by line number only (e.g. "dòng 3: số thẻ không hợp lệ") —
+the line content and card digits are never shown or logged — and the
+rest of the batch is still imported. The paste box is cleared
+immediately after import, whether it succeeded or not, so card numbers
+never linger on screen. A card already in the vault (same number or
+same label) is rejected as a duplicate.
+
+**Per-card limit (Giới hạn / thẻ):** select a card, set its limit
+(0 = unlimited, max 100) and press **Lưu giới hạn**. The usage count
+is the number of successful accounts that used that card; it persists
+across runs in Credential Manager, keyed by the card id.
+
+**Rotation:** by default the run uses the vault in order and
+automatically moves to the next available card when the current one
+hits its limit; when every card is exhausted the run stops with a
+clear message. **Chọn thẻ này** pins one card manually — the run then
+uses only that card and stops when it hits its limit. **Tự động xoay**
+clears the manual pick and returns to rotation. **Xoá thẻ** removes a
+card from the vault (its Credential Manager entry too).
+
+At the card step the signup browser reads the card the run reserved
+for that account from Credential Manager, fills the form, verifies the
+number landed intact, and clicks Confirm; if the fill fails for any
+reason, the run falls back to waiting for manual entry. If the vault
+is empty, every account waits for manual entry at the card step
+(up to 4 minutes each). A single card saved by the old version is
+imported into the vault automatically on first use (label "Thẻ 1",
+limit 0, usage count carried over).
 
 Passwords are stored by Python `keyring` in the Windows Credential Manager.
 The Excel sheet contains mailbox passwords and live session cookies in
@@ -395,7 +428,7 @@ providers). Saved accounts go to
 Thời gian tạo, Email Meta, Mật khẩu hộp thư, Username Meta,
 Nhà cung cấp, Muse, Link lấy OTP. The Meta
 run reuses the proxy pool / VPN mode, lane count, temp-mail provider
-and account target of the main window; it does not use the saved card
+and account target of the main window; it does not use the card vault
 or invite codes.
 
 Note on CAPTCHAs: the Muse signup flow does not bypass CAPTCHA — a
@@ -418,8 +451,8 @@ and the run reads each row's Email Meta / Mật khẩu hộp thư /
 Nhà cung cấp columns — **no new mailbox is created**. Each account
 logs in with an email OTP (Meta's "Check your email" screen does
 not auto-submit, so the helper clicks "Log in" after filling the
-code), then submits the saved card at the card step, exactly like
-a signup from there on. After the OTP, Meta may
+code), then submits the card reserved from the vault at the card step,
+exactly like a signup from there on. After the OTP, Meta may
 show a "Confirm you're human" checkpoint
 (auth.meta.com/checkpoints/...) — the helper clicks Continue and
 solves the CAPTCHA through CapSolver (using the key saved on the
@@ -428,10 +461,12 @@ no key is saved. After the CAPTCHA, Meta sometimes asks for a
 selfie photo as well (varies per account) — the helper uploads the
 selfie file saved on the Meta tab, or waits for you to upload it
 by hand if none is saved. The flow then continues to the card
-step (or the profile form). The card limit on the Muse tab
-('Giới hạn / thẻ') applies to login runs too: the run stops on
-its own once the saved card has been used for that many
-successful accounts, and you swap the card by hand before
+step (or the profile form). The per-card limits from the card vault
+apply to login runs too: in auto-rotation mode the run moves to the
+next card when the current one hits its limit and stops on its own
+once every card in the vault is exhausted; with a card selected
+manually it uses only that card and stops when that card hits its
+limit. Pick another card (or raise a limit) in the vault before
 running again.
 A successful login is saved to `accounts.xlsx` — email, mailbox
 secret, session cookie and invite code as usual, plus the mailbox's
