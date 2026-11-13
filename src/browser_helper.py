@@ -2101,27 +2101,99 @@ def _meta_logged_in(page):
     return True
 
 
+def _first_visible(locator):
+    """Phần tử đầu tiên đang hiện + bấm được trong một locator.
+
+    Playwright strict mode: wait_for/is_enabled/click trên
+    locator khớp NHIỀU phần tử đều lỗi ngay — trang meta.ai có
+    2 nút "Log in" (bản desktop trong header + bản mobile ẩn),
+    và các trang auth.meta.com cũng có nút trùng. Quét từng
+    phần tử khớp, chọn cái đầu tiên visible + enabled, trả về
+    locator đơn (.nth) để mọi thao tác sau không bao giờ gặp
+    strict mode nữa. Không có phần tử nào thì trả về None.
+    """
+    try:
+        count = locator.count()
+    except Exception:
+        return None
+    for index in range(count):
+        candidate = locator.nth(index)
+        try:
+            if candidate.is_visible() and candidate.is_enabled():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _meta_click(page, locator, label):
+    """Bấm một nút của luồng Meta, chịu được nút trùng.
+
+    Như _click_when_ready nhưng không gọi wait_for/click trên
+    locator gốc (khớp nhiều phần tử là lỗi strict mode) — chờ
+    tới khi có phần tử hiện + bấm được rồi bấm đúng phần tử đó.
+    Dùng cho các bước bắt buộc của luồng Meta (Log in,
+    Continue, Confirm...), nơi nút PHẢI xuất hiện.
+    """
+    deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    while True:
+        target = _first_visible(locator)
+        if target is not None:
+            page.wait_for_timeout(UI_SETTLE_MS)
+            target.click(timeout=BUTTON_TIMEOUT_MS)
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Nút {label} không hiện sau "
+                f"{BUTTON_TIMEOUT_MS // 1000} giây."
+            )
+        page.wait_for_timeout(250)
+
+
+def _meta_wait_visible(page, locator, label):
+    """Chờ một phần tử của luồng Meta hiện ra, chịu được trùng.
+
+    Như .wait_for(state="visible") nhưng không lỗi strict mode
+    khi locator khớp nhiều phần tử — trả về phần tử đầu tiên
+    đang hiện (tiêu đề, ô nhập...). Dùng cho các điểm chờ của
+    luồng Meta.
+    """
+    deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    while True:
+        try:
+            count = locator.count()
+        except Exception:
+            count = 0
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Không thấy {label} sau {BUTTON_TIMEOUT_MS // 1000} giây."
+            )
+        page.wait_for_timeout(250)
+
+
 def _meta_click_button(page, names):
     """Bấm nút đầu tiên trong danh sách đang hiện và bấm được.
 
     Trả về tên nút đã bấm, None khi không có nút nào. Dùng cho
     các bước sau CAPTCHA/selfie — nhãn nút tiếp theo chưa biết
-    chắc nên thử lần lượt.
+    chắc nên thử lần lượt. Không chờ lâu từng tên: tên nào không
+    có nút hiện thì bỏ qua ngay.
     """
     for name in names:
         button = page.get_by_role("button", name=name, exact=True)
-        try:
-            visible = (
-                button.count()
-                and button.first.is_visible()
-                and button.first.is_enabled()
-            )
-        except Exception:
-            visible = False
-        if not visible:
+        target = _first_visible(button)
+        if target is None:
             continue
         try:
-            _click_when_ready(page, button, name)
+            page.wait_for_timeout(UI_SETTLE_MS)
+            target.click(timeout=BUTTON_TIMEOUT_MS)
             return name
         except Exception:
             continue
@@ -2208,17 +2280,11 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 continue
         if not relogin_tried:
             login = page.get_by_role("button", name="Log in", exact=True)
-            try:
-                visible = (
-                    login.count()
-                    and login.first.is_visible()
-                    and login.first.is_enabled()
-                )
-            except Exception:
-                visible = False
-            if visible:
+            target = _first_visible(login)
+            if target is not None:
                 _status("Meta: trang về màn hình đầu — bấm Log in lại...")
-                _click_when_ready(page, login, "Log in")
+                page.wait_for_timeout(UI_SETTLE_MS)
+                target.click(timeout=BUTTON_TIMEOUT_MS)
                 relogin_tried = True
                 page.wait_for_timeout(2000)
                 continue
@@ -2257,7 +2323,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         )
     _status("Meta: đang mở meta.ai...")
     page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-    _click_when_ready(
+    _meta_click(
         page,
         page.get_by_role("button", name="Log in", exact=True),
         "Log in",
@@ -2266,38 +2332,45 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         f"**{META_AUTH_HOST}**", timeout=PAGE_TIMEOUT_MS
     )
     _status("Meta: đang chọn đăng ký bằng email...")
-    _click_when_ready(
+    _meta_click(
         page,
         page.get_by_text("Use mobile number or email", exact=True),
         "Use mobile number or email",
     )
-    email_field = page.get_by_placeholder("Mobile number or email")
-    email_field.wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    email_field = _meta_wait_visible(
+        page,
+        page.get_by_placeholder("Mobile number or email"),
+        "ô Mobile number or email",
+    )
     email_field.fill(email)
-    _click_when_ready(
+    _meta_click(
         page,
         page.get_by_role("button", name="Continue", exact=True),
         "Continue",
     )
     _status("Meta: đang điền ngày sinh + mật khẩu...")
-    page.get_by_text(
-        "Get started on Meta AI", exact=True
-    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    _meta_wait_visible(
+        page,
+        page.get_by_text("Get started on Meta AI", exact=True),
+        "Get started on Meta AI",
+    )
     birth_date = _random_birth_date()
     _select_birth_date(page, birth_date)
     password_field = page.get_by_placeholder("Password")
     if not password_field.count():
-        password_field = page.locator('input[type="password"]').first
-    password_field.fill(_random_meta_password())
-    _click_when_ready(
+        password_field = page.locator('input[type="password"]')
+    password_field.first.fill(_random_meta_password())
+    _meta_click(
         page,
         page.get_by_role("button", name="Continue", exact=True),
         "Continue",
     )
     _status("Meta: đang xác nhận tạo tài khoản...")
-    page.get_by_text(
-        "Edit your Meta AI details", exact=True
-    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    _meta_wait_visible(
+        page,
+        page.get_by_text("Edit your Meta AI details", exact=True),
+        "Edit your Meta AI details",
+    )
     username = ""
     try:
         user_field = page.get_by_label("Username")
@@ -2321,7 +2394,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     if username:
         _meta_write_username(username)
         _status(f"META_USERNAME: {username}")
-    _click_when_ready(
+    _meta_click(
         page,
         page.get_by_role("button", name="Confirm", exact=True),
         "Confirm",
@@ -2330,13 +2403,15 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         "Meta: đang chờ mã xác minh từ "
         f"{mailbox['provider']}..."
     )
-    page.get_by_text(
-        "Confirm your account", exact=True
-    ).wait_for(state="visible", timeout=BUTTON_TIMEOUT_MS)
+    _meta_wait_visible(
+        page,
+        page.get_by_text("Confirm your account", exact=True),
+        "Confirm your account",
+    )
     code = _wait_for_code_from_mail(page, mailbox, existing_ids)
     _status("Meta: đã nhận mã xác minh, đang điền mã...")
     _meta_fill_code(page, code)
-    _click_when_ready(
+    _meta_click(
         page,
         page.get_by_role("button", name="Continue", exact=True),
         "Continue",
@@ -2852,8 +2927,8 @@ def _select_birth_date(page, birth_date):
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-            option.wait_for(state="visible", timeout=1000)
-            option.click(timeout=BUTTON_TIMEOUT_MS)
+            option.first.wait_for(state="visible", timeout=1000)
+            option.first.click(timeout=BUTTON_TIMEOUT_MS)
         except PlaywrightTimeoutError:
             if not native_select.count():
                 raise RuntimeError(
