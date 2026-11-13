@@ -13,13 +13,23 @@ Dùng bản ProxyLess của mọi loại task: CapSolver giải bằng IP của
 họ, không cần gửi proxy của mình sang đó (token gắn với sitekey
 + domain, không gắn IP, với các loại token-based này).
 
-Tài liệu API (đối chiếu 2026-11-13):
+Tài liệu API (đối chiếu 2026-11-13, docs.capsolver.com/en):
 - POST https://api.capsolver.com/createTask {clientKey, task}
   -> {errorId: 0, taskId} hoặc {errorId: 1, errorCode, ...}
 - POST https://api.capsolver.com/getTaskResult {clientKey, taskId}
   -> {errorId: 0, status: "ready"|"processing", solution}
 - POST https://api.capsolver.com/getBalance {clientKey}
   -> {errorId: 0, balance}
+- Tham số anchor: URL iframe /anchor có thể mang `s` (và `sa`).
+  Enterprise -> enterprisePayload {"s": ...}; v2 thường ->
+  recaptchaDataSValue (s) + pageAction (sa). Thiếu thì task có
+  thể không giải được — nên phát hiện từ iframe trước, div sau.
+- Callback: sau khi chèn token phải gọi callback của trang
+  (Meta dùng hàm ẩn danh trong grecaptcha.enterprise.render —
+  không có tên global, không có data-callback — nên tìm trong
+  window.___grecaptcha_cfg.clients).
+- Solution có thể kèm "recaptcha-ca-e" (v2) — đặt làm cookie
+  trên domain của trang đang mở.
 Loại task: ReCaptchaV2TaskProxyLess,
 ReCaptchaV2EnterpriseTaskProxyLess, HCaptchaTaskProxyless,
 AntiTurnstileTaskProxyLess, FunCaptchaTaskProxyless.
@@ -92,6 +102,26 @@ def _post(path, payload):
         raise CapSolverError(f"Không gọi được CapSolver: {error}.") from error
 
 
+# Mã lỗi CapSolver hay gặp (docs.capsolver.com/en/guide/api-error)
+# -> chú thích tiếng Việt để log đọc được ngay.
+_ERROR_HINTS = {
+    "ERROR_KEY_DENIED_ACCESS": "API key sai — kiểm tra lại key đã lưu",
+    "ERROR_ZERO_BALANCE": "tài khoản CapSolver hết tiền — nạp thêm",
+    "ERROR_CAPTCHA_UNSOLVABLE": (
+        "CAPTCHA không nhận ra (không bị trừ tiền) — thử lại"
+    ),
+    "ERROR_TASK_NOT_SUPPORTED": (
+        "loại task không được hỗ trợ — kiểm tra tên task"
+    ),
+    "ERROR_TASK_TIMEOUT": "giải quá 120 giây trên server CapSolver",
+    "ERROR_RATE_LIMIT": "gọi API quá nhanh — chờ rồi thử lại",
+    "ERROR_INVALID_TASK_DATA": "dữ liệu task sai — kiểm tra sitekey/URL",
+    "ERROR_KEY_TEMP_BLOCKED": (
+        "key bị khoá tạm 5 phút do quá nhiều lỗi — thử lại sau"
+    ),
+}
+
+
 def _check_error(data, action):
     """Ném lỗi nếu CapSolver trả errorId != 0."""
     if not isinstance(data, dict) or data.get("errorId") != 0:
@@ -100,6 +130,9 @@ def _check_error(data, action):
             data.get("errorDescription") if isinstance(data, dict) else None
         )
         detail = description or code or "lỗi không rõ"
+        hint = _ERROR_HINTS.get(code or "")
+        if hint:
+            detail = f"{detail} ({hint})"
         raise CapSolverError(f"CapSolver {action} lỗi: {detail}.")
 
 
@@ -130,27 +163,22 @@ def get_task_result(api_key, task_id):
     return data.get("status"), data.get("solution")
 
 
-def solve_task(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
-    """Tạo task rồi poll tới khi có token (hoặc hết giờ/lỗi).
+def solve_task_full(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
+    """Tạo task rồi poll tới khi có solution đầy đủ (hoặc lỗi).
 
-    Trả về token (chuỗi). Hết giờ -> TimeoutError; API lỗi ->
-    CapSolverError; task failed -> CapSolverError.
+    Trả về dict solution (chứa token + có thể kèm recaptcha-ca-e
+    / recaptcha-ca-t để đặt cookie). Hết giờ -> TimeoutError;
+    API lỗi -> CapSolverError; task failed -> CapSolverError.
     """
-    task_type, token_keys = TASK_TYPES.get(
-        _kind_of_task(task), ("", ("gRecaptchaResponse", "token"))
-    )
     task_id = create_task(api_key, task)
     deadline = time.monotonic() + timeout_seconds
     while True:
         status, solution = get_task_result(api_key, task_id)
         if status == "ready":
             if isinstance(solution, dict):
-                for key in token_keys:
-                    token = solution.get(key)
-                    if isinstance(token, str) and token:
-                        return token
+                return solution
             raise CapSolverError(
-                "CapSolver báo xong nhưng không có token trong kết quả."
+                "CapSolver báo xong nhưng kết quả không phải dict."
             )
         if status == "failed":
             raise CapSolverError("CapSolver giải thất bại (task failed).")
@@ -159,6 +187,25 @@ def solve_task(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
                 f"CapSolver chưa giải xong sau {timeout_seconds} giây."
             )
         time.sleep(POLL_INTERVAL_SECONDS)
+
+
+def solve_task(api_key, task, timeout_seconds=SOLVE_TIMEOUT_SECONDS):
+    """Tạo task rồi poll tới khi có token (hoặc hết giờ/lỗi).
+
+    Trả về token (chuỗi). Hết giờ -> TimeoutError; API lỗi ->
+    CapSolverError; task failed -> CapSolverError.
+    """
+    _task_type, token_keys = TASK_TYPES.get(
+        _kind_of_task(task), ("", ("gRecaptchaResponse", "token"))
+    )
+    solution = solve_task_full(api_key, task, timeout_seconds)
+    for key in token_keys:
+        token = solution.get(key)
+        if isinstance(token, str) and token:
+            return token
+    raise CapSolverError(
+        "CapSolver báo xong nhưng không có token trong kết quả."
+    )
 
 
 def _kind_of_task(task):
@@ -177,6 +224,24 @@ _DETECT_JS = """() => {
     const el = document.querySelector(sel);
     return el ? (el.getAttribute(attr) || "") : "";
   };
+  const param = (src, name) => {
+    const m = src.match(new RegExp("[?&]" + name + "=([^&]+)"));
+    return m ? decodeURIComponent(m[1]) : "";
+  };
+  // Đọc tham số anchor (k, s, sa) từ URL iframe: s/sa là tham số
+  // CapSolver cần để giải (enterprisePayload / recaptchaDataSValue
+  // / pageAction) — div .g-recaptcha không có các tham số này nên
+  // iframe luôn được ưu tiên trước div.
+  const anchor = (src, kind) => {
+    const k = param(src, "k");
+    if (!k) return null;
+    const out = {kind: kind, sitekey: k, source: "anchor"};
+    const s = param(src, "s");
+    if (s) out.s = s;
+    const sa = param(src, "sa");
+    if (sa) out.sa = sa;
+    return out;
+  };
   const frames = Array.from(document.querySelectorAll("iframe"));
   // reCAPTCHA Enterprise trước: ô tick của nó cũng nằm trong
   // div .g-recaptcha, nhưng iframe là enterprise/anchor — phải
@@ -184,29 +249,32 @@ _DETECT_JS = """() => {
   for (const f of frames) {
     const src = f.src || "";
     if (src.includes("recaptcha/enterprise/anchor")) {
-      const m = src.match(/[?&]k=([^&]+)/);
-      if (m) return {kind: "recaptcha2_enterprise", sitekey: decodeURIComponent(m[1])};
+      const found = anchor(src, "recaptcha2_enterprise");
+      if (found) return found;
     }
   }
-  let key = pick(".g-recaptcha", "data-sitekey");
-  if (key) return {kind: "recaptcha2", sitekey: key};
-  key = pick(".h-captcha", "data-sitekey");
-  if (key) return {kind: "hcaptcha", sitekey: key};
-  key = pick(".cf-turnstile", "data-sitekey");
-  if (key) return {kind: "turnstile", sitekey: key};
   for (const f of frames) {
     const src = f.src || "";
     if (src.includes("recaptcha/api2/anchor")) {
-      const m = src.match(/[?&]k=([^&]+)/);
-      if (m) return {kind: "recaptcha2", sitekey: decodeURIComponent(m[1])};
+      const found = anchor(src, "recaptcha2");
+      if (found) return found;
     }
+  }
+  let key = pick(".g-recaptcha", "data-sitekey");
+  if (key) return {kind: "recaptcha2", sitekey: key, source: "div"};
+  key = pick(".h-captcha", "data-sitekey");
+  if (key) return {kind: "hcaptcha", sitekey: key, source: "div"};
+  key = pick(".cf-turnstile", "data-sitekey");
+  if (key) return {kind: "turnstile", sitekey: key, source: "div"};
+  for (const f of frames) {
+    const src = f.src || "";
     if (src.includes("hcaptcha.com/captcha")) {
       const m = src.match(/[?&]sitekey=([^&]+)/);
-      if (m) return {kind: "hcaptcha", sitekey: decodeURIComponent(m[1])};
+      if (m) return {kind: "hcaptcha", sitekey: decodeURIComponent(m[1]), source: "anchor"};
     }
     if (src.includes("funcaptcha.com") || src.includes("arkoselabs.com")) {
       const m = src.match(/[?&]pk=([^&]+)/);
-      if (m) return {kind: "funcaptcha", sitekey: decodeURIComponent(m[1])};
+      if (m) return {kind: "funcaptcha", sitekey: decodeURIComponent(m[1]), source: "anchor"};
     }
   }
   return null;
@@ -216,30 +284,58 @@ _DETECT_JS = """() => {
 def detect_captcha(page):
     """Phát hiện CAPTCHA token-based trên trang.
 
-    Trả về {"kind", "sitekey", "website_url"} hoặc None nếu
-    không thấy loại nào quen thuộc. kind là một trong:
-    recaptcha2, recaptcha2_enterprise, hcaptcha, turnstile,
-    funcaptcha.
+    Trả về {"kind", "sitekey", "website_url", "source", ...}
+    hoặc None nếu không thấy loại nào quen thuộc. kind là một
+    trong: recaptcha2, recaptcha2_enterprise, hcaptcha,
+    turnstile, funcaptcha. source là "anchor" (phát hiện từ
+    iframe — kèm tham số s/sa nếu có) hoặc "div" (chỉ thấy div
+    chứa sitekey, chưa thấy iframe).
+
+    Chỉ thấy div của reCAPTCHA thì chờ 2 giây rồi phát hiện lại
+    một lần: iframe anchor thường tải ngay sau div, và nó mang
+    tham số s mà task giải cần.
     """
     try:
         found = page.evaluate(_DETECT_JS)
     except Exception:
         return None
+    if (
+        isinstance(found, dict)
+        and found.get("source") == "div"
+        and found.get("kind") in ("recaptcha2", "recaptcha2_enterprise")
+    ):
+        try:
+            page.wait_for_timeout(2000)
+            second = page.evaluate(_DETECT_JS)
+        except Exception:
+            second = None
+        if isinstance(second, dict) and second.get("sitekey"):
+            found = second
     if not isinstance(found, dict) or not found.get("sitekey"):
         return None
     try:
         website_url = page.url
     except Exception:
         website_url = ""
-    return {
+    result = {
         "kind": found["kind"],
         "sitekey": found["sitekey"],
         "website_url": website_url,
+        "source": found.get("source") or "",
     }
+    for extra in ("s", "sa"):
+        if found.get(extra):
+            result[extra] = found[extra]
+    return result
 
 
 def _task_for(detected):
-    """Task CapSolver tương ứng với loại CAPTCHA đã phát hiện."""
+    """Task CapSolver tương ứng với loại CAPTCHA đã phát hiện.
+
+    Tham số anchor (tài liệu CapSolver): Enterprise gửi kèm
+    enterprisePayload {"s": ...} khi anchor có tham số s; v2
+    thường gửi recaptchaDataSValue (s) + pageAction (sa).
+    """
     kind = detected["kind"]
     task_type, _keys = TASK_TYPES[kind]
     task = {"type": task_type, "websiteURL": detected["website_url"]}
@@ -247,6 +343,14 @@ def _task_for(detected):
         task["websitePublicKey"] = detected["sitekey"]
     else:
         task["websiteKey"] = detected["sitekey"]
+    if kind == "recaptcha2_enterprise":
+        if detected.get("s"):
+            task["enterprisePayload"] = {"s": detected["s"]}
+    elif kind == "recaptcha2":
+        if detected.get("s"):
+            task["recaptchaDataSValue"] = detected["s"]
+    if kind in ("recaptcha2", "recaptcha2_enterprise") and detected.get("sa"):
+        task["pageAction"] = detected["sa"]
     return task
 
 
@@ -261,9 +365,54 @@ _INJECT_JS = """([kind, token]) => {
   };
   if (kind === "recaptcha2" || kind === "recaptcha2_enterprise") {
     const ok = setField(document.getElementById("g-recaptcha-response"));
+    // Chèn token xong phải BÁO cho trang biết — không thì nút
+    // Continue của trang vẫn khoá. Thử lần lượt: (1) data-callback
+    // trên div, (2) callback trong ___grecaptcha_cfg.clients
+    // (trường hợp Meta: hàm ẩn danh truyền vào
+    // grecaptcha.enterprise.render, không có tên global),
+    // (3) tìm sâu tối đa 3 tầng trong client (callback có thể
+    // lồng trong object con). Chỉ tìm sâu khi chưa gọi được gì.
+    let called = false;
+    const callIt = (fn) => {
+      try { fn(token); called = true; } catch (e) {}
+    };
     const widget = document.querySelector(".g-recaptcha");
-    const cb = widget && widget.getAttribute("data-callback");
-    if (cb && window[cb]) { try { window[cb](token); } catch (e) {} }
+    const cbName = widget && widget.getAttribute("data-callback");
+    if (cbName && typeof window[cbName] === "function") callIt(window[cbName]);
+    try {
+      const cfg = window.___grecaptcha_cfg;
+      if (cfg && cfg.clients) {
+        const ids = Object.keys(cfg.clients);
+        for (let i = 0; i < ids.length; i++) {
+          const client = cfg.clients[ids[i]];
+          if (!client) continue;
+          const cb = client.callback;
+          if (typeof cb === "function") callIt(cb);
+          else if (typeof cb === "string" && typeof window[cb] === "function") callIt(window[cb]);
+        }
+        if (!called) {
+          const seen = [];
+          const deep = (obj, depth) => {
+            if (!obj || depth > 3 || seen.indexOf(obj) !== -1) return null;
+            seen.push(obj);
+            if (typeof obj.callback === "function") return obj.callback;
+            for (const k in obj) {
+              let v;
+              try { v = obj[k]; } catch (e) { continue; }
+              if (v && typeof v === "object") {
+                const found = deep(v, depth + 1);
+                if (found) return found;
+              }
+            }
+            return null;
+          };
+          for (let i = 0; i < ids.length; i++) {
+            const found = deep(cfg.clients[ids[i]], 0);
+            if (found) { callIt(found); break; }
+          }
+        }
+      }
+    } catch (e) {}
     return ok;
   }
   if (kind === "hcaptcha") {
@@ -293,11 +442,57 @@ def inject_token(page, kind, token):
         return False
 
 
+def _set_solution_cookies(page, solution):
+    """Đặt cookie từ solution (nếu có) lên domain trang đang mở.
+
+    Một số trang v2 cần cookie recaptcha-ca-e (CapSolver tự trả
+    kèm khi có); v3 session mode trả recaptcha-ca-t. Lỗi đặt
+    cookie không làm hỏng việc giải — chỉ bỏ qua.
+    """
+    if not isinstance(solution, dict):
+        return
+    names = [name for name in ("recaptcha-ca-e", "recaptcha-ca-t")
+             if solution.get(name)]
+    if not names:
+        return
+    try:
+        from urllib.parse import urlparse
+
+        domain = urlparse(page.url).hostname
+        cookies = [
+            {
+                "name": name,
+                "value": solution[name],
+                "domain": domain,
+                "path": "/",
+            }
+            for name in names
+        ]
+        page.context.add_cookies(cookies)
+    except Exception:
+        pass
+
+
 def solve_detected(page, api_key, detected,
                      timeout_seconds=SOLVE_TIMEOUT_SECONDS):
     """Giải một CAPTCHA đã phát hiện bằng detect_captcha: tạo
-    task, chờ token, chèn vào trang. Trả về kind đã giải."""
-    token = solve_task(api_key, _task_for(detected), timeout_seconds)
+    task, chờ solution đầy đủ, đặt cookie đi kèm (nếu có), chèn
+    token vào trang. Trả về kind đã giải."""
+    solution = solve_task_full(api_key, _task_for(detected), timeout_seconds)
+    _task_type, token_keys = TASK_TYPES.get(
+        detected["kind"], ("", ("gRecaptchaResponse", "token"))
+    )
+    token = None
+    for key in token_keys:
+        value = solution.get(key)
+        if isinstance(value, str) and value:
+            token = value
+            break
+    if token is None:
+        raise CapSolverError(
+            "CapSolver báo xong nhưng không có token trong kết quả."
+        )
+    _set_solution_cookies(page, solution)
     inject_token(page, detected["kind"], token)
     return detected["kind"]
 
