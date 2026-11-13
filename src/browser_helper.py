@@ -2377,8 +2377,16 @@ def _meta_fill_code(page, code):
     tách như Muse.ai, và KHÔNG tự gửi — phía gọi vẫn bấm
     Continue sau khi điền. Ô nhập của Meta dùng nhãn nổi
     (floating label) nên thử placeholder -> label -> textbox
-    theo tên, giống ô email.
+    theo tên, giống ô email. Mã Meta luôn 6 số — mã lấy được
+    mà không đủ 6 số thì lỗi ngay tại đây thay vì điền mã sai
+    rồi kẹt 7 phút ở bước sau.
     """
+    if len(code) != 6 or not code.isdigit():
+        raise RuntimeError(
+            f"Mã xác minh lấy được không đúng 6 số "
+            f"({len(code)} ký tự) — không điền để khỏi kẹt ở "
+            "form xác nhận."
+        )
     for locator in (
         page.get_by_placeholder("Code", exact=True),
         page.get_by_label("Code"),
@@ -3298,27 +3306,64 @@ def _get_message_ids(mailbox):
     }
 
 
+def _extract_strict_code(text):
+    """Mã xác minh 6 số trong một đoạn văn bản.
+
+    Ưu tiên 6 số liền nhau, rồi 3+3 cách nhau bằng khoảng
+    trắng/gạch ngang ("482 891"). Trả về None khi không có.
+    """
+    found = re.findall(r"(?<!\d)\d{6}(?!\d)", text)
+    if found:
+        return found[0]
+    spaced = re.search(r"(?<!\d)(\d{3})[ \u00a0\-](\d{3})(?!\d)", text)
+    if spaced:
+        return spaced.group(1) + spaced.group(2)
+    return None
+
+
+def _extract_loose_code(text):
+    """Số 4-8 chữ số đầu tiên trong văn bản (fallback khi không
+    có mã 6 số — tương thích mã 4/8 số nếu dịch vụ nào dùng)."""
+    found = re.findall(r"(?<!\d)\d{4,8}(?!\d)", text)
+    return found[0] if found else None
+
+
 def _verification_code_from_new_messages(mailbox, existing_ids):
     """Tìm mã xác minh trong các thư MỚI của hộp thư.
 
-    Quét tiêu đề trước, chưa thấy mới đọc toàn văn thư — qua
-    mail_providers nên dịch vụ nào cũng dùng chung nhịp này.
+    Ưu tiên mã 6 số trên TOÀN BỘ thư mới trước (tiêu đề tất cả
+    thư, rồi toàn văn tất cả thư), vì thư của Meta chứa số 4
+    chữ số khác đứng trước mã thật — lấy số đầu tiên 4-8 chữ
+    số sẽ vớ nhầm (live 2026-11-13: lấy "4828" thay vì mã 6
+    số, form báo "should have 6 digits"). Chỉ khi không có mã
+    6 số nào mới lấy số 4-8 chữ số đầu tiên.
     """
+    new_messages = []
     for message in mail_providers.list_messages(mailbox):
         message_id = _message_id(message)
         if not message_id or message_id in existing_ids:
             continue
         subject = message.get("subject") or ""
-        codes = re.findall(r"(?<!\d)\d{4,8}(?!\d)", subject)
-        if codes:
-            return codes[0]
         try:
-            text = mail_providers.read_message(mailbox, message_id)
+            body = mail_providers.read_message(mailbox, message_id)
         except Exception:
-            continue
-        codes = re.findall(r"(?<!\d)\d{4,8}(?!\d)", text)
-        if codes:
-            return codes[0]
+            body = ""
+        new_messages.append((subject, body or ""))
+    for subject, _body in new_messages:
+        code = _extract_strict_code(subject)
+        if code:
+            return code
+    for _subject, body in new_messages:
+        code = _extract_strict_code(body)
+        if code:
+            return code
+    for subject, body in new_messages:
+        code = _extract_loose_code(subject)
+        if code:
+            return code
+        code = _extract_loose_code(body)
+        if code:
+            return code
     return None
 
 
