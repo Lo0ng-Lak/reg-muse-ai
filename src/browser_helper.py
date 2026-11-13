@@ -2828,11 +2828,29 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
             clicked = _meta_click_button(page, ("Continue",))
             if clicked:
                 checkpoint_clicks += 1
-                _status(
-                    "Meta: đã bấm Continue ở trang kiểm tra "
-                    "'Confirm you're human'."
-                )
+                # Playwright bấm được vào nút chưa chắc trang đã
+                # chuyển: Meta phớt lờ cú bấm khi CAPTCHA chưa
+                # giải xong (live 2026-11-13 14:16 — log ghi "đã
+                # bấm" mà trang đứng yên). Kiểm tra thật rồi mới
+                # ghi log cho đúng.
                 page.wait_for_timeout(2000)
+                after = capsolver.detect_captcha(page)
+                if after is not None:
+                    _status(
+                        "Meta: đã bấm Continue — CAPTCHA đã hiện, "
+                        "chuẩn bị giải."
+                    )
+                elif not _meta_checkpoint_visible(page):
+                    _status(
+                        "Meta: đã bấm Continue — đã qua trang "
+                        "kiểm tra."
+                    )
+                else:
+                    _status(
+                        "Meta: đã bấm Continue nhưng trang chưa "
+                        "chuyển — CAPTCHA chưa được giải nên Meta "
+                        "chưa cho qua."
+                    )
                 continue
             # Không bấm được Continue (nút đã biến mất) -> rơi
             # xuống kiểm tra selfie bên dưới.
