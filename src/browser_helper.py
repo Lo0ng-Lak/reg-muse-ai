@@ -2101,29 +2101,85 @@ def _meta_logged_in(page):
     return True
 
 
-def _first_visible(locator):
-    """Phần tử đầu tiên đang hiện + bấm được trong một locator.
+def _page_closed(page):
+    """Cửa sổ Chromium đã đóng chưa (người dùng đóng tay / bị giết).
+
+    Các vòng chờ của luồng Meta phải fail nhanh khi cửa sổ đã
+    đóng, thay vì chờ hết 90 giây rồi báo "nút không hiện".
+    """
+    try:
+        return page.is_closed()
+    except Exception:
+        return True
+
+
+def _visible_candidates(locator):
+    """Các phần tử khớp đang hiện + bấm được (locator đơn từng cái).
 
     Playwright strict mode: wait_for/is_enabled/click trên
     locator khớp NHIỀU phần tử đều lỗi ngay — trang meta.ai có
-    2 nút "Log in" (bản desktop trong header + bản mobile ẩn),
-    và các trang auth.meta.com cũng có nút trùng. Quét từng
-    phần tử khớp, chọn cái đầu tiên visible + enabled, trả về
-    locator đơn (.nth) để mọi thao tác sau không bao giờ gặp
-    strict mode nữa. Không có phần tử nào thì trả về None.
+    2 nút "Log in", và các trang auth.meta.com cũng có nút trùng.
+    Quét từng phần tử khớp, chỉ giữ cái visible + enabled, trả
+    về locator đơn (.nth) để mọi thao tác sau không bao giờ gặp
+    strict mode nữa.
     """
     try:
         count = locator.count()
     except Exception:
-        return None
+        return []
+    found = []
     for index in range(count):
         candidate = locator.nth(index)
         try:
             if candidate.is_visible() and candidate.is_enabled():
-                return candidate
+                found.append(candidate)
         except Exception:
             continue
-    return None
+    return found
+
+
+def _first_visible(locator):
+    """Phần tử đầu tiên đang hiện + bấm được, None khi không có."""
+    found = _visible_candidates(locator)
+    return found[0] if found else None
+
+
+def _in_viewport_candidates(page, locator):
+    """Các phần tử khớp đang hiện, bấm được VÀ nằm trong khung hình.
+
+    is_visible() của Playwright chỉ kiểm tra hộp bao + kiểu hiển
+    thị — nút mobile của meta.ai nằm ngoài khung hình (off-canvas)
+    vẫn "visible", bấm vào không chuyển trang (live 2026-11-13
+    09:45: bấm xong chờ 45 giây không sang auth.meta.com). Lọc
+    thêm bằng bounding_box() trong viewport để chỉ chọn nút thật
+    sự đang hiện trên màn hình.
+    """
+    try:
+        viewport = page.viewport_size or {"width": 1280, "height": 720}
+    except Exception:
+        viewport = {"width": 1280, "height": 720}
+    found = []
+    for candidate in _visible_candidates(locator):
+        try:
+            box = candidate.bounding_box()
+        except Exception:
+            continue
+        if not box:
+            continue
+        if (
+            box["x"] >= 0
+            and box["y"] >= 0
+            and box["x"] + box["width"] <= viewport["width"]
+            and box["y"] + box["height"] <= viewport["height"]
+        ):
+            found.append(candidate)
+    return found
+
+
+def _first_in_viewport(page, locator):
+    """Phần tử đầu tiên đang hiện trong khung hình, None khi không có."""
+    found = _in_viewport_candidates(page, locator)
+    return found[0] if found else None
 
 
 def _meta_click(page, locator, label):
@@ -2132,12 +2188,21 @@ def _meta_click(page, locator, label):
     Như _click_when_ready nhưng không gọi wait_for/click trên
     locator gốc (khớp nhiều phần tử là lỗi strict mode) — chờ
     tới khi có phần tử hiện + bấm được rồi bấm đúng phần tử đó.
-    Dùng cho các bước bắt buộc của luồng Meta (Log in,
-    Continue, Confirm...), nơi nút PHẢI xuất hiện.
+    Ưu tiên nút đang nằm trong khung hình, fallback sang nút
+    visible ngoài khung hình (nút dưới nếp gấp trang — click sẽ
+    tự cuộn tới). Dùng cho các bước bắt buộc của luồng Meta
+    (Continue, Confirm...), nơi nút PHẢI xuất hiện.
     """
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
     while True:
-        target = _first_visible(locator)
+        if _page_closed(page):
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi bấm được "
+                f"nút {label}."
+            )
+        target = _first_in_viewport(page, locator) or _first_visible(
+            locator
+        )
         if target is not None:
             page.wait_for_timeout(UI_SETTLE_MS)
             target.click(timeout=BUTTON_TIMEOUT_MS)
@@ -2150,6 +2215,63 @@ def _meta_click(page, locator, label):
         page.wait_for_timeout(250)
 
 
+def _meta_try_login_buttons(page, candidates):
+    """Thử bấm từng nút Log in tới khi trang chuyển sang auth.meta.com.
+
+    Trả về True khi chuyển trang thành công, False khi đã thử hết
+    mà không nút nào chuyển được. Mỗi nút được 8 giây để chuyển
+    trang — bấm đúng nút thì chuyển gần như ngay.
+    """
+    for target in candidates:
+        try:
+            page.wait_for_timeout(UI_SETTLE_MS)
+            target.click(timeout=BUTTON_TIMEOUT_MS)
+        except Exception:
+            continue
+        try:
+            page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=8000)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _meta_click_login(page):
+    """Bấm Log in ở meta.ai: thử từng nút trùng tới khi chuyển trang.
+
+    Trang meta.ai có 2 nút "Log in" — nút mobile nằm ngoài khung
+    hình vẫn qua được is_visible() nên lần sửa trước bấm nhầm
+    nút đó: cú bấm không lỗi nhưng trang không chuyển sang
+    auth.meta.com (live 2026-11-13 09:45). Hàm này chỉ thử các
+    nút đang nằm trong khung hình, bấm từng cái và chờ chuyển
+    trang; nút nào chuyển được thì xong. Không nút nào chuyển
+    được thì lỗi rõ ràng thay vì chờ 45 giây rồi báo timeout.
+    """
+    locator = page.get_by_role("button", name="Log in", exact=True)
+    deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    while time.monotonic() < deadline:
+        if _page_closed(page):
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi bấm được Log in."
+            )
+        candidates = _in_viewport_candidates(page, locator)
+        if candidates:
+            if _meta_try_login_buttons(page, candidates):
+                return
+            raise RuntimeError(
+                f"Đã thử {len(candidates)} nút Log in nhưng trang "
+                "không chuyển sang auth.meta.com — có thể trang "
+                "meta.ai đã đổi bố cục."
+            )
+        page.wait_for_timeout(250)
+    # Hết 90 giây không thấy nút nào trong khung hình: thử nốt các
+    # nút visible ngoài khung hình trước khi bỏ cuộc.
+    candidates = _visible_candidates(locator)
+    if candidates and _meta_try_login_buttons(page, candidates):
+        return
+    raise RuntimeError("Nút Log in không hiện sau 90 giây.")
+
+
 def _meta_wait_visible(page, locator, label):
     """Chờ một phần tử của luồng Meta hiện ra, chịu được trùng.
 
@@ -2160,6 +2282,11 @@ def _meta_wait_visible(page, locator, label):
     """
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
     while True:
+        if _page_closed(page):
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trong lúc chờ "
+                f"{label} hiện ra."
+            )
         try:
             count = locator.count()
         except Exception:
@@ -2184,11 +2311,13 @@ def _meta_click_button(page, names):
     Trả về tên nút đã bấm, None khi không có nút nào. Dùng cho
     các bước sau CAPTCHA/selfie — nhãn nút tiếp theo chưa biết
     chắc nên thử lần lượt. Không chờ lâu từng tên: tên nào không
-    có nút hiện thì bỏ qua ngay.
+    có nút hiện thì bỏ qua ngay. Ưu tiên nút trong khung hình.
     """
     for name in names:
         button = page.get_by_role("button", name=name, exact=True)
-        target = _first_visible(button)
+        target = _first_in_viewport(page, button) or _first_visible(
+            button
+        )
         if target is None:
             continue
         try:
@@ -2280,12 +2409,11 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 continue
         if not relogin_tried:
             login = page.get_by_role("button", name="Log in", exact=True)
-            target = _first_visible(login)
-            if target is not None:
+            candidates = _in_viewport_candidates(page, login)
+            if candidates:
                 _status("Meta: trang về màn hình đầu — bấm Log in lại...")
-                page.wait_for_timeout(UI_SETTLE_MS)
-                target.click(timeout=BUTTON_TIMEOUT_MS)
-                relogin_tried = True
+                if _meta_try_login_buttons(page, candidates):
+                    relogin_tried = True
                 page.wait_for_timeout(2000)
                 continue
         page.wait_for_timeout(3000)
@@ -2323,14 +2451,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         )
     _status("Meta: đang mở meta.ai...")
     page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
-    _meta_click(
-        page,
-        page.get_by_role("button", name="Log in", exact=True),
-        "Log in",
-    )
-    page.wait_for_url(
-        f"**{META_AUTH_HOST}**", timeout=PAGE_TIMEOUT_MS
-    )
+    _meta_click_login(page)
     _status("Meta: đang chọn đăng ký bằng email...")
     _meta_click(
         page,
@@ -2790,8 +2911,9 @@ def main():
         else:
             page.wait_for_event("close")
     except PlaywrightTimeoutError as error:
+        site = "Meta" if meta else "Muse.ai"
         detail = (
-            "Trang Muse.ai chưa phản hồi đúng thời gian, hoặc form đã "
+            f"Trang {site} chưa phản hồi đúng thời gian, hoặc form đã "
             f"thay đổi. {_short_error(error)}"
         )
         if auto:
