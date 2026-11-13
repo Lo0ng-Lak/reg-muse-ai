@@ -37,24 +37,26 @@ class MetaTab(ttk.Frame):
         ttk.Label(
             self,
             text=(
-                "Đăng kí Meta chạy riêng: tạo tài khoản Meta ở meta.ai rồi lưu "
-                "vào meta_accounts.xlsx, không qua Muse. CAPTCHA giải tự động "
-                "qua CapSolver (trả phí theo lượt), selfie up từ file ảnh này "
-                "cho mọi tài khoản — không có bước làm tay."
+                "Đăng kí Meta chạy riêng: tạo tài khoản Meta ở meta.ai "
+                "rồi lưu vào meta_accounts.xlsx, không qua Muse. "
+                "CAPTCHA giải tự động qua CapSolver, selfie up từ "
+                "file — không có bước làm tay."
             ),
             wraplength=720,
-        ).grid(row=1, column=0, sticky="ew", pady=(6, 12))
+        ).grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
+        # Setup (proxy/luồng/kết nối) xuống cuối: vẫn đầy đủ mọi
+        # trường, ít dùng tới thì cuộn xuống khi cần.
         self.panel = SetupPanel(
             self,
             self.coordinator,
             pool_file=paths.data_file("proxies_meta.txt"),
             bad_file=paths.data_file("bad-proxies-meta.txt"),
         )
-        self.panel.grid(row=2, column=0, sticky="ew")
+        self.panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
 
         key_row = ttk.Frame(self)
-        key_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        key_row.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         key_row.columnconfigure(1, weight=1)
         ttk.Label(key_row, text="CapSolver API key:").grid(
             row=0, column=0, sticky="w"
@@ -73,7 +75,7 @@ class MetaTab(ttk.Frame):
         self.check_balance_button.grid(row=0, column=3, padx=(6, 0))
 
         selfie_row = ttk.Frame(self)
-        selfie_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        selfie_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         selfie_row.columnconfigure(1, weight=1)
         ttk.Label(selfie_row, text="Ảnh selfie:").grid(
             row=0, column=0, sticky="w"
@@ -92,7 +94,7 @@ class MetaTab(ttk.Frame):
         self.meta_start_button.grid(row=0, column=3, padx=(6, 0))
 
         buttons = ttk.Frame(self)
-        buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        buttons.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         self.open_sheet_button = ttk.Button(
             buttons,
             text="Mở sheet Meta",

@@ -55,32 +55,28 @@ class SetupPanel(ttk.Frame):
 
     def _build(self):
         proxy_row = ttk.Frame(self)
-        proxy_row.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        proxy_row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         proxy_row.columnconfigure(1, weight=1)
         ttk.Label(proxy_row, text="Proxy:").grid(row=0, column=0, sticky="nw")
-        self.proxy_text = tk.Text(proxy_row, height=3, width=52)
+        self.proxy_text = tk.Text(proxy_row, height=2, width=52)
         self.proxy_text.grid(row=0, column=1, sticky="ew", padx=(6, 6))
         ttk.Label(
             proxy_row,
-            text=(
-                "mỗi dòng 1 proxy (host:port:user:pass) — kho proxy "
-                "US của bạn, tool không kiểm tra lại IP thoát"
-            ),
+            text="mỗi dòng 1 proxy (host:port:user:pass)",
             wraplength=190,
         ).grid(row=0, column=2, sticky="w")
 
         bad_row = ttk.Frame(self)
-        bad_row.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        bad_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         bad_row.columnconfigure(1, weight=1)
         ttk.Label(bad_row, text="Proxy lỗi:").grid(row=0, column=0, sticky="nw")
-        self.bad_proxy_text = tk.Text(bad_row, height=3, width=52)
+        self.bad_proxy_text = tk.Text(bad_row, height=2, width=52)
         self.bad_proxy_text.grid(row=0, column=1, sticky="ew", padx=(6, 6))
         ttk.Label(
             bad_row,
             text=(
-                "proxy bị 'Join the waitlist' hoặc bị Meta chặn sẽ "
-                "tự vào đây và không được dùng lại ở mọi đợt chạy "
-                "sau — xoá một dòng là cho dùng lại proxy đó"
+                "proxy bị chặn tự vào đây — xoá một dòng là cho "
+                "dùng lại proxy đó"
             ),
             wraplength=190,
         ).grid(row=0, column=2, sticky="w")
@@ -108,7 +104,7 @@ class SetupPanel(ttk.Frame):
 
         if self.show_provider:
             mail_row = ttk.Frame(self)
-            mail_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+            mail_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
             ttk.Label(mail_row, text="Temp mail:").pack(side="left")
             self.provider_var = tk.StringVar(
                 value=dict(mail_providers.PROVIDERS)[
@@ -126,15 +122,14 @@ class SetupPanel(ttk.Frame):
             ttk.Label(
                 mail_row,
                 text=(
-                    "dịch vụ hộp thư tạm cho lượt chạy — tempmail.plus "
-                    "là mặc định và là dịch vụ duy nhất đã kiểm chứng "
-                    "nhận OTP từ Meta tới nay"
+                    "dịch vụ hộp thư tạm — tempmail.plus mặc định, "
+                    "đã kiểm chứng nhận OTP"
                 ),
                 wraplength=480,
             ).pack(side="left")
 
         conn_row = ttk.Frame(self)
-        conn_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        conn_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(conn_row, text="Kết nối:").pack(side="left")
         self.conn_mode_var = tk.StringVar(value=CONN_MODES[0][1])
         self.conn_combo = ttk.Combobox(
@@ -153,13 +148,13 @@ class SetupPanel(ttk.Frame):
             text=(
                 "IP máy (VPN): chạy trực tiếp qua IP của máy này — "
                 "bật VPN trước khi bấm Bắt đầu; mọi luồng dùng "
-                "chung 1 IP, IP bị chặn là dừng cả lượt chạy."
+                "chung 1 IP."
             ),
             wraplength=480,
         ).pack(side="left")
 
         ip_row = ttk.Frame(self)
-        ip_row.grid(row=5, column=0, sticky="ew", pady=(6, 0))
+        ip_row.grid(row=5, column=0, sticky="ew", pady=(4, 0))
         ttk.Label(ip_row, text="IP hiện tại:").pack(side="left")
         self.ip_status = tk.StringVar(value="chưa kiểm tra")
         ttk.Label(ip_row, textvariable=self.ip_status).pack(

@@ -332,10 +332,14 @@ stored as its own entry in Windows Credential Manager — the same
 OS-protected store the app already uses for its passwords — under
 `MuseAIHelper:card:<id>` (the id is a random `card-<hex>`, never derived
 from the card number). The vault index (labels + per-card limits, no
-card numbers) lives in the `MuseAIHelper:cards` entry. A card is never
-written to a file, never added to the Excel sheet, and no digit of it
-ever appears in the on-screen log; the panel shows only the label you
-gave it, its limit, its usage count and its status.
+card numbers) lives in the file `vault.json` next to the other run-data
+files — it holds no secrets, so it does not need Credential Manager,
+and a file has no 2560-byte blob limit, so a vault of hundreds of
+cards still imports (an old index still in Credential Manager is
+moved to the file once, automatically). A card is never written to a
+file, never added to the Excel sheet, and no digit of it ever appears
+in the on-screen log; the panel shows only the label you gave it, its
+limit, its usage count and its status.
 
 **Bulk import (nhập nhiều thẻ cùng lúc):** paste a list into the box,
 one card per line, in this format:
@@ -351,7 +355,13 @@ ZIP and the label can also be given as 4th and 5th fields
 each valid line straight into Credential Manager. Lines that fail are
 reported by line number only (e.g. "dòng 3: số thẻ không hợp lệ") —
 the line content and card digits are never shown or logged — and the
-rest of the batch is still imported. The paste box is cleared
+rest of the batch is still imported. Header/separator lines (no digits
+at all) are skipped and counted, not treated as errors. If Credential
+Manager refuses a write, the error shows the real reason (Windows
+error code included) instead of a generic message, so the cause can be
+diagnosed; and if saving the index fails after cards were written,
+those cards are kept and merged back into the vault on the next load —
+never lost. The paste box is cleared
 immediately after import, whether it succeeded or not, so card numbers
 never linger on screen. A card already in the vault (same number or
 same label) is rejected as a duplicate.

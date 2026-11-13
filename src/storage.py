@@ -7,6 +7,7 @@ coordinator mà không cần mở giao diện.
 import json
 import re
 import secrets
+import threading
 import time
 from datetime import datetime
 
@@ -50,14 +51,23 @@ CARD_SUCCESS_COUNT_FIELD = "card_success_count"
 # Kho thẻ (nhiều thẻ): mỗi thẻ một mục riêng trong Windows
 # Credential Manager, tên dịch vụ là CARD_SERVICE_PREFIX + id
 # thẻ (id ngẫu nhiên, không phải số thẻ). Danh mục kho (id +
-# nhãn + giới hạn từng thẻ) và thẻ đang chọn tay nằm ở dịch vụ
-# riêng CARD_VAULT_INDEX_SERVICE — trong đó KHÔNG có chữ số
-# nào của thẻ; số lần dùng thành công của từng thẻ nằm trong
-# chính mục của thẻ đó (trường card_success_count).
+# nhãn + giới hạn từng thẻ) nằm ở file vault.json — trong đó
+# KHÔNG có chữ số nào của thẻ; thẻ đang chọn tay vẫn nằm ở
+# dịch vụ riêng CARD_VAULT_INDEX_SERVICE (chỉ một id ngắn);
+# số lần dùng thành công của từng thẻ nằm trong chính mục của
+# thẻ đó (trường card_success_count).
 CARD_SERVICE_PREFIX = "MuseAIHelper:card:"
 CARD_VAULT_INDEX_SERVICE = "MuseAIHelper:cards"
 CARD_VAULT_INDEX_FIELD = "index"
 CARD_VAULT_ACTIVE_FIELD = "active"
+# Danh mục kho nằm ở file vault.json trong thư mục dữ liệu
+# chạy (không chứa chữ số thẻ nào nên không cần Credential
+# Manager): blob của một credential Windows bị giới hạn 2560
+# byte nên danh mục JSON dài làm CredWrite lỗi 1783 (gặp thật
+# 2026-11-13 khi nhập hàng loạt). vault.pending.json giữ danh
+# mục chưa lưu được để hoà lại sau (xem _save_vault_pending).
+VAULT_INDEX_FILE = "vault.json"
+VAULT_PENDING_FILE = "vault.pending.json"
 
 SPREADSHEET_HEADERS = [
     "Thời gian tạo",
@@ -653,12 +663,98 @@ def _new_card_id(existing_ids):
             return candidate
     raise RuntimeError("Không tạo được id thẻ mới (trùng lặp liên tục).")
 
-def _load_vault_index():
-    """Danh mục kho thẻ: list dict {"id", "label", "limit"} theo
-    thứ tự dùng (thẻ đầu dùng trước). Không có chữ số thẻ nào
-    trong danh mục. Lần đầu đọc mà kho trống thì thử nhập thẻ
-    đơn cũ (xem _migrate_legacy_card)."""
-    _migrate_legacy_card()
+_VAULT_INDEX_LOCK = threading.RLock()
+
+
+def _vault_index_path():
+    return paths.data_file(VAULT_INDEX_FILE)
+
+
+def _vault_pending_path():
+    return paths.data_file(VAULT_PENDING_FILE)
+
+
+def _clean_vault_entries(entries):
+    """Chuẩn hoá danh mục kho thô thành list {"id", "label",
+    "limit"} (giới hạn kẹp 0–100, nhãn trống thành "Thẻ").
+    Mục thiếu id thì bỏ."""
+    cleaned = []
+    if not isinstance(entries, list):
+        return cleaned
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        try:
+            limit = max(0, min(int(entry.get("limit") or 0), 100))
+        except (TypeError, ValueError):
+            limit = 0
+        cleaned.append(
+            {
+                "id": str(entry["id"]),
+                "label": str(entry.get("label") or "").strip() or "Thẻ",
+                "limit": limit,
+            }
+        )
+    return cleaned
+
+
+def _read_vault_index_file():
+    """Đọc danh mục kho từ file vault.json -> list đã chuẩn hoá,
+    hoặc None khi file thiếu/hỏng."""
+    with _VAULT_INDEX_LOCK:
+        try:
+            raw = _vault_index_path().read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, list):
+            return None
+        return _clean_vault_entries(data)
+
+
+def _write_vault_index_file(entries):
+    """Ghi danh mục kho xuống vault.json: ghi file tạm rồi đổi
+    tên (không bao giờ để lại file dở dang), rồi đọc lại kiểm
+    chứng. Raise RuntimeError (tiếng Việt, không mã lỗi
+    Windows) khi ghi hoặc kiểm chứng thất bại sau 3 lần thử."""
+    cleaned = _clean_vault_entries(entries)
+    payload = json.dumps(cleaned, ensure_ascii=False)
+    target = _vault_index_path()
+    tmp = target.with_name(target.name + ".tmp")
+    last_error = None
+    with _VAULT_INDEX_LOCK:
+        for _ in range(3):
+            try:
+                tmp.write_text(payload, encoding="utf-8")
+                tmp.replace(target)
+            except OSError as error:
+                last_error = error
+                time.sleep(0.2)
+                continue
+            back = _read_vault_index_file()
+            if back is not None and [e["id"] for e in back] == [
+                e["id"] for e in cleaned
+            ]:
+                return
+            last_error = RuntimeError("đọc lại danh mục kho không khớp")
+            time.sleep(0.2)
+    raise RuntimeError(
+        "Không lưu được danh mục kho thẻ vào file "
+        f"{VAULT_INDEX_FILE} ({last_error})"
+    )
+
+
+def _migrate_vault_index_to_file():
+    """Chuyển danh mục kho từ Credential Manager sang file
+    vault.json (một lần duy nhất, lúc nâng cấp). File đã có nội
+    dung hợp lệ thì thôi. CM còn danh mục cũ thì ghi sang file
+    rồi xoá mục CM (best-effort) — từ đó kho không còn bị giới
+    hạn blob 2560 byte của Credential Manager."""
+    if _read_vault_index_file() is not None:
+        return
     try:
         raw = keyring.get_password(
             CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
@@ -666,46 +762,99 @@ def _load_vault_index():
     except Exception:
         raw = None
     if not raw:
-        return []
+        return
     try:
-        entries = json.loads(raw)
+        data = json.loads(raw)
     except (TypeError, ValueError):
-        return []
-    cleaned = []
-    if isinstance(entries, list):
-        for entry in entries:
-            if not isinstance(entry, dict) or not entry.get("id"):
-                continue
+        return
+    if not isinstance(data, list):
+        return
+    entries = _clean_vault_entries(data)
+    try:
+        _write_vault_index_file(entries)
+    except Exception:
+        return
+    try:
+        keyring.delete_password(
+            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
+        )
+    except Exception:
+        pass
+
+
+def _save_vault_pending(entries):
+    """Giữ lại danh mục kho chưa lưu được (đợt nhập đã ghi thẻ
+    vào Credential Manager nhưng lưu danh mục lỗi): ghi vào
+    vault.pending.json để lần đọc sau tự hoà vào kho — thẻ đã
+    ghi không bị mất."""
+    try:
+        payload = json.dumps(
+            _clean_vault_entries(entries), ensure_ascii=False
+        )
+        target = _vault_pending_path()
+        tmp = target.with_name(target.name + ".tmp")
+        with _VAULT_INDEX_LOCK:
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(target)
+    except Exception:
+        pass
+
+
+def _read_vault_pending_file():
+    """Danh mục đang chờ hoà vào kho (xem _save_vault_pending)."""
+    with _VAULT_INDEX_LOCK:
+        try:
+            raw = _vault_pending_path().read_text(encoding="utf-8")
+        except OSError:
+            return []
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        return _clean_vault_entries(data) if isinstance(data, list) else []
+
+
+def _load_vault_index():
+    """Danh mục kho thẻ: list dict {"id", "label", "limit"} theo
+    thứ tự dùng (thẻ đầu dùng trước). Không có chữ số thẻ nào
+    trong danh mục. Danh mục nằm ở file vault.json (lần đầu đọc
+    thì chuyển danh mục cũ từ Credential Manager sang file, rồi
+    thử nhập thẻ đơn cũ — xem _migrate_legacy_card). Mục đang
+    chờ trong vault.pending.json (đợt nhập trước ghi thẻ xong
+    nhưng lưu danh mục lỗi) được hoà vào kho để không mất thẻ."""
+    _migrate_vault_index_to_file()
+    _migrate_legacy_card()
+    entries = _read_vault_index_file()
+    if entries is None:
+        entries = []
+    pending = _read_vault_pending_file()
+    if pending:
+        known = {entry["id"] for entry in entries}
+        merged = list(entries)
+        for entry in pending:
+            if entry["id"] not in known:
+                merged.append(entry)
+                known.add(entry["id"])
+        if len(merged) != len(entries):
+            entries = merged
             try:
-                limit = max(0, min(int(entry.get("limit") or 0), 100))
-            except (TypeError, ValueError):
-                limit = 0
-            cleaned.append(
-                {
-                    "id": str(entry["id"]),
-                    "label": str(entry.get("label") or "").strip()
-                    or "Thẻ",
-                    "limit": limit,
-                }
-            )
-    return cleaned
+                _write_vault_index_file(entries)
+            except Exception:
+                pass
+        try:
+            _vault_pending_path().unlink()
+        except OSError:
+            pass
+    return entries
+
 
 def _save_vault_index(entries):
-    keyring.set_password(
-        CARD_VAULT_INDEX_SERVICE,
-        CARD_VAULT_INDEX_FIELD,
-        json.dumps(
-            [
-                {
-                    "id": str(entry["id"]),
-                    "label": str(entry.get("label") or "").strip(),
-                    "limit": max(0, min(int(entry.get("limit") or 0), 100)),
-                }
-                for entry in entries
-            ],
-            ensure_ascii=False,
-        ),
-    )
+    """Ghi danh mục kho xuống file vault.json (không còn giới
+    hạn blob 2560 byte của Credential Manager nên kho mở rộng
+    tới hàng trăm thẻ vẫn ghi được). Raise RuntimeError khi
+    không ghi/kiểm chứng được — người gọi phải xử lý để không
+    mất thẻ đã ghi."""
+    _write_vault_index_file(entries)
 
 def _load_vault_active():
     """Id thẻ đang chọn tay ("" là tự động xoay theo thứ tự kho)."""
@@ -867,6 +1016,72 @@ def _parse_bulk_card_line(line, taken_labels, taken_numbers):
     }
     return card, None
 
+def _short_error_text(error):
+    """Một dòng lỗi ngắn gọn từ exception, đã lọc mọi dãy chữ
+    số dài (>= 6 chữ số) để không bao giờ lộ chữ số thẻ nếu
+    thông điệp lỗi vô tình chứa dữ liệu nhạy cảm. Mã lỗi ngắn
+    (ví dụ 1783, 1312) vẫn giữ nguyên."""
+    text = str(error).strip().splitlines()
+    first = text[0] if text else type(error).__name__
+    detail = f"{type(error).__name__}: {first}"
+    return re.sub(r"\d{6,}", "…", detail)[:200]
+
+
+def _keyring_backend_name():
+    """Tên backend keyring đang dùng (để chẩn đoán lỗi ghi
+    Credential Manager trên máy người dùng)."""
+    try:
+        return type(keyring.get_keyring()).__name__
+    except Exception:
+        return "?"
+
+
+def _probe_keyring_write():
+    """Thử ghi/đọc/xoá một credential nháp để biết Credential
+    Manager còn ghi được không — chạy TRƯỚC khi xử lý cả đợt
+    nhập thẻ. Raise RuntimeError (tiếng Việt + lý do thật +
+    tên backend) khi không ghi được, để lỗi hệ thống lộ mặt
+    ngay thay vì fail từng dòng một với lý do chung chung."""
+    service = "MuseAIHelper:probe"
+    last_error = None
+    for _ in range(2):
+        try:
+            keyring.set_password(service, "probe", "ok")
+            if keyring.get_password(service, "probe") != "ok":
+                raise RuntimeError("đọc lại không khớp")
+            return
+        except Exception as error:
+            last_error = error
+            time.sleep(0.3)
+        finally:
+            try:
+                keyring.delete_password(service, "probe")
+            except Exception:
+                pass
+    raise RuntimeError(
+        "Không ghi được vào Windows Credential Manager: "
+        f"{_short_error_text(last_error)} "
+        f"(backend keyring: {_keyring_backend_name()}). "
+        "Thử đóng/mở lại tool rồi nhập lại; nếu vẫn lỗi, kiểm "
+        "tra Windows Credential Manager còn mở được không."
+    )
+
+
+def _save_vault_card_with_retry(card_id, card):
+    """Ghi một thẻ vào Credential Manager, thử lại 1 lần khi
+    lỗi thoáng qua. Raise lỗi cuối cùng khi vẫn không ghi
+    được — người gọi ghi rõ lý do thật vào lỗi từng dòng."""
+    last_error = None
+    for _ in range(2):
+        try:
+            _save_vault_card(card_id, card)
+            return
+        except Exception as error:
+            last_error = error
+            time.sleep(0.3)
+    raise last_error
+
+
 def _import_bulk_cards(text):
     """Nhập nhiều thẻ từ văn bản nhiều dòng vào kho (mỗi dòng một
     thẻ, xem _parse_bulk_card_line để biết định dạng).
@@ -874,11 +1089,17 @@ def _import_bulk_cards(text):
     Thẻ hợp lệ được ghi thẳng vào Credential Manager (mỗi thẻ một
     mục riêng) và thêm vào danh mục kho với giới hạn 0 (không giới
     hạn). Dòng lỗi được bỏ qua — KHÔNG dừng cả đợt nhập.
-    Trả về (added_labels, errors): added_labels là nhãn các thẻ
-    đã thêm (theo thứ tự dòng), errors là list (số_dòng, lý_do)
-    — số dòng tính theo văn bản đã dán (kể cả dòng trống), lý do
-    không chứa chữ số thẻ hay nội dung dòng. Dòng trống được bỏ
-    qua lặng lẽ, không tính là lỗi.
+    Trả về (added_labels, errors, skipped): added_labels là nhãn
+    các thẻ đã thêm (theo thứ tự dòng), errors là list (số_dòng,
+    lý_do) — số dòng tính theo văn bản đã dán (kể cả dòng trống),
+    lý do không chứa chữ số thẻ hay nội dung dòng; skipped là số
+    dòng tiêu đề/phân cách đã bỏ qua (dòng không có chữ số nào,
+    không thể là thẻ). Dòng trống được bỏ qua lặng lẽ, không tính
+    là lỗi. Danh mục kho nằm ở file vault.json nên nhập hàng trăm
+    thẻ vẫn ghi được; nếu lưu danh mục lỗi sau khi đã ghi thẻ thì
+    các thẻ được giữ lại trong vault.pending.json và tự hoà vào
+    kho ở lần đọc sau (không mất thẻ), đồng thời raise lỗi rõ
+    ràng bằng tiếng Việt.
     """
     entries = _load_vault_index()
     taken_labels = {entry["label"] for entry in entries}
@@ -887,12 +1108,21 @@ def _import_bulk_cards(text):
         existing = _load_vault_card(entry["id"])
         if existing.get("number"):
             taken_numbers.add(existing["number"])
+    # Fail-fast: Credential Manager mà ghi không được thì báo
+    # ngay lý do thật, đừng để 22 dòng fail một loạt mới biết.
+    _probe_keyring_write()
     added_labels = []
     errors = []
+    skipped = 0
     next_auto = len(entries) + 1
     for line_no, raw_line in enumerate((text or "").splitlines(), start=1):
         line = raw_line.strip()
         if not line:
+            continue
+        if not any(ch.isdigit() for ch in line):
+            # Dòng tiêu đề/phân cách (không có chữ số nào) — không
+            # thể là thẻ, bỏ qua và báo số lượng, không tính lỗi.
+            skipped += 1
             continue
         card, reason = _parse_bulk_card_line(
             line, taken_labels, taken_numbers
@@ -908,18 +1138,37 @@ def _import_bulk_cards(text):
             next_auto += 1
         card_id = _new_card_id([entry["id"] for entry in entries])
         try:
-            _save_vault_card(card_id, card)
+            _save_vault_card_with_retry(card_id, card)
             _save_vault_card_success_count(card_id, 0)
-        except Exception:
-            errors.append((line_no, "không ghi được vào Credential Manager"))
+        except Exception as error:
+            # Ghi rõ lý do thật (mã lỗi Windows + tên hàm) để
+            # lần sau nhìn là biết vì sao — lỗi keyring không
+            # bao giờ mang theo nội dung credential.
+            errors.append(
+                (
+                    line_no,
+                    "không ghi được vào Credential Manager "
+                    f"({_short_error_text(error)})",
+                )
+            )
             continue
         entries.append({"id": card_id, "label": label, "limit": 0})
         taken_labels.add(label)
         taken_numbers.add(card["number"])
         added_labels.append(label)
     if added_labels:
-        _save_vault_index(entries)
-    return added_labels, errors
+        try:
+            _save_vault_index(entries)
+        except Exception as error:
+            _save_vault_pending(entries)
+            raise RuntimeError(
+                f"Đã ghi {len(added_labels)} thẻ vào Credential "
+                "Manager nhưng không lưu được danh mục kho thẻ: "
+                f"{_short_error_text(error)}. Các thẻ đã được giữ "
+                "lại và sẽ tự hiện trong kho ở lần mở sau — hãy "
+                "thử nhập lại."
+            ) from error
+    return added_labels, errors, skipped
     entries = _load_vault_index()
     vault = []
     for entry in entries:
@@ -941,13 +1190,7 @@ def _migrate_legacy_card():
     rồi xoá thẻ đơn cũ để kho là nơi duy nhất giữ thẻ. Chỉ xoá
     bản cũ sau khi bản mới đã ghi xong. Trả về True nếu đã nhập.
     """
-    try:
-        raw = keyring.get_password(
-            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
-        )
-    except Exception:
-        raw = None
-    if raw:
+    if _read_vault_index_file():
         return False
     legacy = _load_card_from_keyring()
     if not legacy:

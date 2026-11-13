@@ -224,6 +224,53 @@ def test_log_frame_height():
         app.destroy()
 
 
+def test_vault_and_run_visible_without_scrolling():
+    """Sau khi sắp xếp lại (2026-11-13): ở cửa sổ mặc định
+    820x980, Kho thẻ (bảng + ô dán + nút Nhập kho thẻ) và các
+    nút chạy phải thấy được mà KHÔNG cần cuộn; khung log vẫn
+    >= 180px. Tab Meta: nút Đăng kí Meta cũng phải thấy được."""
+    app = _make_app()
+    try:
+        log_h = app.log_text.master.winfo_height()
+        assert log_h >= 180, f"khung log chỉ {log_h}px"
+
+        def _check_visible(canvas, widget, name):
+            top = canvas.winfo_rooty()
+            bottom = top + canvas.winfo_height()
+            y = widget.winfo_rooty()
+            h = widget.winfo_height()
+            assert y >= top and y + h <= bottom, (
+                f"{name} ngoài vùng nhìn thấy: y={y}..{y + h}, "
+                f"viewport {top}..{bottom} (cần cuộn)"
+            )
+
+        app.notebook.select(0)
+        app.update_idletasks()
+        app.update()
+        muse_scroll = app.notebook.nametowidget(app.notebook.tabs()[0])
+        canvas = muse_scroll.canvas
+        for name, widget in (
+            ("bảng Kho thẻ", app.muse_tab.vault_tree),
+            ("ô dán thẻ", app.muse_tab.bulk_card_text),
+            ("nút Nhập kho thẻ", app.muse_tab.import_bulk_button),
+            ("nút Đăng nhập Muse", app.muse_tab.muse_login_button),
+            ("nút Bắt đầu đăng ký", app.muse_tab.start_button),
+        ):
+            _check_visible(canvas, widget, name)
+
+        app.notebook.select(1)
+        app.update_idletasks()
+        app.update()
+        meta_scroll = app.notebook.nametowidget(app.notebook.tabs()[1])
+        _check_visible(
+            meta_scroll.canvas,
+            app.meta_tab.meta_start_button,
+            "nút Đăng kí Meta",
+        )
+    finally:
+        app.destroy()
+
+
 if __name__ == "__main__":
     _run("lane crash resets running + finished", test_lane_crash_resets_running)
     _run("login loop crash resets running + finished",
@@ -236,6 +283,8 @@ if __name__ == "__main__":
          test_pump_survives_bad_event, needs_display=True)
     _run("log frame tall, notebook bounded, tabs scrollable",
          test_log_frame_height, needs_display=True)
+    _run("vault + run buttons visible without scrolling",
+         test_vault_and_run_visible_without_scrolling, needs_display=True)
     failed = [n for n, ok, _ in RESULTS if ok is False]
     skipped = [n for n, ok, _ in RESULTS if ok is None]
     print(f"--- {len(RESULTS) - len(failed) - len(skipped)}/"

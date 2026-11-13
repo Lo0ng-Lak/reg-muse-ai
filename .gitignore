@@ -14,3 +14,7 @@ bad-proxies-meta.txt
 selfie.txt
 meta_username*.txt
 meta_excel.txt
+vault.json
+vault.pending.json
+vault.json.tmp
+vault.pending.json.tmp

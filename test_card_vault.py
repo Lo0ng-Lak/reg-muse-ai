@@ -9,11 +9,21 @@ Giao diện tkinter (muse_tab) không được kiểm tra ở đây — cần ch
 trên máy Windows của Long.
 """
 
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
+
+import paths
+
+# Danh mục kho nằm ở file vault.json (xem storage): trong test
+# này paths.data_file được chuyển sang thư mục tạm để test
+# không chạm tới thư mục dữ liệu thật.
+TMP = Path(tempfile.mkdtemp(prefix="reg-test-vault-"))
+paths.data_file = lambda name: TMP / name
 
 
 class _FakeKeyring:
@@ -48,14 +58,25 @@ CARD_C = "4000056655665556"
 
 def reset():
     _FAKE_KEYRING.store.clear()
+    for name in (
+        "vault.json",
+        "vault.pending.json",
+        "vault.json.tmp",
+        "vault.pending.json.tmp",
+    ):
+        try:
+            (TMP / name).unlink()
+        except OSError:
+            pass
 
 
 def _add_test_card(number, label, limit=0, used=0):
     """Thêm một thẻ test vào kho qua đường nhập hàng loạt, trả về id."""
-    added, errors = storage._import_bulk_cards(
+    added, errors, skipped = storage._import_bulk_cards(
         f"{number}|12/28|123|10001|{label}"
     )
     assert not errors, errors
+    assert skipped == 0, skipped
     assert added == [label], added
     entry = next(
         e for e in storage._load_vault_index() if e["label"] == label
@@ -171,8 +192,9 @@ def test_bulk_import_valid():
             f"{CARD_C}|01/30|999|20000|",
         ]
     )
-    added, errors = storage._import_bulk_cards(text)
+    added, errors, skipped = storage._import_bulk_cards(text)
     assert errors == [], errors
+    assert skipped == 0
     assert added == ["Thẻ chính", "Thẻ 1", "Thẻ 2"], added
     vault = storage._load_vault()
     assert [c["label"] for c in vault] == added
@@ -195,8 +217,9 @@ def test_bulk_import_invalid_lines_report_line_numbers_only():
         "4111111111111111|12/28|123|10001|Nhãn|thừa",  # dòng 7: thừa trường
         "4111111111111111|12/28|123|1234|Thẻ lẻ",  # dòng 8: ZIP 4 chữ số
     ]
-    added, errors = storage._import_bulk_cards("\n".join(lines))
+    added, errors, skipped = storage._import_bulk_cards("\n".join(lines))
     assert added == ["Thẻ chính"]
+    assert skipped == 0
     assert [line_no for line_no, _ in errors] == [3, 4, 5, 6, 7, 8]
     # Lý do lỗi không chứa chữ số nào của thẻ trong dòng lỗi.
     for line_no, reason in errors:
@@ -214,20 +237,146 @@ def test_bulk_import_duplicates():
             f"{CARD_B}|12/28|123|10001|Thẻ B",  # hợp lệ
         ]
     )
-    added, errors = storage._import_bulk_cards(text)
+    added, errors, skipped = storage._import_bulk_cards(text)
     assert added == ["Thẻ A", "Thẻ B"]
+    assert skipped == 0
     assert [line_no for line_no, _ in errors] == [2, 3]
     # Trùng với thẻ đã có trong kho từ trước cũng bị chặn.
-    added2, errors2 = storage._import_bulk_cards(
+    added2, errors2, skipped2 = storage._import_bulk_cards(
         f"{CARD_A}|12/28|123|10001|Thẻ mới"
     )
     assert added2 == []
+    assert skipped2 == 0
     assert [line_no for line_no, _ in errors2] == [1]
 
 
 def test_bulk_import_empty_text():
-    assert storage._import_bulk_cards("") == ([], [])
-    assert storage._import_bulk_cards("   \n\n  \n") == ([], [])
+    assert storage._import_bulk_cards("") == ([], [], 0)
+    assert storage._import_bulk_cards("   \n\n  \n") == ([], [], 0)
+
+
+# --- Danh mục kho ở file + nhập hàng loạt lớn --------------------------
+
+def test_bulk_import_100_cards():
+    """Kho mở rộng tới 100 thẻ: danh mục nằm ở file vault.json
+    (không còn giới hạn blob 2560 byte của Credential Manager)
+    nên nhập một đợt lớn vẫn ghi được."""
+    lines = [f"4111111111{i:06d}|12/28|123" for i in range(100)]
+    added, errors, skipped = storage._import_bulk_cards("\n".join(lines))
+    assert errors == [], errors
+    assert skipped == 0
+    assert added == [f"Thẻ {i}" for i in range(1, 101)]
+    assert len(storage._load_vault()) == 100
+    assert (TMP / "vault.json").exists(), "danh mục kho phải nằm ở file vault.json"
+    assert ("MuseAIHelper:cards", "index") not in _FAKE_KEYRING.store, (
+        "danh mục không còn ghi vào Credential Manager"
+    )
+    # Nhập lại đúng 100 dòng đó: toàn bộ trùng, không thêm thẻ nào.
+    added2, errors2, skipped2 = storage._import_bulk_cards("\n".join(lines))
+    assert added2 == []
+    assert len(errors2) == 100
+    assert skipped2 == 0
+
+
+def test_index_migrates_from_keyring_to_file():
+    """Nâng cấp: danh mục kho cũ còn trong Credential Manager
+    được chuyển sang file vault.json một lần duy nhất, rồi mục
+    CM cũ bị xoá; helper đọc được thẻ qua file."""
+    _FAKE_KEYRING.store[("MuseAIHelper:cards", "index")] = json.dumps(
+        [
+            {"id": "card-old0001", "label": "Thẻ 1", "limit": 0},
+            {"id": "card-old0002", "label": "Thẻ 2", "limit": 5},
+        ],
+        ensure_ascii=False,
+    )
+    index = storage._load_vault_index()
+    assert [e["label"] for e in index] == ["Thẻ 1", "Thẻ 2"]
+    assert index[1]["limit"] == 5
+    assert (TMP / "vault.json").exists()
+    assert ("MuseAIHelper:cards", "index") not in _FAKE_KEYRING.store, (
+        "mục CM cũ phải được xoá sau khi chuyển sang file"
+    )
+    assert browser_helper._vault_card_ids() == ["card-old0001", "card-old0002"]
+    # Đọc lại lần hai: không chuyển trùng, không mất thẻ.
+    assert [e["id"] for e in storage._load_vault_index()] == [
+        "card-old0001",
+        "card-old0002",
+    ]
+
+
+def test_index_save_failure_keeps_cards():
+    """Lưu danh mục lỗi sau khi đã ghi thẻ: import raise lỗi
+    rõ ràng bằng tiếng Việt (không mã Windows), thẻ được giữ
+    trong vault.pending.json và tự hoà vào kho ở lần đọc sau."""
+    original_write = storage._write_vault_index_file
+
+    def _failing_write(entries):
+        raise OSError("disk full (giả lập)")
+
+    storage._write_vault_index_file = _failing_write
+    try:
+        try:
+            storage._import_bulk_cards(f"{CARD_A}|12/28|123")
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải raise RuntimeError khi lưu danh mục lỗi")
+        assert "1783" not in message and "CredWrite" not in message
+        assert "danh mục" in message
+        assert "1 thẻ" in message
+        assert (TMP / "vault.pending.json").exists()
+    finally:
+        storage._write_vault_index_file = original_write
+    # Lần đọc sau tự hoà thẻ đang chờ vào kho, không mất thẻ.
+    vault = storage._load_vault()
+    assert [c["label"] for c in vault] == ["Thẻ 1"]
+    assert storage._load_vault_card(vault[0]["id"])["number"] == CARD_A
+    assert not (TMP / "vault.pending.json").exists(), "mục chờ đã hoà xong thì xoá"
+
+
+def test_write_failure_surfaces_real_error():
+    """Ghi thẻ vào Credential Manager lỗi: lý do thật (mã lỗi
+    + tên hàm) phải hiện trong lỗi từng dòng, không bao giờ
+    chứa chữ số thẻ; probe vẫn qua được (nó dùng mục nháp
+    khác) nên lỗi nằm đúng ở bước ghi thẻ."""
+    original_set = _FAKE_KEYRING.set_password
+
+    def _failing_set(service, field, value):
+        if service.startswith("MuseAIHelper:card:"):
+            raise OSError(1783, "The stub received bad data")
+        return original_set(service, field, value)
+
+    _FAKE_KEYRING.set_password = _failing_set
+    try:
+        added, errors, skipped = storage._import_bulk_cards(
+            f"{CARD_A}|12/28|123"
+        )
+    finally:
+        _FAKE_KEYRING.set_password = original_set
+    assert added == []
+    assert skipped == 0
+    assert len(errors) == 1
+    line_no, reason = errors[0]
+    assert line_no == 1
+    assert "1783" in reason, "mã lỗi thật phải lộ ra để chẩn đoán"
+    assert CARD_A not in reason, "lý do không được chứa chữ số thẻ"
+
+
+def test_skipped_header_lines():
+    """Dòng tiêu đề/phân cách (không có chữ số nào) được bỏ qua
+    và báo số lượng, không tính là lỗi; thẻ thật vẫn nhập."""
+    text = "\n".join(
+        [
+            "số thẻ|MM/YY|CVV",
+            "---",
+            "Danh sách thẻ mới",
+            f"{CARD_A}|12/28|123",
+        ]
+    )
+    added, errors, skipped = storage._import_bulk_cards(text)
+    assert added == ["Thẻ 1"]
+    assert errors == []
+    assert skipped == 3
 
 
 # --- Chạy: giữ chỗ / xoay thẻ / giới hạn -------------------------------
@@ -365,6 +514,11 @@ TESTS = [
     test_bulk_import_invalid_lines_report_line_numbers_only,
     test_bulk_import_duplicates,
     test_bulk_import_empty_text,
+    test_bulk_import_100_cards,
+    test_index_migrates_from_keyring_to_file,
+    test_index_save_failure_keeps_cards,
+    test_write_failure_surfaces_real_error,
+    test_skipped_header_lines,
     test_rotation_across_limits,
     test_rotation_all_exhausted_stops,
     test_manual_mode_only_uses_selected_card,

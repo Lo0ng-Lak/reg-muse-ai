@@ -77,10 +77,11 @@ DIRECT_MODE = False
 CARD_SERVICE = "MuseAIHelper:card"
 # Kho thẻ: mỗi thẻ một mục Credential Manager riêng
 # "MuseAIHelper:card:<id>" (id dạng card-<hex>, không phải số
-# thẻ). Danh mục kho ở mục "MuseAIHelper:cards": trường "index"
-# là JSON list {id, label, limit}, trường "active" là id thẻ
-# đang chọn tay ("" = tự động xoay). Mục đơn cũ CARD_SERVICE
-# chỉ còn dùng làm dự phòng khi chạy helper độc lập.
+# thẻ). Danh mục kho nằm ở file vault.json (app chính quản lý);
+# mục "MuseAIHelper:cards" / trường "index" chỉ còn là dự phòng
+# cho bản cũ, trường "active" vẫn là id thẻ đang chọn tay
+# ("" = tự động xoay). Mục đơn cũ CARD_SERVICE chỉ còn dùng
+# làm dự phòng khi chạy helper độc lập.
 CARD_SERVICE_PREFIX = "MuseAIHelper:card:"
 CARD_VAULT_INDEX_SERVICE = "MuseAIHelper:cards"
 CARD_VAULT_INDEX_FIELD = "index"
@@ -346,7 +347,23 @@ def _load_card_service(service):
 
 
 def _vault_card_ids():
-    """Id các thẻ trong kho, theo thứ tự kho (đọc từ trường index)."""
+    """Id các thẻ trong kho, theo thứ tự kho. Danh mục nằm ở
+    file vault.json (app chính quản lý) — đọc file trước; còn
+    mục CM cũ thì đọc dự phòng để helper chạy độc lập với bản
+    cũ vẫn thấy thẻ."""
+    try:
+        raw = paths.data_file("vault.json").read_text(encoding="utf-8")
+        entries = json.loads(raw)
+        if isinstance(entries, list):
+            ids = [
+                str(entry.get("id", ""))
+                for entry in entries
+                if isinstance(entry, dict) and entry.get("id")
+            ]
+            if ids:
+                return ids
+    except Exception:
+        pass
     try:
         raw = keyring.get_password(
             CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD

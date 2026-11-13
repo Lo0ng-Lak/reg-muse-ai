@@ -37,14 +37,15 @@ class MuseTab(ttk.Frame):
             self,
             text=(
                 "Đăng nhập Muse bằng tài khoản Meta đã đăng kí: chọn file Excel "
-                "Meta ở ô bên dưới (tab Meta tạo ra file đó), tool lấy mail trong "
-                "file đăng nhập rồi nộp thẻ đã lưu — không tạo mail mới. Nút Bắt "
-                "đầu đăng ký là cách cũ: tạo mail tạm mới rồi đăng ký trực tiếp "
-                "(Muse.ai có thể từ chối email tạm)."
+                "Meta ở ô bên dưới, tool lấy mail trong file đăng nhập rồi nộp "
+                "thẻ đã lưu. Nút Bắt đầu đăng ký là cách cũ: tạo mail tạm mới "
+                "rồi đăng ký trực tiếp."
             ),
             wraplength=720,
-        ).grid(row=1, column=0, sticky="ew", pady=(6, 12))
+        ).grid(row=1, column=0, sticky="ew", pady=(6, 0))
 
+        # Setup (proxy/luồng/kết nối) xuống cuối: vẫn đầy đủ mọi
+        # trường, ít dùng tới thì cuộn xuống khi cần.
         self.panel = SetupPanel(
             self,
             self.coordinator,
@@ -53,7 +54,7 @@ class MuseTab(ttk.Frame):
             pool_fallback_file=paths.data_file("proxy.txt"),
             show_provider=False,
         )
-        self.panel.grid(row=2, column=0, sticky="ew")
+        self.panel.grid(row=5, column=0, sticky="ew", pady=(10, 0))
 
         excel_row = ttk.Frame(self)
         excel_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -74,8 +75,10 @@ class MuseTab(ttk.Frame):
         )
         self.muse_login_button.grid(row=0, column=3, padx=(6, 0))
 
+        # Kho thẻ lên đầu: bảng + ô dán + nút Nhập kho thẻ phải
+        # thấy được ngay mà không cần cuộn (cửa sổ 820x980).
         vault_frame = ttk.LabelFrame(self, text="Kho thẻ", padding=10)
-        vault_frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        vault_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         vault_frame.columnconfigure(0, weight=1)
         self.vault_tree = ttk.Treeview(
             vault_frame,
@@ -97,12 +100,11 @@ class MuseTab(ttk.Frame):
         ttk.Label(
             vault_frame,
             text=(
-                "Nhập nhiều thẻ cùng lúc — dán danh sách vào ô dưới, mỗi "
-                "dòng một thẻ, định dạng: số thẻ|MM/YY|CVV. "
-                "ZIP mặc định 10001, nhãn tự đặt Thẻ 1, Thẻ 2…; có thể "
-                "thêm ZIP và nhãn làm trường thứ 4 và thứ 5 "
-                "(số thẻ|MM/YY|CVV|ZIP|nhãn). Dòng sai được báo theo số "
-                "dòng, không hiện số thẻ. Ô dán được xoá ngay sau khi nhập."
+                "Dán danh sách thẻ vào ô dưới, mỗi dòng một thẻ: "
+                "số thẻ|MM/YY|CVV (ZIP mặc định 10001, nhãn tự đặt; "
+                "có thể thêm ZIP|nhãn làm trường 4|5). Dòng sai báo "
+                "theo số dòng, không hiện số thẻ; ô dán xoá ngay "
+                "sau khi nhập."
             ),
             wraplength=700,
         ).grid(row=1, column=0, sticky="w", pady=(8, 4))
@@ -151,14 +153,16 @@ class MuseTab(ttk.Frame):
         self.save_limit_button.pack(side="left")
         self._refresh_vault()
 
-        muse_row = ttk.Frame(self)
-        muse_row.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(muse_row, text="Mã mời:").pack(side="left")
-        self.invite_entry = ttk.Entry(muse_row, width=10)
+        # Hàng chạy gọn trong một dòng: mã mời + Bắt đầu đăng ký
+        # + Mở sheet Excel.
+        run_row = ttk.Frame(self)
+        run_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(run_row, text="Mã mời:").pack(side="left")
+        self.invite_entry = ttk.Entry(run_row, width=10)
         self.invite_entry.pack(side="left", padx=(6, 12))
         self.single_invite_var = tk.BooleanVar(value=False)
         self.single_invite_check = ttk.Checkbutton(
-            muse_row,
+            run_row,
             text="Chỉ dùng 1 mã mời này",
             variable=self.single_invite_var,
         )
@@ -171,18 +175,12 @@ class MuseTab(ttk.Frame):
             saved_invite = ""
         if saved_invite:
             self.invite_entry.insert(0, saved_invite.splitlines()[0].strip())
-        saved_excel = storage._load_meta_excel_path_text()
-        if saved_excel:
-            self.meta_excel_entry.insert(0, saved_excel)
-
-        buttons = ttk.Frame(self)
-        buttons.grid(row=6, column=0, sticky="ew", pady=(12, 0))
         self.start_button = ttk.Button(
-            buttons, text="Bắt đầu đăng ký", command=self._start_registration
+            run_row, text="Bắt đầu đăng ký", command=self._start_registration
         )
-        self.start_button.pack(side="left")
+        self.start_button.pack(side="left", padx=(12, 0))
         self.open_sheet_button = ttk.Button(
-            buttons,
+            run_row,
             text="Mở sheet Excel",
             command=self._open_spreadsheet,
             state=(
@@ -192,6 +190,9 @@ class MuseTab(ttk.Frame):
             ),
         )
         self.open_sheet_button.pack(side="left", padx=(8, 0))
+        saved_excel = storage._load_meta_excel_path_text()
+        if saved_excel:
+            self.meta_excel_entry.insert(0, saved_excel)
 
     def _refresh_vault(self):
         """Vẽ lại danh sách kho thẻ từ Credential Manager.
@@ -264,11 +265,13 @@ class MuseTab(ttk.Frame):
             )
             return
         try:
-            added, errors = storage._import_bulk_cards(text)
+            added, errors, skipped = storage._import_bulk_cards(text)
         except Exception as error:
+            # storage đã trả lỗi bằng tiếng Việt, ghi rõ bước
+            # nào hỏng — không gắn thêm tiền tố chung chung.
             messagebox.showerror(
                 "Không nhập được thẻ",
-                f"Không ghi được vào Windows Credential Manager: {error}",
+                str(error),
             )
             return
         self._refresh_vault()
@@ -282,7 +285,12 @@ class MuseTab(ttk.Frame):
                 f"dòng {line_no}: {reason}" for line_no, reason in errors
             )
             summary.append(f"{len(errors)} dòng lỗi — {detail}.")
-        if not added and not errors:
+        if skipped:
+            summary.append(
+                f"Đã bỏ qua {skipped} dòng tiêu đề/phân cách "
+                "(không phải là thẻ)."
+            )
+        if not added and not errors and not skipped:
             summary.append("Không có dòng thẻ nào để nhập.")
         message = " ".join(summary)
         if added and not errors:
