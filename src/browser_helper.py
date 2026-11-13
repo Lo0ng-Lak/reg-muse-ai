@@ -2825,6 +2825,7 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                     "chuyển tiếp và không hiện CAPTCHA — hãy chụp "
                     "màn hình gửi lại để bổ sung cách xử lý."
                 )
+            _status("Meta: bấm Continue ở trang kiểm tra...")
             clicked = _meta_click_button(page, ("Continue",))
             if clicked:
                 checkpoint_clicks += 1
@@ -2905,6 +2906,15 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                     page, candidates
                 ):
                     relogin_tried = True
+                    _status(
+                        "Meta: đã bấm Log in lại — đang tới trang "
+                        "kiểm tra 'Confirm you're human'..."
+                    )
+                else:
+                    _status(
+                        "Meta: bấm Log in lại chưa chuyển trang — "
+                        "thử lại ở vòng sau."
+                    )
                 page.wait_for_timeout(2000)
                 continue
         page.wait_for_timeout(3000)

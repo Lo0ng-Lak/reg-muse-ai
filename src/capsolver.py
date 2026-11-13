@@ -290,22 +290,31 @@ _DETECT_JS = """() => {
 }"""
 
 
-def detect_captcha(page):
-    """Phát hiện CAPTCHA token-based trên trang.
+def _frames_of(page):
+    """Tất cả các frame của trang (khung chính trước).
 
-    Trả về {"kind", "sitekey", "website_url", "source", ...}
-    hoặc None nếu không thấy loại nào quen thuộc. kind là một
-    trong: recaptcha2, recaptcha2_enterprise, hcaptcha,
-    turnstile, funcaptcha. source là "anchor" (phát hiện từ
-    iframe — kèm tham số s/sa nếu có) hoặc "div" (chỉ thấy div
-    chứa sitekey, chưa thấy iframe).
+    Meta đặt widget CAPTCHA trong một khung con (live 2026-11-13
+    14:31: ô hiện rõ mà quét khung chính không thấy gì) —
+    detection phải quét từng frame, không chỉ khung chính.
+    """
+    try:
+        frames = page.frames
+    except Exception:
+        frames = None
+    if frames:
+        return list(frames)
+    return [page]
+
+
+def _detect_in_frame(frame):
+    """Phát hiện CAPTCHA trong một frame.
 
     Chỉ thấy div của reCAPTCHA thì chờ 2 giây rồi phát hiện lại
     một lần: iframe anchor thường tải ngay sau div, và nó mang
     tham số s mà task giải cần.
     """
     try:
-        found = page.evaluate(_DETECT_JS)
+        found = frame.evaluate(_DETECT_JS)
     except Exception:
         return None
     if (
@@ -314,28 +323,50 @@ def detect_captcha(page):
         and found.get("kind") in ("recaptcha2", "recaptcha2_enterprise")
     ):
         try:
-            page.wait_for_timeout(2000)
-            second = page.evaluate(_DETECT_JS)
+            frame.wait_for_timeout(2000)
+            second = frame.evaluate(_DETECT_JS)
         except Exception:
             second = None
         if isinstance(second, dict) and second.get("sitekey"):
             found = second
     if not isinstance(found, dict) or not found.get("sitekey"):
         return None
+    return found
+
+
+def detect_captcha(page):
+    """Phát hiện CAPTCHA token-based trên trang.
+
+    Quét từng frame (khung chính trước, rồi các khung con) —
+    Meta đặt widget trong khung con. Trả về {"kind", "sitekey",
+    "website_url", "source", "frame", ...} hoặc None nếu không
+    thấy loại nào quen thuộc. kind là một trong: recaptcha2,
+    recaptcha2_enterprise, hcaptcha, turnstile, funcaptcha.
+    source là "anchor" (phát hiện từ iframe — kèm tham số s/sa
+    nếu có) hoặc "div" (chỉ thấy div chứa sitekey, chưa thấy
+    iframe). "frame" là frame chứa widget — token phải chèn vào
+    đúng frame đó.
+    """
     try:
         website_url = page.url
     except Exception:
         website_url = ""
-    result = {
-        "kind": found["kind"],
-        "sitekey": found["sitekey"],
-        "website_url": website_url,
-        "source": found.get("source") or "",
-    }
-    for extra in ("s", "sa"):
-        if found.get(extra):
-            result[extra] = found[extra]
-    return result
+    for frame in _frames_of(page):
+        found = _detect_in_frame(frame)
+        if found is None:
+            continue
+        result = {
+            "kind": found["kind"],
+            "sitekey": found["sitekey"],
+            "website_url": website_url,
+            "source": found.get("source") or "",
+            "frame": frame,
+        }
+        for extra in ("s", "sa"):
+            if found.get(extra):
+                result[extra] = found[extra]
+        return result
+    return None
 
 
 def _task_for(detected):
@@ -438,25 +469,32 @@ _INJECT_JS = """([kind, token]) => {
 }"""
 
 
-def inject_token(page, kind, token):
-    """Chèn token đã giải vào ô response của CAPTCHA trên trang.
+def inject_token(page, kind, token, frame=None):
+    """Chèn token đã giải vào ô response của CAPTCHA.
 
+    Token phải chèn vào đúng frame chứa widget (frame từ
+    detect_captcha) — ô response + callback grecaptcha sống ở
+    frame đó, không phải khung chính. frame=None thì chèn vào
+    trang (tương thích code cũ).
     Trả True khi chèn được vào một ô (trang sẽ đọc ô này lúc
     submit); False khi không tìm thấy ô nào — phía gọi vẫn thử
     bấm nút tiếp theo vì một số trang đọc token qua callback.
     """
+    target = frame if frame is not None else page
     try:
-        return bool(page.evaluate(_INJECT_JS, [kind, token]))
+        return bool(target.evaluate(_INJECT_JS, [kind, token]))
     except Exception:
         return False
 
 
-def _set_solution_cookies(page, solution):
-    """Đặt cookie từ solution (nếu có) lên domain trang đang mở.
+def _set_solution_cookies(page, solution, frame=None):
+    """Đặt cookie từ solution (nếu có) lên domain chứa widget.
 
     Một số trang v2 cần cookie recaptcha-ca-e (CapSolver tự trả
-    kèm khi có); v3 session mode trả recaptcha-ca-t. Lỗi đặt
-    cookie không làm hỏng việc giải — chỉ bỏ qua.
+    kèm khi có); v3 session mode trả recaptcha-ca-t. Cookie đặt
+    trên host của frame chứa widget (khác host trang chính khi
+    widget nằm trong khung con). Lỗi đặt cookie không làm hỏng
+    việc giải — chỉ bỏ qua.
     """
     if not isinstance(solution, dict):
         return
@@ -467,7 +505,13 @@ def _set_solution_cookies(page, solution):
     try:
         from urllib.parse import urlparse
 
-        domain = urlparse(page.url).hostname
+        frame_url = ""
+        if frame is not None:
+            try:
+                frame_url = frame.url
+            except Exception:
+                frame_url = ""
+        domain = urlparse(frame_url or page.url).hostname
         cookies = [
             {
                 "name": name,
@@ -506,8 +550,9 @@ def solve_detected(page, api_key, detected,
         raise CapSolverError(
             "CapSolver báo xong nhưng không có token trong kết quả."
         )
-    _set_solution_cookies(page, solution)
-    inject_token(page, detected["kind"], token)
+    frame = detected.get("frame")
+    _set_solution_cookies(page, solution, frame=frame)
+    inject_token(page, detected["kind"], token, frame=frame)
     return detected["kind"]
 
 
