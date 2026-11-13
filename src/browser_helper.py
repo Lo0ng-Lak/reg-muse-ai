@@ -2240,78 +2240,77 @@ def _meta_testid_login(page):
     """Thử bấm nút Log in theo data-testid="login-button".
 
     Nút Log in thật trong header meta.ai mang testid này (quan
-    sát DOM 2026-11-13) — duy nhất, không lẫn với nút mobile
-    trùng tên. Trả về True khi bấm xong trang chuyển sang
-    auth.meta.com, False khi nút không có/không bấm được/bấm
-    không chuyển trang.
+    sát DOM 2026-11-13). Thử TỪNG nút khớp testid đang hiện +
+    bấm được (không chỉ .first — phòng khi có bản mobile trùng
+    testid đứng trước). Trả về True khi bấm xong trang chuyển
+    sang auth.meta.com, False khi không nút nào chuyển được.
     """
     try:
         testid = page.get_by_test_id("login-button")
-        if not testid.count():
-            return False
-        target = testid.first
-        if not (target.is_visible() and target.is_enabled()):
-            return False
+        count = testid.count()
     except Exception:
         return False
-    try:
-        page.wait_for_timeout(UI_SETTLE_MS)
-        target.click(timeout=BUTTON_TIMEOUT_MS)
-        page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=8000)
-        return True
-    except Exception:
-        return False
+    for index in range(count):
+        try:
+            target = testid.nth(index)
+            if not (target.is_visible() and target.is_enabled()):
+                continue
+        except Exception:
+            continue
+        try:
+            page.wait_for_timeout(UI_SETTLE_MS)
+            target.click(timeout=BUTTON_TIMEOUT_MS)
+            page.wait_for_url(f"**{META_AUTH_HOST}**", timeout=8000)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _meta_click_login(page):
-    """Bấm Log in ở meta.ai: testid trước, thử từng nút trùng sau.
+    """Bấm Log in ở meta.ai: thử đi thử lại tới khi chuyển trang.
 
-    Trang meta.ai có 2 nút "Log in" — nút mobile nằm ngoài khung
-    hình vẫn qua được is_visible() nên lần sửa trước bấm nhầm
-    nút đó: cú bấm không lỗi nhưng trang không chuyển sang
-    auth.meta.com (live 2026-11-13 09:45). Nút thật trong header
-    có data-testid="login-button" (quan sát DOM 2026-11-13) nên
-    thử nó ĐẦU TIÊN; nếu testid không còn (Meta đổi DOM) hoặc
-    bấm không chuyển trang thì fallback sang thử từng nút trùng
-    tên trong khung hình tới khi chuyển trang. Không nút nào
-    chuyển được thì lỗi rõ ràng thay vì chờ 45 giây rồi báo
-    timeout.
+    Nút Log in thật trong header có data-testid="login-button"
+    (quan sát DOM 2026-11-13) — thử nó trước mỗi vòng; nếu
+    testid không còn thì thử từng nút trùng tên trong khung
+    hình. Bấm xong chờ chuyển sang auth.meta.com (mỗi nút 8
+    giây).
+
+    Vì sao phải thử lại: nút này là <button> thường, không có
+    href — chuyển trang nhờ handler JS của React. Giao diện
+    meta.ai hiện ra TRƯỚC khi JS hydrate xong, bấm lúc đó nút
+    chưa có tác dụng (live 2026-11-13 10:08: mở trang 12 giây,
+    bấm 1 nút, không chuyển). Qua proxy chậm thì hydrate càng
+    lâu. Nên thử lại cả vòng tới khi hết 90 giây thay vì bỏ
+    cuộc sau lần đầu — lần bấm sau khi hydrate xong mới là lần
+    bấm thật.
     """
     locator = page.get_by_role("button", name="Log in", exact=True)
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
-    testid_tried = False
+    attempts = 0
     while time.monotonic() < deadline:
         if _page_closed(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi bấm được Log in."
             )
-        if not testid_tried:
-            try:
-                present = (
-                    page.get_by_test_id("login-button").count() > 0
-                )
-            except Exception:
-                present = False
-            if present:
-                testid_tried = True
-                if _meta_testid_login(page):
-                    return
-        candidates = _in_viewport_candidates(page, locator)
-        if candidates:
-            if _meta_try_login_buttons(page, candidates):
-                return
-            raise RuntimeError(
-                f"Đã thử {len(candidates)} nút Log in nhưng trang "
-                "không chuyển sang auth.meta.com — có thể trang "
-                "meta.ai đã đổi bố cục."
-            )
-        page.wait_for_timeout(250)
-    # Hết 90 giây không thấy nút nào trong khung hình: thử nốt các
-    # nút visible ngoài khung hình trước khi bỏ cuộc.
-    candidates = _visible_candidates(locator)
-    if candidates and _meta_try_login_buttons(page, candidates):
-        return
-    raise RuntimeError("Nút Log in không hiện sau 90 giây.")
+        attempts += 1
+        if _meta_testid_login(page):
+            break
+        candidates = _in_viewport_candidates(
+            page, locator
+        ) or _visible_candidates(locator)
+        if candidates and _meta_try_login_buttons(page, candidates):
+            break
+        page.wait_for_timeout(3000)
+    else:
+        raise RuntimeError(
+            f"Đã thử Log in {attempts} lần trong "
+            f"{BUTTON_TIMEOUT_MS // 1000} giây nhưng trang không "
+            "chuyển sang auth.meta.com — có thể trang meta.ai "
+            "chưa tải xong hoặc đã đổi bố cục."
+        )
+    if attempts > 1:
+        _status(f"Meta: đã bấm Log in (thử lần {attempts}).")
 
 
 def _meta_wait_visible(page, locator, label):
@@ -2451,7 +2450,9 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 continue
         if not relogin_tried:
             login = page.get_by_role("button", name="Log in", exact=True)
-            candidates = _in_viewport_candidates(page, login)
+            candidates = _in_viewport_candidates(
+                page, login
+            ) or _visible_candidates(login)
             try:
                 testid_present = (
                     page.get_by_test_id("login-button").count() > 0
