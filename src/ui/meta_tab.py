@@ -253,38 +253,57 @@ class MetaTab(ttk.Frame):
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
         )
-        self.app.on_run_started(self.panel)
-        if total == 0:
+        try:
+            self.app.on_run_started(self.panel)
+            if total == 0:
+                self.app.append_log(
+                    "--- Bắt đầu lượt ĐĂNG KÍ META: KHÔNG giới hạn số "
+                    "tài khoản — chạy tới khi dùng hết lượt của toàn bộ "
+                    "proxy trong danh sách (bấm Dừng để ngắt bất cứ lúc "
+                    "nào) ---"
+                )
+            else:
+                self.app.append_log(
+                    "--- Bắt đầu lượt ĐĂNG KÍ META: mục tiêu "
+                    f"{total} tài khoản ---"
+                )
+            if direct:
+                self.app.append_log(
+                    "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
+                    "IP của máy này, không qua proxy."
+                )
+            else:
+                self.app.append_log(
+                    f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
+                    "khoản."
+                )
             self.app.append_log(
-                "--- Bắt đầu lượt ĐĂNG KÍ META: KHÔNG giới hạn số "
-                "tài khoản — chạy tới khi dùng hết lượt của toàn bộ "
-                "proxy trong danh sách (bấm Dừng để ngắt bất cứ lúc "
-                "nào) ---"
+                f"Dịch vụ temp mail cho lượt chạy này: {setup['provider_label']}."
             )
-        else:
             self.app.append_log(
-                "--- Bắt đầu lượt ĐĂNG KÍ META: mục tiêu "
-                f"{total} tài khoản ---"
+                "Đăng kí Meta xong là lưu vào meta_accounts.xlsx, không "
+                "tự qua Muse — sang tab Muse.ai, chọn file này ở ô File "
+                "Excel Meta rồi bấm Đăng nhập Muse."
             )
-        if direct:
+            if not self.coordinator.start(settings):
+                # Đã có lượt chạy khác xen vào: mở khoá để bấm lại được.
+                self.app.set_running(False)
+                self.app.append_log(
+                    "⛔ Đã có một lượt chạy khác đang chạy — bấm lại sau "
+                    "khi lượt đó xong."
+                )
+        except Exception as error:
+            # Lỗi trong lúc mở khoá/khởi động (trước đây tkinter nuốt
+            # lặng, nút vẫn sáng mà không chạy gì): mở khoá lại và
+            # ghi rõ lỗi vào log để thấy ngay.
+            try:
+                self.app.set_running(False)
+            except Exception:
+                pass
             self.app.append_log(
-                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
-                "IP của máy này, không qua proxy."
+                "⛔ Không bắt đầu được lượt ĐĂNG KÍ META: "
+                f"{type(error).__name__}: {error}"
             )
-        else:
-            self.app.append_log(
-                f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
-                "khoản."
-            )
-        self.app.append_log(
-            f"Dịch vụ temp mail cho lượt chạy này: {setup['provider_label']}."
-        )
-        self.app.append_log(
-            "Đăng kí Meta xong là lưu vào meta_accounts.xlsx, không "
-            "tự qua Muse — sang tab Muse.ai, chọn file này ở ô File "
-            "Excel Meta rồi bấm Đăng nhập Muse."
-        )
-        self.coordinator.start(settings)
 
     def _open_spreadsheet(self):
         if not storage.META_SPREADSHEET_FILE.exists():

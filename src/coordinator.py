@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -229,9 +230,15 @@ class Coordinator:
         self._ip_target = settings.ip_target
         self.running = True
         self.stop_event.clear()
-        threading.Thread(
-            target=self._run_loop, args=(settings,), daemon=True
-        ).start()
+        try:
+            threading.Thread(
+                target=self._run_loop, args=(settings,), daemon=True
+            ).start()
+        except Exception:
+            # Không tạo được luồng: trả running về False để lần bấm
+            # sau không bị chặn lặng ở `if self.coordinator.running`.
+            self.running = False
+            raise
         return True
 
     def stop(self):
@@ -304,7 +311,52 @@ class Coordinator:
         return True
 
     def _run_loop(self, settings):
-        # Điều phối các luồng chạy song song. Kho proxy được
+        """Điểm vào của luồng chạy: bọc vòng chạy thật để running
+        luôn được reset và sự kiện "finished" luôn được phát, kể cả
+        khi vòng chạy chết vì lỗi nội bộ.
+
+        Trước đây running chỉ reset ở cuối _run_loop /
+        _run_login_loop, không có try/finally: bất kỳ exception nào
+        thoát khỏi _run_lane (luồng đơn chạy trực tiếp trong luồng
+        này) cũng giết chết luồng chạy lặng lẽ, running kẹt True
+        mãi, không có "finished", giao diện khoá cứng và mọi lần
+        bấm sau đều rơi vào `if self.coordinator.running: return`.
+        """
+        success = fail = 0
+        try:
+            if settings.meta_login:
+                success, fail = self._run_login_loop(settings)
+            else:
+                success, fail = self._run_registration_loop(settings)
+        except Exception as error:
+            try:
+                detail = "".join(
+                    traceback.format_exception(error)
+                ).rstrip()
+            except Exception:
+                detail = f"{type(error).__name__}: {error}"
+            self.events.put(
+                (
+                    "log",
+                    "⛔ Lượt chạy dừng đột ngột do lỗi nội bộ — "
+                    "bấm lại để chạy tiếp (đã ghi lỗi để sửa):\n"
+                    f"{detail}",
+                )
+            )
+        finally:
+            self.running = False
+            self.events.put(
+                (
+                    "finished",
+                    (
+                        success,
+                        fail,
+                        self.stop_event.is_set(),
+                    ),
+                )
+            )
+
+    def _run_registration_loop(self, settings):
         # CHIA theo bước nhảy: luồng k dùng các proxy ở vị trí
         # k, k+lanes, k+2*lanes, ... — không hai luồng nào dùng
         # chung một proxy tại cùng thời điểm, và mỗi luồng xoay
@@ -327,9 +379,6 @@ class Coordinator:
         # như đã đặt (chủ tool chấp nhận rủi ro IP bị chặn); mỗi
         # luồng vẫn có file proxy riêng (proxy.txt, proxy-2.txt,
         # ...) đều chứa câu DIRECT.
-        if settings.meta_login:
-            self._run_login_loop(settings)
-            return
         total = settings.total
         pool = settings.pool
         direct = settings.direct
@@ -432,17 +481,10 @@ class Coordinator:
                 threads.append(thread)
         for thread in threads:
             thread.join()
-        self.running = False
-        self.events.put(
-            (
-                "finished",
-                (
-                    shared["success"],
-                    shared["fail"],
-                    self.stop_event.is_set(),
-                ),
-            )
-        )
+        # Trả số đếm về cho _run_loop: chính nó reset running và
+        # phát "finished" (luôn luôn, kể cả khi vòng này chết giữa
+        # chừng vì lỗi nội bộ).
+        return shared["success"], shared["fail"]
 
     def _run_lane(
         self, settings, lane_no, lanes, share, subset,
@@ -866,9 +908,7 @@ class Coordinator:
                     "trong file Excel đã chọn.",
                 )
             )
-            self.running = False
-            self.events.put(("finished", (0, 0, self.stop_event.is_set())))
-            return
+            return 0, 0
         pool = settings.pool
         direct = settings.direct
         requested_lanes = max(1, min(int(settings.lanes), 5))
@@ -918,17 +958,10 @@ class Coordinator:
                 threads.append(thread)
         for thread in threads:
             thread.join()
-        self.running = False
-        self.events.put(
-            (
-                "finished",
-                (
-                    shared["success"],
-                    shared["fail"],
-                    self.stop_event.is_set(),
-                ),
-            )
-        )
+        # Trả số đếm về cho _run_loop: chính nó reset running và
+        # phát "finished" (luôn luôn, kể cả khi vòng này chết giữa
+        # chừng vì lỗi nội bộ).
+        return shared["success"], shared["fail"]
 
     def _run_login_lane(
         self, settings, lane_no, lanes, rows, subset, shared, shared_lock

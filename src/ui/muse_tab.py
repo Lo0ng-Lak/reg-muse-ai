@@ -534,57 +534,75 @@ class MuseTab(ttk.Frame):
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
         )
-        self.app.on_run_started(self.panel)
-        if total == 0:
+        try:
+            self.app.on_run_started(self.panel)
+            if total == 0:
+                if direct:
+                    self.app.append_log(
+                        "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
+                        "khoản — chạy tới khi bấm Dừng (chế độ IP máy "
+                        "không có kho proxy để dùng hết) ---"
+                    )
+                else:
+                    self.app.append_log(
+                        "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
+                        "khoản — chạy tới khi dùng hết lượt của toàn bộ "
+                        "proxy trong danh sách (bấm Dừng để ngắt bất cứ "
+                        "lúc nào) ---"
+                    )
+            else:
+                self.app.append_log(
+                    f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---"
+                )
             if direct:
                 self.app.append_log(
-                    "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
-                    "khoản — chạy tới khi bấm Dừng (chế độ IP máy "
-                    "không có kho proxy để dùng hết) ---"
+                    "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
+                    "IP của máy này, không qua proxy. Kiểm tra VPN đã "
+                    "bật và đang thoát ở US trước khi chạy; mọi luồng "
+                    "dùng chung 1 IP nên IP bị Meta chặn là cả lượt "
+                    "chạy dừng ngay."
                 )
             else:
                 self.app.append_log(
-                    "--- Bắt đầu lượt chạy: KHÔNG giới hạn số tài "
-                    "khoản — chạy tới khi dùng hết lượt của toàn bộ "
-                    "proxy trong danh sách (bấm Dừng để ngắt bất cứ "
-                    "lúc nào) ---"
+                    f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
+                    "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
+                    "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
                 )
-        else:
             self.app.append_log(
-                f"--- Bắt đầu lượt chạy: mục tiêu {total} tài khoản ---"
+                f"Dịch vụ temp mail cho lượt chạy này: {setup['provider_label']}."
             )
-        if direct:
-            self.app.append_log(
-                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
-                "IP của máy này, không qua proxy. Kiểm tra VPN đã "
-                "bật và đang thoát ở US trước khi chạy; mọi luồng "
-                "dùng chung 1 IP nên IP bị Meta chặn là cả lượt "
-                "chạy dừng ngay."
-            )
-        else:
-            self.app.append_log(
-                f"Kho proxy: {len(pool)} proxy, mỗi proxy {per_proxy} tài "
-                "khoản (tính cả thành công lẫn thất bại) — kho do bạn "
-                "đảm bảo là proxy US, tool không kiểm tra lại IP thoát."
-            )
-        self.app.append_log(
-            f"Dịch vụ temp mail cho lượt chạy này: {setup['provider_label']}."
-        )
-        if single_invite:
-            if invite:
+            if single_invite:
+                if invite:
+                    self.app.append_log(
+                        f"Chế độ mã mời: CHỈ DÙNG 1 MÃ — mọi tài khoản "
+                        f"đều quy đổi mã {invite}; mã từng tài khoản tự "
+                        "lấy được chỉ lưu vào sheet, không nối chuỗi."
+                    )
+                else:
+                    self.app.append_log(
+                        "Chế độ mã mời: CHỈ DÙNG 1 MÃ — nhưng chưa có "
+                        "mã nào (ô Mã mời trống, sheet cũng không có), "
+                        "nên các tài khoản sẽ không quy đổi mã mời nào."
+                    )
+            self._log_run_cards(cards, manual_card)
+            if not self.coordinator.start(settings):
+                self.app.set_running(False)
                 self.app.append_log(
-                    f"Chế độ mã mời: CHỈ DÙNG 1 MÃ — mọi tài khoản "
-                    f"đều quy đổi mã {invite}; mã từng tài khoản tự "
-                    "lấy được chỉ lưu vào sheet, không nối chuỗi."
+                    "⛔ Đã có một lượt chạy khác đang chạy — bấm lại sau "
+                    "khi lượt đó xong."
                 )
-            else:
-                self.app.append_log(
-                    "Chế độ mã mời: CHỈ DÙNG 1 MÃ — nhưng chưa có "
-                    "mã nào (ô Mã mời trống, sheet cũng không có), "
-                    "nên các tài khoản sẽ không quy đổi mã mời nào."
-                )
-        self._log_run_cards(cards, manual_card)
-        self.coordinator.start(settings)
+        except Exception as error:
+            # Lỗi trong lúc mở khoá/khởi động (trước đây tkinter nuốt
+            # lặng, nút vẫn sáng mà không chạy gì): mở khoá lại và
+            # ghi rõ lỗi vào log để thấy ngay.
+            try:
+                self.app.set_running(False)
+            except Exception:
+                pass
+            self.app.append_log(
+                "⛔ Không bắt đầu được lượt chạy: "
+                f"{type(error).__name__}: {error}"
+            )
 
     def _browse_meta_excel(self):
         """Chọn file Excel Meta đã đăng kí để đăng nhập Muse."""
@@ -677,32 +695,50 @@ class MuseTab(ttk.Frame):
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
         )
-        self.app.on_run_started(self.panel)
-        self.app.append_log(
-            "--- Bắt đầu lượt ĐĂNG NHẬP MUSE bằng tài khoản Meta: "
-            f"{len(pending)} tài khoản chưa đăng nhập trong file "
-            f"{Path(excel_text).name} ---"
-        )
-        if setup["total"] == 0:
+        try:
+            self.app.on_run_started(self.panel)
             self.app.append_log(
-                "Đăng nhập hết các tài khoản chưa đăng nhập trong file."
+                "--- Bắt đầu lượt ĐĂNG NHẬP MUSE bằng tài khoản Meta: "
+                f"{len(pending)} tài khoản chưa đăng nhập trong file "
+                f"{Path(excel_text).name} ---"
             )
-        else:
+            if setup["total"] == 0:
+                self.app.append_log(
+                    "Đăng nhập hết các tài khoản chưa đăng nhập trong file."
+                )
+            else:
+                self.app.append_log(
+                    f"Giới hạn lượt chạy này: {setup['total']} tài khoản."
+                )
+            if setup["direct"]:
+                self.app.append_log(
+                    "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
+                    "IP của máy này, không qua proxy."
+                )
+            else:
+                self.app.append_log(
+                    f"Kho proxy: {len(setup['pool'])} proxy, mỗi proxy "
+                    f"{setup['per_proxy']} tài khoản."
+                )
+            self._log_run_cards(cards, manual_card)
+            if not self.coordinator.start(settings):
+                self.app.set_running(False)
+                self.app.append_log(
+                    "⛔ Đã có một lượt chạy khác đang chạy — bấm lại sau "
+                    "khi lượt đó xong."
+                )
+        except Exception as error:
+            # Lỗi trong lúc mở khoá/khởi động (trước đây tkinter nuốt
+            # lặng, nút vẫn sáng mà không chạy gì): mở khoá lại và
+            # ghi rõ lỗi vào log để thấy ngay.
+            try:
+                self.app.set_running(False)
+            except Exception:
+                pass
             self.app.append_log(
-                f"Giới hạn lượt chạy này: {setup['total']} tài khoản."
+                "⛔ Không bắt đầu được lượt ĐĂNG NHẬP MUSE: "
+                f"{type(error).__name__}: {error}"
             )
-        if setup["direct"]:
-            self.app.append_log(
-                "Chế độ kết nối: IP MÁY (VPN) — chạy trực tiếp qua "
-                "IP của máy này, không qua proxy."
-            )
-        else:
-            self.app.append_log(
-                f"Kho proxy: {len(setup['pool'])} proxy, mỗi proxy "
-                f"{setup['per_proxy']} tài khoản."
-            )
-        self._log_run_cards(cards, manual_card)
-        self.coordinator.start(settings)
 
     def _open_spreadsheet(self):
         if not storage.SPREADSHEET_FILE.exists():
@@ -717,6 +753,12 @@ class MuseTab(ttk.Frame):
 
     def set_running(self, running):
         self.panel.set_running(running)
+        # ttk.Treeview KHÔNG có tuỳ chọn -state: configure(state=...)
+        # raise TclError "unknown option -state" — chính lỗi này làm
+        # chết mọi nút Bắt đầu (xem main_window.on_run_started):
+        # handler vỡ giữa chừng, tkinter nuốt exception, nút vẫn
+        # sáng mà không chạy gì. Treeview khoá/mở bằng .state().
+        self.vault_tree.state(["disabled"] if running else ["!disabled"])
         self.card_limit_spin.configure(
             state="disabled" if running else "normal"
         )
@@ -727,7 +769,6 @@ class MuseTab(ttk.Frame):
             state="disabled" if running else "normal"
         )
         for widget in (
-            self.vault_tree,
             self.bulk_card_text,
             self.import_bulk_button,
             self.select_card_button,
