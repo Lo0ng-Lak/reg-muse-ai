@@ -7,7 +7,10 @@ For each account it creates a temp-mail inbox (provider selectable —
 tempmail.plus by default), opens Muse.ai in a dedicated
 browser, retrieves the email verification code, fills the profile form, and —
 only when the signup actually completes — saves the account to a local Excel
-sheet. The window shows nothing but the live process log. CAPTCHA and any
+sheet. The window has two tabs — **Muse.ai** and **Meta (meta.ai)** — each
+with its own run setup (proxy pool, lane count, connection, temp mail,
+target count); the live process log, progress line and **Dừng** button are
+shared below the tabs. CAPTCHA and any
 additional registration steps remain manual; an account that stalls on one
 times out, is logged as failed, and the batch moves on to the next address.
 
@@ -162,6 +165,45 @@ The batch continues with the next address until the target count is reached
 or you click **Dừng**. Click **Mở sheet Excel** to open the sheet with the
 successfully registered accounts.
 
+### Two tabs, two setups
+
+Only one run happens at a time — whichever tab you press Start in runs
+with **that tab's own setup**, and the other tab is locked until the run
+ends. Each tab has its own proxy pool, bad-proxy list, lane count,
+connection mode, temp-mail provider and target count:
+
+- **Muse.ai** tab: proxy pool in `proxies.txt`, bad proxies in
+  `bad-proxies.txt` (the files from before — your existing pool carries
+  over untouched), plus the card row, per-card limit and invite-code
+  chain. Accounts go to `accounts.xlsx`.
+- **Meta (meta.ai)** tab: proxy pool in `proxies_meta.txt`, bad proxies
+  in `bad-proxies-meta.txt`, plus the CapSolver key and selfie image.
+  Accounts go to `meta_accounts.xlsx`. See "Meta account registration"
+  below.
+
+### Code layout
+
+```
+main.py                  # thin launcher: py main.py
+src/
+  paths.py               # repo root + app-data paths
+  coordinator.py         # run engine: lanes, helper subprocess, events
+  storage.py             # Excel sheets, keyring, run data files
+  proxy_pool.py          # proxy rotation, bad-proxy lists, IP check
+  browser_helper.py      # Playwright helper (Muse + Meta flows)
+  capsolver.py           # CapSolver client (Meta CAPTCHAs)
+  mail_providers.py      # temp-mail providers
+  ui/
+    main_window.py       # window: notebook + shared log/progress/stop
+    setup_panel.py       # shared run-setup panel (one per tab)
+    muse_tab.py          # Muse.ai tab (card + invite)
+    meta_tab.py          # Meta tab (CapSolver + selfie)
+```
+
+Run data files (`proxies.txt`, `proxies_meta.txt`, `proxy.txt`,
+`mailbox.txt`, `redeem.txt`, `selfie.txt`, ...) stay at the repo root
+next to `main.py`, as before — only the code moved into `src/`.
+
 ### Temp mail providers
 
 The **Temp mail** dropdown picks which disposable-mail service each run
@@ -214,11 +256,14 @@ the proxy and redeem files).
 ### Connection: proxy pool or machine IP (VPN)
 
 The **Kết nối** (Connection) dropdown picks how registration traffic
-goes out: **Proxy (pool)** (default) or **IP máy (VPN)**. In proxy mode,
-paste your proxies into the **Proxy** box in the app window, **one
+goes out: **Proxy (pool)** (default) or **IP máy (VPN)**. Each tab has
+its own dropdown, proxy box and bad-proxy box — the Muse tab reads
+`proxies.txt` / `bad-proxies.txt`, the Meta tab reads
+`proxies_meta.txt` / `bad-proxies-meta.txt`. In proxy mode,
+paste your proxies into the **Proxy** box in the tab, **one
 proxy per line**: `host:port:username:password` (or a full
-`http://username:password@host:port` URL). The pool is stored in a local
-`proxies.txt` next to the scripts and pre-fills the box on the next launch.
+`http://username:password@host:port` URL). The pool is stored in the
+tab's pool file next to the scripts and pre-fills the box on the next launch.
 **Tài khoản / proxy** sets how many accounts each proxy serves: the count
 advances by account position, whether the accounts pass or fail, and when
 a proxy's quota is used up the run moves to the next proxy in the pool,
@@ -329,7 +374,7 @@ screen (click **Log in** again to reach the CAPTCHA) or go straight
 to the CAPTCHA — the tool handles both.
 
 There are **no manual steps** in the Meta flow. That needs two things
-set up first, in the **Đăng kí tài khoản Meta** frame:
+set up first, in the **Meta** tab:
 
 - **CapSolver API key** — CAPTCHAs are solved automatically through
   [CapSolver](https://www.capsolver.com/) (reCAPTCHA v2, hCaptcha,

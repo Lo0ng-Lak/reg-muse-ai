@@ -4,9 +4,12 @@ __pycache__/
 venv/
 .vscode/settings.json
 proxy*.txt
+proxies.txt
+proxies_meta.txt
 mailbox*.txt
 invite.txt
 redeem*.txt
 bad-proxies.txt
+bad-proxies-meta.txt
 selfie.txt
 meta_username*.txt

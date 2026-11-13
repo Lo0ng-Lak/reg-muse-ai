@@ -1,0 +1,397 @@
+"""Lưu trữ: sheet Excel, keyring, file dữ liệu chạy.
+
+Không có tkinter ở đây — module này dùng được từ test lẫn từ
+coordinator mà không cần mở giao diện.
+"""
+
+import json
+import re
+import time
+from datetime import datetime
+
+import keyring
+from openpyxl import Workbook, load_workbook
+
+import paths
+
+
+SPREADSHEET_FILE = (
+    paths.APP_DATA / "accounts.xlsx"
+)
+
+PENDING_SPREADSHEET_FILE = SPREADSHEET_FILE.with_name("accounts.pending.xlsx")
+
+META_SPREADSHEET_FILE = (
+    paths.APP_DATA / "meta_accounts.xlsx"
+)
+
+META_PENDING_SPREADSHEET_FILE = META_SPREADSHEET_FILE.with_name(
+    "meta_accounts.pending.xlsx"
+)
+
+CAPSOLVER_SERVICE = "MuseAIHelper:capsolver"
+
+CAPSOLVER_KEY_FIELD = "api_key"
+
+SELFIE_PATH_FILE = "selfie.txt"
+
+MAIL_SERVICE = "MuseAIHelper:mail.tm"
+
+CARD_SERVICE = "MuseAIHelper:card"
+
+CARD_FIELDS = ("number", "expiry", "cvv", "zip")
+
+CARD_SUCCESS_COUNT_FIELD = "card_success_count"
+
+SPREADSHEET_HEADERS = [
+    "Thời gian tạo",
+    "Email Muse.ai",
+    "Mật khẩu hộp thư",
+    "Cookie phiên đăng nhập",
+    "Mã mời",
+]
+
+META_SPREADSHEET_HEADERS = [
+    "Thời gian tạo",
+    "Email Meta",
+    "Mật khẩu hộp thư",
+    "Username Meta",
+]
+
+def _migrate_legacy_sheet(sheet):
+    """Bỏ cột "Mật khẩu Muse.ai" khỏi sheet cũ.
+
+    Cột đó là mật khẩu bịa từ thiết kế đầu — đăng ký bằng mail
+    tạm + OTP nên không tồn tại mật khẩu Muse. Nếu hàng tiêu
+    đề còn cột này ở vị trí 3, xoá nó khỏi cả tiêu đề lẫn mọi
+    dòng dữ liệu (các cột sau dịch trái một ô).
+    """
+    if sheet.cell(row=1, column=3).value != "Mật khẩu Muse.ai":
+        return
+    for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row):
+        values = [cell.value for cell in row]
+        migrated = values[:2] + values[3:]
+        for index, cell in enumerate(row):
+            cell.value = migrated[index] if index < len(migrated) else None
+
+def _append_spreadsheet_row(email, mail_password="", cookie="", invite=""):
+    temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
+    try:
+        SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # File chờ (từ lần ghi bị khóa trước) là bản đầy đủ nhất:
+        # lấy nó làm nền để không mất dòng nào đã giữ ở đó.
+        base_file = (
+            PENDING_SPREADSHEET_FILE
+            if PENDING_SPREADSHEET_FILE.exists()
+            else SPREADSHEET_FILE
+        )
+        if base_file.exists():
+            workbook = load_workbook(base_file)
+            sheet = workbook.active
+            _migrate_legacy_sheet(sheet)
+            # Sheet đời mail.tm còn tiêu đề cột 3 là "Mật khẩu
+            # mail.tm" — cột này giờ giữ mật khẩu hộp thư của
+            # bất kỳ dịch vụ nào nên đổi tên cho khớp tiêu đề
+            # hiện tại (chỉ đổi tên ô tiêu đề, dữ liệu giữ
+            # nguyên).
+            if sheet.cell(row=1, column=3).value == "Mật khẩu mail.tm":
+                sheet.cell(row=1, column=3).value = "Mật khẩu hộp thư"
+            # Bổ sung tiêu đề cho các cột còn thiếu (sheet đời đầu
+            # ít cột hơn) — chỉ ghi vào ô đang trống.
+            for column, header in enumerate(SPREADSHEET_HEADERS, start=1):
+                cell = sheet.cell(row=1, column=column)
+                if not cell.value:
+                    cell.value = header
+        else:
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Muse.ai"
+            sheet.append(SPREADSHEET_HEADERS)
+
+        sheet.append(
+            [
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                email,
+                mail_password,
+                cookie,
+                invite,
+            ]
+        )
+        # accounts.xlsx đang mở trong Excel là khóa cứng trên
+        # Windows (WinError 5 khi thay file): thử lại vài nhịp,
+        # vẫn khóa thì giữ toàn bộ sheet vào accounts.pending.xlsx
+        # — dòng không mất, lần ghi sau tự gộp vào sheet chính.
+        written = False
+        last_error = None
+        for _ in range(3):
+            try:
+                workbook.save(temporary_file)
+                temporary_file.replace(SPREADSHEET_FILE)
+                written = True
+                break
+            except PermissionError as error:
+                last_error = error
+                time.sleep(1)
+        if written:
+            if PENDING_SPREADSHEET_FILE.exists():
+                try:
+                    PENDING_SPREADSHEET_FILE.unlink()
+                except OSError:
+                    pass
+        else:
+            pending_tmp = SPREADSHEET_FILE.with_name(
+                "accounts.pending.tmp.xlsx"
+            )
+            try:
+                workbook.save(pending_tmp)
+                pending_tmp.replace(PENDING_SPREADSHEET_FILE)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "File accounts.xlsx đang bị khóa (thường do đang "
+                "mở trong Excel) nên chưa ghi được. Dòng này KHÔNG "
+                "mất — đã giữ ở accounts.pending.xlsx và sẽ tự gộp "
+                "vào sheet chính ở lần ghi thành công sau; bạn chỉ "
+                "cần đóng file Excel đang mở."
+            ) from last_error
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"Không ghi được file Excel: {error}") from error
+    finally:
+        if temporary_file.exists():
+            temporary_file.unlink()
+
+def _last_invite_from_sheet():
+    """Mã mời gần nhất trong accounts.xlsx (dòng cuối cùng có mã).
+
+    Dùng làm mã đầu chuỗi khi ô Mã mời đang trống: tài khoản đầu
+    tiên của lượt chạy sẽ quy đổi mã này thay vì bỏ qua bước quy
+    đổi. Tìm cột theo tên tiêu đề "Mã mời" nên sheet đời nào
+    cũng đọc được.
+    """
+    for path in (PENDING_SPREADSHEET_FILE, SPREADSHEET_FILE):
+        try:
+            if not path.exists():
+                continue
+            workbook = load_workbook(path, read_only=True)
+            sheet = workbook.active
+            column = None
+            for cell in sheet[1]:
+                if cell.value == "Mã mời":
+                    column = cell.column
+                    break
+            if column is None:
+                continue
+            for row in range(sheet.max_row, 1, -1):
+                value = sheet.cell(row=row, column=column).value
+                if value:
+                    code = str(value).strip().upper()
+                    if re.fullmatch(r"[A-Z0-9]{6}", code):
+                        return code
+        except Exception:
+            continue
+    return ""
+
+def _append_meta_row(email, mail_password="", username=""):
+    """Ghi một tài khoản Meta đã tạo vào meta_accounts.xlsx.
+
+    Cùng nhịp chống khoá file như _append_spreadsheet_row (thử
+    lại 3 lần, vẫn khoá thì giữ vào meta_accounts.pending.xlsx
+    để lần ghi sau gộp lại). Không có cột mật khẩu Meta — mật
+    khẩu đăng ký Meta không được lưu (đăng nhập Muse sau này
+    dùng mã OTP qua mail).
+    """
+    temporary_file = META_SPREADSHEET_FILE.with_name(
+        "meta_accounts.tmp.xlsx"
+    )
+    try:
+        META_SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        base_file = (
+            META_PENDING_SPREADSHEET_FILE
+            if META_PENDING_SPREADSHEET_FILE.exists()
+            else META_SPREADSHEET_FILE
+        )
+        if base_file.exists():
+            workbook = load_workbook(base_file)
+            sheet = workbook.active
+            for column, header in enumerate(META_SPREADSHEET_HEADERS, start=1):
+                cell = sheet.cell(row=1, column=column)
+                if not cell.value:
+                    cell.value = header
+        else:
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Meta"
+            sheet.append(META_SPREADSHEET_HEADERS)
+
+        sheet.append(
+            [
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                email,
+                mail_password,
+                username,
+            ]
+        )
+        written = False
+        last_error = None
+        for _ in range(3):
+            try:
+                workbook.save(temporary_file)
+                temporary_file.replace(META_SPREADSHEET_FILE)
+                written = True
+                break
+            except PermissionError as error:
+                last_error = error
+                time.sleep(1)
+        if written:
+            if META_PENDING_SPREADSHEET_FILE.exists():
+                try:
+                    META_PENDING_SPREADSHEET_FILE.unlink()
+                except OSError:
+                    pass
+        else:
+            pending_tmp = META_SPREADSHEET_FILE.with_name(
+                "meta_accounts.pending.tmp.xlsx"
+            )
+            try:
+                workbook.save(pending_tmp)
+                pending_tmp.replace(META_PENDING_SPREADSHEET_FILE)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "File meta_accounts.xlsx đang bị khóa (thường do đang "
+                "mở trong Excel) nên chưa ghi được. Dòng này KHÔNG "
+                "mất — đã giữ ở meta_accounts.pending.xlsx và sẽ tự "
+                "gộp vào sheet chính ở lần ghi thành công sau; bạn chỉ "
+                "cần đóng file Excel đang mở."
+            ) from last_error
+    except RuntimeError:
+        raise
+    except Exception as error:
+        raise RuntimeError(f"Không ghi được file Excel: {error}") from error
+    finally:
+        if temporary_file.exists():
+            temporary_file.unlink()
+
+def _load_capsolver_key():
+    """CapSolver API key đã lưu ("" nếu chưa có). Không in ra log."""
+    try:
+        value = keyring.get_password(CAPSOLVER_SERVICE, CAPSOLVER_KEY_FIELD)
+    except Exception:
+        value = None
+    return value or ""
+
+def _save_capsolver_key(key):
+    keyring.set_password(CAPSOLVER_SERVICE, CAPSOLVER_KEY_FIELD, key)
+
+def _load_selfie_path_text():
+    """Đường dẫn ảnh selfie đã lưu ("" nếu chưa chọn)."""
+    try:
+        return (
+            paths.data_file(SELFIE_PATH_FILE)
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+def _save_selfie_path_text(path):
+    paths.data_file(SELFIE_PATH_FILE).write_text(
+        path.strip() + "\n", encoding="utf-8"
+    )
+
+def _read_meta_username(suffix=""):
+    """Username Meta helper vừa ghi (đọc xong xoá file để tài khoản
+    sau không đọc nhầm username cũ)."""
+    username_file = paths.data_file(f"meta_username{suffix}.txt")
+    try:
+        username = username_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    try:
+        username_file.unlink()
+    except OSError:
+        pass
+    return username.splitlines()[0].strip() if username else ""
+
+def _load_card_from_keyring():
+    """Thẻ người dùng đã lưu (nếu có) — chỉ đọc từ Credential Manager."""
+    card = {}
+    for field in CARD_FIELDS:
+        try:
+            value = keyring.get_password(CARD_SERVICE, field)
+        except Exception:
+            value = None
+        if value:
+            card[field] = value
+    return card if card.get("number") else {}
+
+def _save_card_to_keyring(card):
+    for field in CARD_FIELDS:
+        keyring.set_password(CARD_SERVICE, field, card[field])
+
+def _load_card_success_count():
+    """Số tài khoản thành công đã dùng thẻ đang lưu (0 nếu chưa có).
+
+    Chỉ là một con số đếm, không chứa chữ số nào của thẻ.
+    """
+    try:
+        value = keyring.get_password(CARD_SERVICE, CARD_SUCCESS_COUNT_FIELD)
+    except Exception:
+        value = None
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+def _save_card_success_count(count):
+    try:
+        keyring.set_password(
+            CARD_SERVICE, CARD_SUCCESS_COUNT_FIELD, str(max(0, int(count)))
+        )
+    except Exception:
+        pass
+
+def _delete_card_from_keyring():
+    for field in CARD_FIELDS:
+        try:
+            keyring.delete_password(CARD_SERVICE, field)
+        except Exception:
+            pass
+
+def _write_redeem_code(code, suffix=""):
+    """Ghi mã mời cần quy đổi cho tài khoản sắp chạy vào redeem.txt.
+
+    suffix là hậu tố riêng của luồng song song ("", "-2", ...):
+    mỗi luồng có file redeem riêng để các chuỗi mã mời không
+    giẫm lên nhau.
+    """
+    redeem_file = paths.data_file(f"redeem{suffix}.txt")
+    if code:
+        redeem_file.write_text(code + "\n", encoding="utf-8")
+    elif redeem_file.exists():
+        redeem_file.unlink()
+
+def _write_mailbox(mailbox, suffix=""):
+    """Ghi hộp thư của tài khoản sắp chạy vào mailbox.txt.
+
+    browser_helper đọc file này để biết đọc thư ở dịch vụ nào
+    và bằng bí mật nào (mật khẩu mail.tm / token tempmail.lol
+    / sid_token Guerrillamail). suffix là hậu tố riêng của
+    luồng song song ("", "-2", ...) như proxy/redeem. File
+    chứa bí mật hộp thư nên nằm trong .gitignore.
+    """
+    paths.data_file(f"mailbox{suffix}.txt").write_text(
+        json.dumps(mailbox, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+def _write_active_proxy(line, suffix=""):
+    """Ghi proxy đang dùng cho nhóm hiện tại vào proxy.txt (helper đọc).
+
+    suffix là hậu tố riêng của luồng song song ("", "-2", ...).
+    """
+    paths.data_file(f"proxy{suffix}.txt").write_text(
+        line + "\n", encoding="utf-8"
+    )
