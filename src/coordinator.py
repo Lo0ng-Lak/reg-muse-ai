@@ -908,6 +908,19 @@ class Coordinator:
                     storage._write_mailbox(mailbox, suffix)
                 except OSError:
                     pass
+                # Đánh dấu ĐANG đăng nhập TRƯỚC khi chạy helper, dưới
+                # khóa chung — luồng khác (hay lượt chạy sau) không
+                # lấy trùng mail này. Ghi không được thì vẫn chạy
+                # tiếp, chỉ ghi log.
+                with shared_lock:
+                    try:
+                        storage._mark_meta_logging_in(
+                            settings.meta_excel_path, address
+                        )
+                    except RuntimeError as error:
+                        self.events.put(
+                            ("log", f"[{display}/{label_total}] {error}")
+                        )
                 helper_ok, burned, waitlisted, cookie, own_invite = (
                     self._run_helper(
                         helper, address, display, label_total,
@@ -977,6 +990,16 @@ class Coordinator:
                 else:
                     with shared_lock:
                         shared["fail"] += 1
+                        # Đăng nhập thất bại: xoá dấu đang-đăng-nhập
+                        # để lượt sau lấy lại mail này được ngay.
+                        try:
+                            storage._clear_meta_login_mark(
+                                settings.meta_excel_path, address
+                            )
+                        except RuntimeError as error:
+                            self.events.put(
+                                ("log", f"[{display}/{label_total}] {error}")
+                            )
                     if self.stop_event.is_set():
                         self.events.put(
                             ("log", f"[{display}/{label_total}] Đã dừng theo yêu cầu.")

@@ -377,9 +377,11 @@ def _pending_meta_logins(excel_path):
     Đọc file người dùng CHỌN ở tab Meta (mặc định là
     meta_accounts.xlsx trong AppData, nhưng có thể là bản sao
     khác). Một dòng là "chưa đăng nhập" khi cột "Muse" trống
-    (file cũ không có cột này thì mọi dòng đều chưa đăng nhập).
-    Trả về list dict {email, secret, provider, username} theo
-    thứ tự trong file. File không có/không đọc được -> [].
+    (file cũ không có cột này thì mọi dòng đều chưa đăng nhập),
+    hoặc khi cột chỉ giữ dấu "đang đăng nhập" đã quá 30 phút
+    (luồng cũ bị dừng/kẹt giữa chừng). Trả về list dict {email,
+    secret, provider, username} theo thứ tự trong file. File
+    không có/không đọc được -> [].
     """
     try:
         workbook = load_workbook(excel_path, read_only=True)
@@ -401,8 +403,10 @@ def _pending_meta_logins(excel_path):
             email = (row[email_col - 1] or "").strip() if len(row) >= email_col else ""
             if not email:
                 continue
-            if muse_col and len(row) >= muse_col and row[muse_col - 1]:
-                continue
+            if muse_col and len(row) >= muse_col:
+                muse_value = row[muse_col - 1]
+                if muse_value and not _login_mark_is_stale(muse_value):
+                    continue
             secret = ""
             if secret_col and len(row) >= secret_col:
                 secret = str(row[secret_col - 1] or "")
@@ -427,11 +431,57 @@ def _pending_meta_logins(excel_path):
         workbook.close()
 
 
-def _mark_meta_logged_in(excel_path, email):
-    """Đánh dấu một dòng Meta là đã đăng nhập Muse (cột "Muse" =
-    thời điểm đăng nhập). Thêm cột "Muse" vào tiêu đề nếu file
-    cũ chưa có. Không tìm thấy dòng thì không làm gì.
-    """
+# Đánh dấu "đang đăng nhập" trong cột Muse: "ĐANG ĐĂNG NHẬP <thời
+# gian ISO>". Một dấu đang-đăng-nhập quá cũ (luồng bị dừng/kẹt
+# giữa chừng, không kịp xoá) thì coi như chưa đăng nhập để lượt
+# sau lấy lại — một lượt đăng nhập tối đa 900 giây (giới hạn của
+# helper) nên 30 phút là đủ xa.
+_LOGIN_IN_PROGRESS_PREFIX = "ĐANG ĐĂNG NHẬP "
+_LOGIN_IN_PROGRESS_STALE_MINUTES = 30
+
+
+def _login_mark_is_stale(value):
+    """Dấu "đang đăng nhập" đã quá hạn chưa. Chỉ dấu
+    đang-đăng-nhập mới có hạn; dấu đã-đăng-nhập (thời gian hoàn
+    tất) không bao giờ hết hạn. Dấu lạ (không đúng định dạng) thì
+    coi như đã đăng nhập — an toàn hơn là lấy trùng."""
+    if not isinstance(value, str):
+        return False
+    if not value.startswith(_LOGIN_IN_PROGRESS_PREFIX):
+        return False
+    try:
+        marked_at = datetime.fromisoformat(
+            value[len(_LOGIN_IN_PROGRESS_PREFIX):].strip()
+        )
+    except ValueError:
+        return False
+    if marked_at.tzinfo is None:
+        return False
+    age = datetime.now().astimezone() - marked_at
+    return age.total_seconds() > _LOGIN_IN_PROGRESS_STALE_MINUTES * 60
+
+
+def _save_workbook_retry(workbook, excel_path):
+    """Lưu workbook, thử lại 3 lần nếu file đang bị khóa (mở trong
+    Excel). Vẫn không được thì lỗi RuntimeError."""
+    last_error = None
+    for _ in range(3):
+        try:
+            workbook.save(excel_path)
+            return
+        except PermissionError as error:
+            last_error = error
+            time.sleep(1)
+    raise RuntimeError(
+        f"Không ghi được {Path(excel_path).name} (đang bị khóa) — "
+        "dòng Meta vẫn chưa được đánh dấu."
+    ) from last_error
+
+
+def _set_meta_muse_cell(excel_path, email, value):
+    """Ghi một giá trị vào cột "Muse" của dòng có email cho trước.
+    Thêm cột "Muse" nếu file cũ chưa có. Không tìm thấy dòng hoặc
+    không có cột Email Meta thì không làm gì."""
     workbook = load_workbook(excel_path)
     try:
         sheet = workbook.active
@@ -445,30 +495,70 @@ def _mark_meta_logged_in(excel_path, email):
             sheet.cell(row=1, column=muse_col, value="Muse")
         target = (email or "").strip().lower()
         for row_index in range(2, sheet.max_row + 1):
-            value = sheet.cell(row=row_index, column=email_col).value
-            if isinstance(value, str) and value.strip().lower() == target:
-                sheet.cell(
-                    row=row_index,
-                    column=muse_col,
-                    value=datetime.now().astimezone().isoformat(
-                        timespec="seconds"
-                    ),
-                )
+            cell_value = sheet.cell(row=row_index, column=email_col).value
+            if isinstance(cell_value, str) and cell_value.strip().lower() == target:
+                sheet.cell(row=row_index, column=muse_col, value=value)
                 break
         else:
             return
-        last_error = None
-        for _ in range(3):
-            try:
-                workbook.save(excel_path)
+        _save_workbook_retry(workbook, excel_path)
+    finally:
+        workbook.close()
+
+
+def _mark_meta_logged_in(excel_path, email):
+    """Đánh dấu một dòng Meta là đã đăng nhập Muse (cột "Muse" =
+    thời điểm đăng nhập). Thêm cột "Muse" vào tiêu đề nếu file
+    cũ chưa có. Không tìm thấy dòng thì không làm gì.
+    """
+    _set_meta_muse_cell(
+        excel_path,
+        email,
+        datetime.now().astimezone().isoformat(timespec="seconds"),
+    )
+
+
+def _mark_meta_logging_in(excel_path, email):
+    """Đánh dấu một dòng Meta là ĐANG đăng nhập Muse (cột "Muse" =
+    "ĐANG ĐĂNG NHẬP <thời gian>"). Lượt đăng nhập sau bỏ qua dòng
+    này trừ khi dấu đã quá 30 phút (luồng cũ bị dừng/kẹt giữa
+    chừng). Thêm cột "Muse" nếu file cũ chưa có. Không tìm thấy
+    dòng thì không làm gì."""
+    _set_meta_muse_cell(
+        excel_path,
+        email,
+        _LOGIN_IN_PROGRESS_PREFIX
+        + datetime.now().astimezone().isoformat(timespec="seconds"),
+    )
+
+
+def _clear_meta_login_mark(excel_path, email):
+    """Xoá dấu "đang đăng nhập" của một dòng Meta (đăng nhập thất
+    bại thì lượt sau lấy lại được ngay). CHỈ xoá khi ô đang giữ
+    dấu đang-đăng-nhập — không bao giờ xoá dấu đã-đăng-nhập
+    (thời gian hoàn tất)."""
+    workbook = load_workbook(excel_path)
+    try:
+        sheet = workbook.active
+        columns = _meta_sheet_columns(sheet)
+        email_col = columns.get("Email Meta")
+        muse_col = columns.get("Muse")
+        if not email_col or not muse_col:
+            return
+        target = (email or "").strip().lower()
+        for row_index in range(2, sheet.max_row + 1):
+            cell_value = sheet.cell(row=row_index, column=email_col).value
+            if isinstance(cell_value, str) and cell_value.strip().lower() == target:
+                current = sheet.cell(row=row_index, column=muse_col).value
+                if isinstance(current, str) and current.startswith(
+                    _LOGIN_IN_PROGRESS_PREFIX
+                ):
+                    # Gán qua .value: cell(..., value=None) là no-op
+                    # trong openpyxl (None nghĩa là "không đưa giá
+                    # trị"), không xoá được ô.
+                    sheet.cell(row=row_index, column=muse_col).value = None
+                    _save_workbook_retry(workbook, excel_path)
                 return
-            except PermissionError as error:
-                last_error = error
-                time.sleep(1)
-        raise RuntimeError(
-            f"Không ghi được {Path(excel_path).name} (đang bị khóa) — "
-            "dòng Meta vẫn chưa được đánh dấu đã đăng nhập."
-        ) from last_error
     finally:
         workbook.close()
 

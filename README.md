@@ -427,7 +427,11 @@ running again.
 A successful login is saved to `accounts.xlsx` — email, mailbox
 secret, session cookie and invite code as usual, plus the mailbox's
 `Link lấy OTP` — and marked in the Meta file's **Muse** column, so
-the next run skips it. (Muse accounts sign in with an email OTP, so
+the next run skips it. While a login is running, the row is marked
+`ĐANG ĐĂNG NHẬP <time>` in the same column, so no other lane (or
+later run) picks it up; a failed login clears that mark, and a mark
+older than 30 minutes (a lane stopped mid-login) counts as pending
+again. (Muse accounts sign in with an email OTP, so
 there is no Muse password to save.) No invite
 code is redeemed in login mode. The run uses the Muse.ai tab's proxy
 pool / VPN mode, lane count and account target (0 = log in all
