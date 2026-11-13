@@ -403,3 +403,18 @@ Note on CAPTCHAs: the Muse signup flow does not bypass CAPTCHA — a
 challenge there waits for you to solve it in the browser. The Meta
 flow solves its CAPTCHAs through CapSolver, a paid third-party
 solving service, using your own API key and balance.
+
+### Muse login with a Meta account (Đăng nhập Muse)
+
+The **Đăng nhập Muse** button (Meta tab) logs into Muse with Meta
+accounts you already registered: pick the Meta Excel file with
+**Chọn file…** (the path is kept in gitignored `meta_excel.txt`),
+and the run reads each row's Email Meta / Mật khẩu hộp thư /
+Nhà cung cấp columns — **no new mailbox is created**. Each account
+logs in with an email OTP, then submits the saved card (from the
+Muse.ai tab) at the card step, exactly like a signup from there on.
+A successful login is saved to `accounts.xlsx` and marked in the
+Meta file's **Muse** column, so the next run skips it. No invite
+code is redeemed in login mode. The run uses the Meta tab's proxy
+pool / VPN mode, lane count and account target (0 = log in all
+pending rows). The card cap is not enforced in login runs.

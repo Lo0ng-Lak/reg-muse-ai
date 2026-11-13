@@ -12,6 +12,7 @@ from datetime import datetime
 import keyring
 from openpyxl import Workbook, load_workbook
 
+import mail_providers
 import paths
 
 
@@ -35,6 +36,8 @@ CAPSOLVER_KEY_FIELD = "api_key"
 
 SELFIE_PATH_FILE = "selfie.txt"
 
+META_EXCEL_PATH_FILE = "meta_excel.txt"
+
 MAIL_SERVICE = "MuseAIHelper:mail.tm"
 
 CARD_SERVICE = "MuseAIHelper:card"
@@ -56,6 +59,8 @@ META_SPREADSHEET_HEADERS = [
     "Email Meta",
     "Mật khẩu hộp thư",
     "Username Meta",
+    "Nhà cung cấp",
+    "Muse",
 ]
 
 def _migrate_legacy_sheet(sheet):
@@ -193,7 +198,7 @@ def _last_invite_from_sheet():
             continue
     return ""
 
-def _append_meta_row(email, mail_password="", username=""):
+def _append_meta_row(email, mail_password="", username="", provider=""):
     """Ghi một tài khoản Meta đã tạo vào meta_accounts.xlsx.
 
     Cùng nhịp chống khoá file như _append_spreadsheet_row (thử
@@ -231,6 +236,8 @@ def _append_meta_row(email, mail_password="", username=""):
                 email,
                 mail_password,
                 username,
+                provider,
+                "",
             ]
         )
         written = False
@@ -314,6 +321,170 @@ def _read_meta_username(suffix=""):
     except OSError:
         pass
     return username.splitlines()[0].strip() if username else ""
+
+# Domain hộp thư -> dịch vụ temp mail (để bước đăng nhập Muse
+# suy ra dịch vụ của một tài khoản Meta cũ, khi file Excel không
+# có cột "Nhà cung cấp"). mail.tm lấy danh sách domain qua API
+# nên chỉ ghi nhận domain đang hoạt động đã biết (fldubai.com).
+_PROVIDER_DOMAINS = {}
+for _domain in mail_providers.TEMPMAIL_PLUS_DOMAINS:
+    _PROVIDER_DOMAINS[_domain] = "tempmail.plus"
+_PROVIDER_DOMAINS["maildrop.cc"] = "maildrop.cc"
+_PROVIDER_DOMAINS["fldubai.com"] = "mail.tm"
+for _domain in (
+    "guerrillamail.com",
+    "guerrillamail.net",
+    "guerrillamail.org",
+    "guerrillamail.biz",
+    "guerrillamail.info",
+    "guerrillamail.de",
+    "sharklasers.com",
+):
+    _PROVIDER_DOMAINS[_domain] = "guerrillamail"
+
+
+def _provider_for_email(email):
+    """Dịch vụ temp mail của một địa chỉ (theo domain hộp thư).
+
+    Không nhận ra domain thì về dịch vụ mặc định (tempmail.plus)
+    — dịch vụ chủ tool dùng nhiều nhất.
+    """
+    domain = (email or "").rsplit("@", 1)[-1].strip().lower()
+    return _PROVIDER_DOMAINS.get(domain, mail_providers.DEFAULT_PROVIDER)
+
+
+def _meta_sheet_columns(sheet):
+    """Vị trí các cột của sheet Meta (theo tên tiêu đề, 1-based).
+
+    Thiếu cột nào thì cột đó vắng khỏi dict — file cũ (4 cột)
+    không có "Nhà cung cấp"/"Muse" vẫn đọc được.
+    """
+    columns = {}
+    for cell in sheet[1]:
+        if isinstance(cell.value, str):
+            columns[cell.value.strip()] = cell.column
+    return columns
+
+
+def _pending_meta_logins(excel_path):
+    """Tài khoản Meta trong file Excel chưa đăng nhập Muse.
+
+    Đọc file người dùng CHỌN ở tab Meta (mặc định là
+    meta_accounts.xlsx trong AppData, nhưng có thể là bản sao
+    khác). Một dòng là "chưa đăng nhập" khi cột "Muse" trống
+    (file cũ không có cột này thì mọi dòng đều chưa đăng nhập).
+    Trả về list dict {email, secret, provider, username} theo
+    thứ tự trong file. File không có/không đọc được -> [].
+    """
+    try:
+        workbook = load_workbook(excel_path, read_only=True)
+    except Exception:
+        return []
+    try:
+        sheet = workbook.active
+        columns = _meta_sheet_columns(sheet)
+        email_col = columns.get("Email Meta")
+        if not email_col:
+            return []
+        secret_col = columns.get("Mật khẩu hộp thư")
+        username_col = columns.get("Username Meta")
+        provider_col = columns.get("Nhà cung cấp")
+        muse_col = columns.get("Muse")
+        valid_providers = {pid for pid, _ in mail_providers.PROVIDERS}
+        pending = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            email = (row[email_col - 1] or "").strip() if len(row) >= email_col else ""
+            if not email:
+                continue
+            if muse_col and len(row) >= muse_col and row[muse_col - 1]:
+                continue
+            secret = ""
+            if secret_col and len(row) >= secret_col:
+                secret = str(row[secret_col - 1] or "")
+            username = ""
+            if username_col and len(row) >= username_col:
+                username = str(row[username_col - 1] or "")
+            provider = ""
+            if provider_col and len(row) >= provider_col:
+                provider = str(row[provider_col - 1] or "").strip()
+            if provider not in valid_providers:
+                provider = _provider_for_email(email)
+            pending.append(
+                {
+                    "email": email,
+                    "secret": secret,
+                    "provider": provider,
+                    "username": username,
+                }
+            )
+        return pending
+    finally:
+        workbook.close()
+
+
+def _mark_meta_logged_in(excel_path, email):
+    """Đánh dấu một dòng Meta là đã đăng nhập Muse (cột "Muse" =
+    thời điểm đăng nhập). Thêm cột "Muse" vào tiêu đề nếu file
+    cũ chưa có. Không tìm thấy dòng thì không làm gì.
+    """
+    workbook = load_workbook(excel_path)
+    try:
+        sheet = workbook.active
+        columns = _meta_sheet_columns(sheet)
+        email_col = columns.get("Email Meta")
+        if not email_col:
+            return
+        muse_col = columns.get("Muse")
+        if not muse_col:
+            muse_col = sheet.max_column + 1
+            sheet.cell(row=1, column=muse_col, value="Muse")
+        target = (email or "").strip().lower()
+        for row_index in range(2, sheet.max_row + 1):
+            value = sheet.cell(row=row_index, column=email_col).value
+            if isinstance(value, str) and value.strip().lower() == target:
+                sheet.cell(
+                    row=row_index,
+                    column=muse_col,
+                    value=datetime.now().astimezone().isoformat(
+                        timespec="seconds"
+                    ),
+                )
+                break
+        else:
+            return
+        last_error = None
+        for _ in range(3):
+            try:
+                workbook.save(excel_path)
+                return
+            except PermissionError as error:
+                last_error = error
+                time.sleep(1)
+        raise RuntimeError(
+            f"Không ghi được {Path(excel_path).name} (đang bị khóa) — "
+            "dòng Meta vẫn chưa được đánh dấu đã đăng nhập."
+        ) from last_error
+    finally:
+        workbook.close()
+
+
+def _load_meta_excel_path_text():
+    """Đường dẫn file Excel Meta đã chọn ("" nếu chưa chọn)."""
+    try:
+        return (
+            paths.data_file(META_EXCEL_PATH_FILE)
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def _save_meta_excel_path_text(path):
+    paths.data_file(META_EXCEL_PATH_FILE).write_text(
+        path.strip() + "\n", encoding="utf-8"
+    )
+
 
 def _load_card_from_keyring():
     """Thẻ người dùng đã lưu (nếu có) — chỉ đọc từ Credential Manager."""

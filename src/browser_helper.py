@@ -3207,6 +3207,11 @@ def main():
     # --meta: đăng ký tài khoản Meta ở meta.ai thay vì đăng ký
     # Muse.ai (app chính chạy với nút "Đăng kí Meta" riêng).
     meta = "--meta" in flags
+    # --muse-login: đăng nhập Muse bằng tài khoản Meta đã đăng ký
+    # (email lấy từ file Excel Meta người dùng chọn ở tab Meta)
+    # thay vì tạo tài khoản Muse mới. OTP vẫn gửi về hộp thư của
+    # mail đó; từ bước nhập thẻ trở đi giữ nguyên như đăng ký.
+    muse_login = "--muse-login" in flags
     for arg in flags:
         if arg.isdigit():
             # Luồng song song: đọc đúng file proxy/redeem của luồng này.
@@ -3308,6 +3313,8 @@ def main():
         else:
             use_api = _try_send_otp_api(page, email, token_box)
         tos_version = None
+        requires_name = False
+        login_complete = None
         if use_api:
             _status(
                 "Đã gửi OTP qua API, đang chờ mã xác minh từ "
@@ -3323,11 +3330,35 @@ def main():
                 use_api = False
             else:
                 _status("Đã nhận mã xác minh, đang xác nhận qua API...")
-                confirmed = _try_confirm_otp_api(page, code, token_box)
-                if confirmed is None:
-                    use_api = False
+                if muse_login:
+                    # Đăng nhập bằng tài khoản Meta đã có: confirm-otp
+                    # có thể trả thẳng phiên (đi thẳng tới thẻ) hoặc
+                    # vẫn yêu cầu hoàn tất hồ sơ như đăng ký mới.
+                    full = _try_confirm_otp_api_full(page, code, token_box)
+                    if full is None:
+                        use_api = False
+                    elif full.get("registration_state") == "completion_required":
+                        tos = full.get("tos") or {}
+                        tos_version = (
+                            tos.get("content_version")
+                            if isinstance(tos, dict)
+                            else None
+                        )
+                        requires_name = bool(full.get("requires_name"))
+                        if tos_version is None:
+                            _status(
+                                "API xác nhận OTP thiếu "
+                                "tos_content_version — dùng nút bấm."
+                            )
+                            use_api = False
+                    else:
+                        login_complete = full
                 else:
-                    tos_version, requires_name = confirmed
+                    confirmed = _try_confirm_otp_api(page, code, token_box)
+                    if confirmed is None:
+                        use_api = False
+                    else:
+                        tos_version, requires_name = confirmed
         if not use_api:
             _click_when_ready(page, continue_button, "Continue")
             # Mốc thư cũ chụp lại sau khi bấm: mã OTP của lần gửi
@@ -3353,13 +3384,36 @@ def main():
             # 18 tuổi. Vì vậy: chờ form hồ sơ (cả hai biến thể) tự hiện
             # trước; chỉ khi nó không hiện mới bấm Confirm của form mã rồi
             # chờ tiếp.
-            _ensure_profile_form(page)
-            _status("Mã đã xác nhận, đang điền hồ sơ...")
-            _fill_profile(page)
-            finish_button = page.get_by_role(
-                "button", name="Confirm", exact=True
-            )
-            _click_when_ready(page, finish_button, "Confirm")
+            if muse_login:
+                # Tài khoản Meta đã đăng ký: sau OTP có thể ra thẳng
+                # bước nhập thẻ (không cần điền hồ sơ) hoặc vẫn ra
+                # form hồ sơ (chưa hoàn tất) — chờ xem màn nào hiện.
+                where = _wait_for_profile_or_card(page)
+                if where == "profile":
+                    _status("Mã đã xác nhận, đang điền hồ sơ...")
+                    _fill_profile(page)
+                    finish_button = page.get_by_role(
+                        "button", name="Confirm", exact=True
+                    )
+                    _click_when_ready(page, finish_button, "Confirm")
+                elif where == "card":
+                    _status(
+                        "Đăng nhập xong — đã tới bước nhập thẻ, "
+                        "không cần điền hồ sơ."
+                    )
+                else:
+                    _status(
+                        "Đăng nhập xong — chưa rõ màn hình tiếp theo, "
+                        "để bước phân loại bên dưới quyết định."
+                    )
+            else:
+                _ensure_profile_form(page)
+                _status("Mã đã xác nhận, đang điền hồ sơ...")
+                _fill_profile(page)
+                finish_button = page.get_by_role(
+                    "button", name="Confirm", exact=True
+                )
+                _click_when_ready(page, finish_button, "Confirm")
         else:
             # API đã xác nhận OTP: gửi hoàn tất hồ sơ qua API
             # LUÔN, không mở lại trang để điền form hồ sơ trước.
@@ -3373,10 +3427,17 @@ def main():
             # Ngày sinh dùng ngẫu nhiên (trên 18 tuổi) như luồng
             # API ban đầu; họ tên kèm theo khi kết quả xác nhận
             # OTP báo requires_name (đúng như trang tự làm).
-            completion = _try_register_completion_api(
-                page, tos_version, token_box,
-                include_names=requires_name,
-            )
+            if muse_login and login_complete is not None:
+                # Tài khoản Meta đã đăng ký xong: confirm-otp đã trả
+                # thẳng phiên, không cần hoàn tất hồ sơ.
+                completion = login_complete
+                completion_label = "Đăng nhập xong qua API"
+            else:
+                completion = _try_register_completion_api(
+                    page, tos_version, token_box,
+                    include_names=requires_name,
+                )
+                completion_label = "Đã hoàn tất hồ sơ qua API"
             if completion == REGISTRATION_BLOCKED:
                 # Meta chặn tạo tài khoản trên IP này — cùng bản
                 # chất với hộp thoại "Something went wrong" ở luồng
@@ -3409,44 +3470,20 @@ def main():
                     "tại để kiểm tra màn hình thật."
                 )
             else:
-                # Hoàn tất xong: đồng bộ phiên web bằng form
+                # Hoàn tất/đăng nhập xong: đồng bộ phiên web bằng form
                 # bootstrap (đúng cách trang tự làm) để trình duyệt
                 # nhận cookie phiên rồi tới bước tiếp theo (thường
-                # là checkpoint nhập thẻ). Không có token phiên,
-                # hoặc gửi form lỗi, thì mở thẳng redirect_to
-                # server trả về; không có nữa mới mở lại trang chính.
-                frl_token = None
-                session = completion.get("auth_meta_session")
-                if isinstance(session, dict):
-                    frl_token = session.get("frl_access_token")
-                redirect_to = completion.get("redirect_to")
-                if isinstance(frl_token, str) and frl_token:
-                    _status(
-                        "Đã hoàn tất hồ sơ qua API — đang đồng bộ "
-                        "phiên web..."
-                    )
-                    bootstrapped = _bootstrap_session(
-                        page, frl_token, redirect_to
-                    )
-                else:
-                    _status(
-                        "Hoàn tất hồ sơ xong nhưng không có token "
-                        "phiên — mở thẳng trang đích thay thế."
-                    )
-                    bootstrapped = False
-                if not bootstrapped:
-                    path = _resolve_redirect_path(redirect_to)
-                    _status(
-                        "Đã hoàn tất hồ sơ qua API — tới bước tiếp "
-                        f"theo ({path})..."
-                    )
-                    page.goto(
-                        SIGNUP_URL.rstrip("/") + path,
-                        wait_until="domcontentloaded",
-                        timeout=PAGE_TIMEOUT_MS,
-                    )
+                # là bước nhập thẻ). Không có token phiên, hoặc gửi
+                # form lỗi, thì mở thẳng redirect_to server trả về.
+                _bootstrap_from_completion(
+                    page, completion, completion_label
+                )
         if auto:
-            _status("Đã gửi hồ sơ, đang chờ màn hình tiếp theo...")
+            _status(
+                "Đã đăng nhập, đang chờ màn hình tiếp theo..."
+                if muse_login
+                else "Đã gửi hồ sơ, đang chờ màn hình tiếp theo..."
+            )
             outcome = _classify_after_profile(page)
             if outcome == "error":
                 _status(
@@ -3484,8 +3521,9 @@ def main():
                     )
                 raise RuntimeError(detail)
             if outcome != "card":
+                step = "đăng nhập" if muse_login else "hồ sơ"
                 raise RuntimeError(
-                    "Sau hồ sơ không ra bước nhập thẻ, cũng không ra "
+                    f"Sau {step} không ra bước nhập thẻ, cũng không ra "
                     "waitlist — bước tiếp theo chưa rõ, hãy chụp màn "
                     "hình gửi lại để bổ sung vào tool."
                 )
@@ -3526,7 +3564,9 @@ def main():
             _wait_for_muse_interface(page)
             _wait_for_app_shell(page)
             redeem_code = _load_redeem_code()
-            if redeem_code:
+            # Chế độ đăng nhập không quy đổi mã mời (file redeem có
+            # thể là mã cũ sót lại từ lượt đăng ký trước).
+            if redeem_code and not muse_login:
                 if _redeem_invite_code(page, redeem_code):
                     _status(
                         f"Đã quy đổi mã mời {redeem_code} của tài "
@@ -3562,6 +3602,11 @@ def main():
                     "Đã qua bước thẻ nhưng không lấy được cookie "
                     "phiên đăng nhập nào — tài khoản vẫn được lưu, "
                     "cột cookie sẽ trống."
+                )
+            if muse_login:
+                _status(
+                    "Đăng nhập Muse bằng tài khoản Meta thành công — "
+                    "tài khoản được lưu."
                 )
             _status("RESULT: SUCCESS")
         else:

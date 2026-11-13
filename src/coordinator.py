@@ -79,6 +79,10 @@ class RunSettings:
     provider_id: str = mail_providers.DEFAULT_PROVIDER
     direct: bool = False
     meta: bool = False
+    # Đăng nhập Muse bằng tài khoản Meta đã đăng ký (đọc từ file
+    # Excel người dùng chọn ở tab Meta, không tạo hộp thư mới).
+    meta_login: bool = False
+    meta_excel_path: str = ""
     invite: str = ""
     single_invite: bool = False
     card_limit: int = 0
@@ -219,6 +223,9 @@ class Coordinator:
         # đã đặt (chủ tool chấp nhận rủi ro IP bị chặn); mỗi
         # luồng vẫn có file proxy riêng (proxy.txt, proxy-2.txt,
         # ...) đều chứa câu DIRECT.
+        if settings.meta_login:
+            self._run_login_loop(settings)
+            return
         total = settings.total
         pool = settings.pool
         direct = settings.direct
@@ -531,6 +538,7 @@ class Coordinator:
                                     address,
                                     mail_password=mail_password,
                                     username=username,
+                                    provider=settings.provider_id,
                                 )
                             else:
                                 storage._append_spreadsheet_row(
@@ -687,11 +695,339 @@ class Coordinator:
                 with shared_lock:
                     shared["in_flight"] -= 1
 
-    def _run_helper(self, helper, address, index, total, meta=False):
+    def _run_login_loop(self, settings):
+        """Lượt đăng nhập Muse bằng tài khoản Meta đã đăng ký.
+
+        Đọc các dòng chưa đăng nhập trong file Excel người dùng
+        chọn ở tab Meta (mỗi dòng: email + bí mật hộp thư + dịch
+        vụ), chia theo bước nhảy cho các luồng như kho proxy.
+        Mỗi tài khoản chạy helper --muse-login: đăng nhập Muse
+        bằng OTP rồi nộp thẻ đã lưu. Thành công thì đánh dấu
+        dòng đó trong file Excel + ghi dòng vào accounts.xlsx.
+        total = 0 nghĩa là đăng nhập HẾT các dòng chưa đăng nhập.
+        """
+        rows = storage._pending_meta_logins(settings.meta_excel_path)
+        if settings.total > 0:
+            rows = rows[: settings.total]
+        if not rows:
+            self.events.put(
+                (
+                    "log",
+                    "Không còn tài khoản Meta nào chưa đăng nhập Muse "
+                    "trong file Excel đã chọn.",
+                )
+            )
+            self.running = False
+            self.events.put(("finished", (0, 0, self.stop_event.is_set())))
+            return
+        pool = settings.pool
+        direct = settings.direct
+        requested_lanes = max(1, min(int(settings.lanes), 5))
+        lanes = max(1, min(requested_lanes, len(rows)))
+        if direct:
+            self.report_ip(proxy_pool._check_public_ip())
+        shared = {
+            "success": 0,
+            "fail": 0,
+            "card_used": settings.card_used,
+            "in_flight": 0,
+            "card_stop_logged": False,
+        }
+        shared_lock = threading.Lock()
+        self.events.put(
+            (
+                "log",
+                f"Đăng nhập Muse cho {len(rows)} tài khoản Meta "
+                f"({lanes} luồng) — mỗi tài khoản nộp thẻ đã lưu.",
+            )
+        )
+        threads = []
+        for lane_no in range(1, lanes + 1):
+            if direct:
+                subset = [DIRECT_PROXY_LINE]
+            else:
+                subset = pool[lane_no - 1::lanes]
+            lane_rows = rows[lane_no - 1::lanes]
+            lane_args = (
+                settings,
+                lane_no,
+                lanes,
+                lane_rows,
+                subset,
+                shared,
+                shared_lock,
+            )
+            if lanes == 1:
+                self._run_login_lane(*lane_args)
+            else:
+                thread = threading.Thread(
+                    target=self._run_login_lane,
+                    args=lane_args,
+                    name=f"login-lane-{lane_no}",
+                    daemon=True,
+                )
+                thread.start()
+                threads.append(thread)
+        for thread in threads:
+            thread.join()
+        self.running = False
+        self.events.put(
+            (
+                "finished",
+                (
+                    shared["success"],
+                    shared["fail"],
+                    self.stop_event.is_set(),
+                ),
+            )
+        )
+
+    def _run_login_lane(
+        self, settings, lane_no, lanes, rows, subset, shared, shared_lock
+    ):
+        """Một luồng đăng nhập: lần lượt các dòng Meta của luồng.
+
+        Cùng nhịp xoay proxy / giữ chỗ thẻ / nghỉ giữa các tài
+        khoản như _run_lane, nhưng hộp thư lấy từ dòng Excel
+        (không tạo mới), không quy đổi mã mời, và thành công thì
+        đánh dấu dòng đó đã đăng nhập trong file Excel.
+        """
+        helper = paths.SRC_DIR / "browser_helper.py"
+        suffix = "" if lane_no == 1 else f"-{lane_no}"
+        self._lane_local.suffix = suffix
+        multi = lanes > 1
+        lane_tag = f"[Luồng {lane_no}] " if multi else ""
+        rotation = proxy_pool._ProxyRotation(subset, settings.per_proxy)
+        written_proxy_index = None
+        label_total = len(rows)
+        for index, row in enumerate(rows, start=1):
+            if self.stop_event.is_set():
+                break
+            if rotation.all_retired():
+                self.events.put(
+                    (
+                        "log",
+                        f"{lane_tag}Toàn bộ proxy của luồng đã bị "
+                        "đưa vào kho proxy lỗi — luồng dừng.",
+                    )
+                )
+                break
+            with shared_lock:
+                card_hit = (
+                    settings.card_tracked
+                    and settings.card_limit > 0
+                    and shared["card_used"] + shared["in_flight"]
+                    >= settings.card_limit
+                )
+                log_card_stop = (
+                    card_hit and not shared["card_stop_logged"]
+                )
+                if log_card_stop:
+                    shared["card_stop_logged"] = True
+                if not card_hit:
+                    shared["in_flight"] += 1
+            if card_hit:
+                if log_card_stop:
+                    self.events.put(
+                        (
+                            "log",
+                            f"Thẻ đang lưu đã đủ {settings.card_limit} tài "
+                            "khoản thành công — dừng lượt chạy.",
+                        )
+                    )
+                break
+            try:
+                display = f"L{lane_no} · {index}" if multi else index
+                proxy_index, line = rotation.current()
+                if proxy_index != written_proxy_index:
+                    written_proxy_index = proxy_index
+                    try:
+                        storage._write_active_proxy(line, suffix)
+                        note = ""
+                    except OSError as error:
+                        note = f" (không ghi được proxy{suffix}.txt: {error})"
+                    if settings.direct:
+                        self.events.put(
+                            (
+                                "log",
+                                "Chế độ IP máy (VPN): không dùng "
+                                "proxy — mọi tài khoản chạy qua IP "
+                                f"của máy này.{note}",
+                            )
+                        )
+                    else:
+                        self.events.put(
+                            (
+                                "log",
+                                f"{lane_tag}Proxy #{proxy_index + 1}/{len(subset)}: "
+                                f"{proxy_pool._proxy_display(line)} — dùng cho các tài "
+                                f"khoản tiếp theo.{note}",
+                            )
+                        )
+                with shared_lock:
+                    s_now = shared["success"]
+                    f_now = shared["fail"]
+                    c_now = shared["card_used"]
+                card_note = (
+                    f" · Thẻ: {c_now}/{settings.card_limit}"
+                    if settings.card_tracked
+                    else ""
+                )
+                self.events.put(
+                    (
+                        "progress",
+                        (
+                            lane_no,
+                            index,
+                            label_total,
+                            s_now,
+                            f_now,
+                            card_note,
+                            multi,
+                        ),
+                    )
+                )
+                address = row["email"]
+                mailbox = {
+                    "provider": row["provider"],
+                    "email": address,
+                    "secret": row["secret"],
+                }
+                self.events.put(
+                    (
+                        "log",
+                        f"[{display}/{label_total}] Đăng nhập Muse bằng "
+                        f"tài khoản Meta {address} ({row['provider']}).",
+                    )
+                )
+                try:
+                    storage._write_mailbox(mailbox, suffix)
+                except OSError:
+                    pass
+                helper_ok, burned, waitlisted, cookie, own_invite = (
+                    self._run_helper(
+                        helper, address, display, label_total,
+                        muse_login=True,
+                    )
+                )
+                if helper_ok:
+                    saved = False
+                    save_error = None
+                    with shared_lock:
+                        try:
+                            storage._append_spreadsheet_row(
+                                address,
+                                row["secret"],
+                                cookie=cookie,
+                                invite=own_invite,
+                            )
+                            saved = True
+                            shared["success"] += 1
+                            if settings.card_tracked:
+                                shared["card_used"] += 1
+                                storage._save_card_success_count(
+                                    shared["card_used"]
+                                )
+                        except RuntimeError as error:
+                            shared["fail"] += 1
+                            save_error = error
+                    if saved:
+                        try:
+                            storage._mark_meta_logged_in(
+                                settings.meta_excel_path, address
+                            )
+                        except RuntimeError as error:
+                            self.events.put(("log", f"[{display}/{label_total}] {error}"))
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] ✔ Đăng nhập Muse thành công "
+                                f"{address} — đã nộp thẻ và lưu vào sheet Excel.",
+                            )
+                        )
+                    else:
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] {address} đã đăng nhập xong nhưng "
+                                f"không ghi được sheet Excel: {save_error}",
+                            )
+                        )
+                else:
+                    with shared_lock:
+                        shared["fail"] += 1
+                    if self.stop_event.is_set():
+                        self.events.put(
+                            ("log", f"[{display}/{label_total}] Đã dừng theo yêu cầu.")
+                        )
+                    else:
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] ✘ Đăng nhập thất bại cho {address} "
+                                "— lý do ở dòng RESULT phía trên.",
+                            )
+                        )
+                if burned and not settings.direct:
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1} bị Meta chặn — "
+                            "đổi sang proxy kế từ tài khoản sau.",
+                        )
+                    )
+                if burned or waitlisted:
+                    if settings.direct:
+                        reason = (
+                            "bị Meta chặn đăng nhập"
+                            if burned
+                            else "rơi vào 'Join the waitlist' "
+                            "(khu vực không hỗ trợ)"
+                        )
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] IP máy "
+                                f"(VPN) {reason} — dừng lượt chạy. "
+                                "Đổi server VPN (ưu tiên US) rồi "
+                                "chạy lại.",
+                            )
+                        )
+                        self.stop_event.set()
+                    else:
+                        reason = (
+                            "bị Meta chặn đăng nhập"
+                            if burned
+                            else "bị 'Join the waitlist' (khu vực "
+                            "không hỗ trợ)"
+                        )
+                        if self._mark_proxy_bad(line):
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{display}/{label_total}] Proxy "
+                                    f"{proxy_pool._proxy_display(line)} {reason} — "
+                                    "đã đưa vào ô Proxy lỗi, không dùng "
+                                    "lại ở các đợt sau.",
+                                )
+                            )
+                        rotation.retire_current()
+                else:
+                    rotation.advance_after_account(burned=burned)
+                if index < len(rows) and not self.stop_event.is_set():
+                    time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
+            finally:
+                with shared_lock:
+                    shared["in_flight"] -= 1
+
+    def _run_helper(self, helper, address, index, total, meta=False,
+                      muse_login=False):
         suffix = getattr(self._lane_local, "suffix", "")
         command = [sys.executable, str(helper), address, "--auto"]
         if meta:
             command.append("--meta")
+        if muse_login:
+            command.append("--muse-login")
         if suffix:
             command.append(suffix.lstrip("-"))
         try:
