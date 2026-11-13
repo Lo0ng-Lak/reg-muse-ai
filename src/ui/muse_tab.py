@@ -151,6 +151,15 @@ class MuseTab(ttk.Frame):
             command=self._save_vault_limit,
         )
         self.save_limit_button.pack(side="left")
+        # Giới hạn chung: lấy số ở ô Giới hạn / thẻ rồi áp cho tất
+        # cả thẻ trong kho cùng lúc (ghi đè từng thẻ) — không cần
+        # chọn thẻ, không thêm hàng mới nên khung Kho thẻ vẫn gọn.
+        self.apply_limit_all_button = ttk.Button(
+            vault_actions,
+            text="Áp dụng cho tất cả thẻ",
+            command=self._apply_vault_limit_to_all,
+        )
+        self.apply_limit_all_button.pack(side="left", padx=(6, 0))
         self._refresh_vault()
 
         # Hàng chạy gọn trong một dòng: mã mời + Bắt đầu đăng ký
@@ -233,7 +242,11 @@ class MuseTab(ttk.Frame):
             return
         self._vault_notices_logged = True
         report = storage._last_migration_report()
-        if report and (report["migrated"] or report["orphans_removed"]):
+        if report and (
+            report["migrated"]
+            or report["orphans_removed"]
+            or report.get("error")
+        ):
             parts = []
             if report["migrated"]:
                 parts.append(
@@ -249,6 +262,12 @@ class MuseTab(ttk.Frame):
                 parts.append(
                     "không liệt kê được Credential Manager để dọn hết "
                     f"thẻ mồ côi ({report['cleanup_error']})"
+                )
+            if report.get("error"):
+                parts.append(
+                    "chuyển thẻ gặp lỗi "
+                    f"({report['error']}) — thẻ vẫn còn ở chỗ cũ, "
+                    "lần sau mở app sẽ thử lại"
                 )
             self.app.append_log("Kho thẻ: " + "; ".join(parts) + ".")
         warning = storage._cards_protection_warning()
@@ -420,6 +439,33 @@ class MuseTab(ttk.Frame):
             f"Đã đặt giới hạn thẻ {card['label']}: {limit_text}."
         )
 
+    def _apply_vault_limit_to_all(self):
+        """Đặt MỘT giới hạn chung cho tất cả thẻ trong kho (lấy số
+        ở ô Giới hạn / thẻ): ghi đè giới hạn từng thẻ. Không cần
+        chọn thẻ nào trước. Thẻ nào muốn khác thì chọn thẻ đó rồi
+        bấm Lưu giới hạn như cũ."""
+        if self.coordinator.running:
+            return
+        try:
+            limit = int(self.card_limit_var.get())
+        except (tk.TclError, ValueError):
+            limit = 0
+        limit = max(0, min(limit, 100))
+        count = storage._set_all_vault_card_limits(limit)
+        if not count:
+            messagebox.showwarning(
+                "Kho thẻ đang trống",
+                "Chưa có thẻ nào trong kho để đặt giới hạn.",
+            )
+            return
+        self._refresh_vault()
+        limit_text = f"{limit} tài khoản" if limit > 0 else "không giới hạn"
+        self.app.append_log(
+            f"Đã đặt giới hạn chung {limit_text} cho tất cả "
+            f"{count} thẻ trong kho. Muốn đổi riêng một thẻ thì "
+            "chọn thẻ đó rồi bấm Lưu giới hạn."
+        )
+
     def _run_cards(self):
         """Kho thẻ của lượt chạy sắp bắt đầu.
 
@@ -482,8 +528,9 @@ class MuseTab(ttk.Frame):
             messagebox.showwarning(
                 "Tất cả thẻ đã đủ giới hạn",
                 "Tất cả thẻ trong kho đã đủ giới hạn. Tăng giới hạn "
-                "từng thẻ hoặc nhập thêm thẻ mới vào kho thẻ rồi "
-                "chạy lại.",
+                "chung (ô Giới hạn / thẻ rồi bấm Áp dụng cho tất cả "
+                "thẻ), tăng riêng từng thẻ, hoặc nhập thêm thẻ mới "
+                "vào kho thẻ rồi chạy lại.",
             )
             return False
         return True
@@ -817,6 +864,7 @@ class MuseTab(ttk.Frame):
             self.auto_rotate_button,
             self.delete_vault_card_button,
             self.save_limit_button,
+            self.apply_limit_all_button,
             self.start_button,
             self.meta_excel_entry,
             self.browse_excel_button,

@@ -375,6 +375,12 @@ same label) is rejected as a duplicate.
 is the number of successful accounts that used that card; it persists
 across runs in `vault.json`, keyed by the card id.
 
+**Global limit (Áp dụng cho tất cả thẻ):** set the number in the same
+**Giới hạn / thẻ** box and press **Áp dụng cho tất cả thẻ** — the same
+limit is written to every card in the vault at once (0 = unlimited,
+max 100), overwriting each card's limit. A card that needs a different
+limit afterwards can still be set individually with **Lưu giới hạn**.
+
 **Rotation:** by default the run uses the vault in order and
 automatically moves to the next available card when the current one
 hits its limit; when every card is exhausted the run stops with a
@@ -391,6 +397,16 @@ is empty, every account waits for manual entry at the card step
 (up to 4 minutes each). A single card saved by the old version is
 imported into the vault automatically on first use (label "Thẻ 1",
 limit 0, usage count carried over).
+
+**Photo step after the card step (bước up ảnh sau phần nhập thẻ):**
+after the card step, if the account is already inside Muse the photo
+upload step is skipped ("Đã vào được Muse, bỏ qua bước up ảnh") and
+the run goes straight to the invite-code steps (redeem the previous
+account's code, harvest this account's own code). If Muse still asks
+for photo verification (an upload prompt is showing), the saved selfie
+file from the Meta tab is uploaded as before — or the run waits for a
+manual upload when no selfie file is saved. The photo step is never
+removed entirely, only skipped when it is not needed.
 
 Passwords (CapSolver key and the like) are stored by Python `keyring`
 in the Windows Credential Manager — cards are not stored there anymore;

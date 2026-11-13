@@ -83,6 +83,10 @@ class MainWindow(tk.Tk):
         self.coordinator = Coordinator()
         self._lane_progress = {}
         self.active_panel = None
+        # Log gọi trước khi khung log dựng xong thì giữ lại rồi xả
+        # ra sau (xem append_log) — MuseTab ghi log ngay lúc dựng
+        # giao diện nên danh sách này phải có trước _build_ui().
+        self._pending_logs = []
         self._build_ui()
         self.after(100, self._process_events)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -119,20 +123,17 @@ class MainWindow(tk.Tk):
         # xin cao hơn cửa sổ, khung log bị ép còn ~1px.
         root.rowconfigure(1, weight=1, minsize=180)
 
-        notebook = ttk.Notebook(root)
-        notebook.grid(row=0, column=0, sticky="ew")
-        self.notebook = notebook
-        muse_scroll = _ScrollableFrame(notebook)
-        self.muse_tab = MuseTab(muse_scroll.inner, self)
-        # Tab phải pack vào inner thì inner mới "thấy" chiều cao của
-        # tab (không pack là tab chỉ cao 1px, nội dung không hiện).
-        self.muse_tab.pack(fill="both", expand=True)
-        meta_scroll = _ScrollableFrame(notebook)
-        self.meta_tab = MetaTab(meta_scroll.inner, self)
-        self.meta_tab.pack(fill="both", expand=True)
-        notebook.add(muse_scroll, text="Muse.ai")
-        notebook.add(meta_scroll, text="Meta (meta.ai)")
-
+        # Khung log phải tạo TRƯỚC các tab: MuseTab ghi log ngay
+        # lúc dựng giao diện (báo cáo chuyển thẻ sang file +
+        # cảnh báo file không mã hoá, xem _log_vault_notices_once)
+        # — trước bản 4f3814f8 chưa có log nào lúc dựng tab nên
+        # log_text tạo sau vẫn chạy; từ khi có log lúc dựng tab,
+        # append_log trong lúc dựng tab vỡ AttributeError
+        # (log_text chưa có) và app chết trước khi kịp hiện cửa
+        # sổ (gặp live 2026-11-13: chạy py main.py không lên
+        # luôn). Tạo log trước, tab sau thì thứ tự không còn
+        # quan trọng nữa. Vị trí trên lưới giữ nguyên (log ở
+        # hàng 1, tab ở hàng 0) nên bố cục không đổi.
         log_frame = ttk.LabelFrame(root, text="Quá trình", padding=8)
         log_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
@@ -146,6 +147,25 @@ class MainWindow(tk.Tk):
         )
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
+        for line in getattr(self, "_pending_logs", []):
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", line)
+            self.log_text.configure(state="disabled")
+        self._pending_logs = []
+
+        notebook = ttk.Notebook(root)
+        notebook.grid(row=0, column=0, sticky="ew")
+        self.notebook = notebook
+        muse_scroll = _ScrollableFrame(notebook)
+        self.muse_tab = MuseTab(muse_scroll.inner, self)
+        # Tab phải pack vào inner thì inner mới "thấy" chiều cao của
+        # tab (không pack là tab chỉ cao 1px, nội dung không hiện).
+        self.muse_tab.pack(fill="both", expand=True)
+        meta_scroll = _ScrollableFrame(notebook)
+        self.meta_tab = MetaTab(meta_scroll.inner, self)
+        self.meta_tab.pack(fill="both", expand=True)
+        notebook.add(muse_scroll, text="Muse.ai")
+        notebook.add(meta_scroll, text="Meta (meta.ai)")
 
         bottom = ttk.Frame(root)
         bottom.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -163,10 +183,21 @@ class MainWindow(tk.Tk):
 
     def append_log(self, text):
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{stamp}] {text}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        line = f"[{stamp}] {text}\n"
+        log_text = getattr(self, "log_text", None)
+        if log_text is None:
+            # Log gọi trước khi khung log được dựng (lúc dựng
+            # tab): giữ lại rồi xả ra khi khung log có — không
+            # được vỡ app vì một dòng log.
+            pending = getattr(self, "_pending_logs", None)
+            if pending is None:
+                self._pending_logs = pending = []
+            pending.append(line)
+            return
+        log_text.configure(state="normal")
+        log_text.insert("end", line)
+        log_text.see("end")
+        log_text.configure(state="disabled")
 
     def on_run_started(self, panel):
         """Tab vừa bấm Bắt đầu: ghi nhận panel đang chạy (để sự

@@ -221,6 +221,53 @@ def test_set_limit():
     assert storage._set_vault_card_limit("card-khong-co", 5) is False
 
 
+def test_set_all_limits_mixed_vault():
+    """Giới hạn chung: một số áp cho tất cả thẻ, ghi đè giới hạn
+    cũ khác nhau từng thẻ; số lần dùng giữ nguyên."""
+    id_a = _add_test_card(CARD_A, "Thẻ A", limit=0, used=2)
+    id_b = _add_test_card(CARD_B, "Thẻ B", limit=5, used=5)
+    id_c = _add_test_card(CARD_C, "Thẻ C", limit=10, used=1)
+    assert storage._set_all_vault_card_limits(3) == 3
+    index = {e["id"]: e for e in storage._load_vault_index()}
+    assert [index[i]["limit"] for i in (id_a, id_b, id_c)] == [3, 3, 3]
+    assert [index[i]["used"] for i in (id_a, id_b, id_c)] == [2, 5, 1]
+
+
+def test_set_all_limits_zero_is_unlimited():
+    """Giới hạn chung 0 = không giới hạn cho tất cả thẻ."""
+    _add_test_card(CARD_A, "Thẻ A", limit=5)
+    _add_test_card(CARD_B, "Thẻ B", limit=10)
+    assert storage._set_all_vault_card_limits(0) == 2
+    assert [e["limit"] for e in storage._load_vault_index()] == [0, 0]
+
+
+def test_set_all_limits_clamped():
+    """Giới hạn chung kẹp 0–100 như đặt từng thẻ."""
+    _add_test_card(CARD_A, "Thẻ A", limit=5)
+    assert storage._set_all_vault_card_limits(150) == 1
+    assert storage._load_vault_index()[0]["limit"] == 100
+    assert storage._set_all_vault_card_limits(-5) == 1
+    assert storage._load_vault_index()[0]["limit"] == 0
+
+
+def test_set_all_limits_empty_vault():
+    """Kho trống: đặt giới hạn chung trả về 0, không lỗi."""
+    assert storage._set_all_vault_card_limits(5) == 0
+    assert storage._load_vault_index() == []
+
+
+def test_per_card_limit_after_bulk_apply():
+    """Đặt chung xong vẫn đặt riêng từng thẻ được (giới hạn
+    chung chỉ ghi đè lúc bấm, không khoá từng thẻ)."""
+    id_a = _add_test_card(CARD_A, "Thẻ A", limit=1)
+    id_b = _add_test_card(CARD_B, "Thẻ B", limit=2)
+    assert storage._set_all_vault_card_limits(3) == 2
+    assert storage._set_vault_card_limit(id_b, 7) is True
+    index = {e["id"]: e for e in storage._load_vault_index()}
+    assert index[id_a]["limit"] == 3
+    assert index[id_b]["limit"] == 7
+
+
 def test_migrate_legacy_card():
     _FAKE_KEYRING.store[("MuseAIHelper:card", "number")] = CARD_A
     _FAKE_KEYRING.store[("MuseAIHelper:card", "expiry")] = "12/28"
@@ -710,6 +757,11 @@ TESTS = [
     test_delete_card_removes_index_and_active,
     test_active_save_load_clear,
     test_set_limit,
+    test_set_all_limits_mixed_vault,
+    test_set_all_limits_zero_is_unlimited,
+    test_set_all_limits_clamped,
+    test_set_all_limits_empty_vault,
+    test_per_card_limit_after_bulk_apply,
     test_migrate_legacy_card,
     test_migrate_no_legacy,
     test_bulk_import_valid,

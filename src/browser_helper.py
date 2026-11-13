@@ -576,6 +576,114 @@ def _wait_for_app_shell(page, timeout_seconds=20):
         page.wait_for_timeout(800)
 
 
+def _photo_after_card_decision(page):
+    """Quyết định bước up ảnh sau bước thẻ:
+    - "skip": đã vào được giao diện Muse (URL + khung giao diện)
+      → khỏi up ảnh.
+    - "photo": đang ở trang up ảnh (ô file / "Upload a
+      verification selfie" / "Upload image" đang hiện) → làm
+      bước ảnh.
+    - "none": chưa vào Muse mà cũng không có trang ảnh → không
+      có bước ảnh ở đây, để _confirm_final_step xử lý tiếp.
+    Không bao giờ ném lỗi (quyết định sai còn hơn chết luồng)."""
+    try:
+        if _in_muse_interface(page) and _app_shell_visible(page):
+            return "skip"
+    except Exception:
+        pass
+    try:
+        if _meta_selfie_page_visible(page):
+            return "photo"
+    except Exception:
+        pass
+    return "none"
+
+
+def _handle_photo_after_card(page, timeout_seconds=180, settle_seconds=10):
+    """Bước up ảnh SAU bước nhập thẻ, có điều kiện (sư huynh dặn
+    2026-11-13: bước up ảnh nằm sau phần nhập thẻ, vào được Muse
+    rồi thì khỏi up).
+
+    - Đã vào được Muse → bỏ qua bước ảnh, ghi log rõ, đi tiếp
+      tới các bước mã (quy đổi mã mời, lấy mã).
+    - Muse vẫn đòi xác minh bằng ảnh (hiện prompt up ảnh) → up
+      file selfie đã lưu ở tab Meta (hoặc chờ up tay nếu chưa có
+      file), rồi bấm Continue/Confirm/Submit.
+    - Không có prompt ảnh mà vẫn chưa vào được → trả về ngay để
+      _confirm_final_step xử lý tiếp (không kẹt ở đây).
+    Trả về "skipped" / "photo-done" / "none" / "timeout" /
+    "closed". Không bao giờ ném lỗi."""
+    deadline = time.monotonic() + timeout_seconds
+    started = time.monotonic()
+    selfie_path = _load_selfie_path()
+    uploaded = False
+    saw_photo = False
+    warned = False
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return "closed"
+        decision = _photo_after_card_decision(page)
+        if decision == "skip":
+            if saw_photo:
+                _status("Đã qua bước up ảnh sau thẻ, đã vào được Muse.")
+                return "photo-done"
+            _status("Đã vào được Muse, bỏ qua bước up ảnh.")
+            return "skipped"
+        if decision == "photo":
+            saw_photo = True
+            if not uploaded and selfie_path is not None:
+                ok, reason = _meta_upload_selfie(page, selfie_path)
+                if ok:
+                    uploaded = True
+                    _status("Đã up ảnh selfie cho bước xác minh sau thẻ.")
+                else:
+                    _status(
+                        "Up ảnh selfie chưa được "
+                        f"({reason}) — thử lại ở lần sau, hoặc up "
+                        "tay trong trình duyệt."
+                    )
+            elif selfie_path is None and not warned:
+                _status(
+                    "Muse bắt up ảnh mà chưa có file selfie đã lưu "
+                    "(ô Ảnh selfie ở tab Meta) — up tay trong cửa "
+                    "sổ Chromium."
+                )
+                warned = True
+            clicked = _meta_click_button(
+                page, ("Continue", "Confirm", "Submit")
+            )
+            if clicked:
+                _status(f"Đã bấm {clicked} sau khi up ảnh.")
+            page.wait_for_timeout(2000)
+            continue
+        # "none": chưa vào Muse, không có trang ảnh. Nếu đã hiện
+        # nút xác nhận cuối (Get started/Confirm/Continue) thì
+        # không phải trang ảnh — trả về ngay để _confirm_final_step
+        # bấm nút đó, khỏi chờ hết nhịp. Còn không thì chờ thêm
+        # một nhịp ngắn cho trang chuyển cảnh rồi kết luận (tránh
+        # bỏ lỡ trang ảnh vừa hiện sau bước thẻ); quá nhịp thì
+        # trả về, không kẹt.
+        for name in ("Get started", "Confirm", "Continue", "Bắt đầu"):
+            try:
+                button = page.get_by_role("button", name=name, exact=True)
+                if (
+                    button.count()
+                    and button.first.is_visible()
+                    and button.first.is_enabled()
+                ):
+                    return "none"
+            except Exception:
+                pass
+        if time.monotonic() - started >= settle_seconds:
+            return "none"
+        page.wait_for_timeout(1000)
+    _status(
+        "Hết giờ chờ bước up ảnh sau thẻ mà chưa vào được Muse "
+        "— đi tiếp tới các bước sau, không kẹt ở đây."
+    )
+    return "timeout"
+
+
 def _session_cookie_header(page):
     """Cookie phiên đăng nhập, dạng chuỗi "name=value; name=value".
 
@@ -3950,11 +4058,18 @@ def main():
                     f"(kết quả chờ: {card_outcome}) — tài khoản "
                     "không được lưu."
                 )
+            # Bước up ảnh nằm SAU bước nhập thẻ (sư huynh dặn
+            # 2026-11-13): vào được Muse rồi thì khỏi up, chỉ
+            # nhập mã và lấy mã; Muse vẫn đòi ảnh thì up như cũ.
+            _handle_photo_after_card(page)
             _status(
                 "Đã qua bước nhập thẻ — xử lý bước xác nhận cuối "
                 "để vào giao diện Muse..."
             )
             _confirm_final_step(page)
+            # Ảnh có thể hiện sau khi bấm nút xác nhận cuối:
+            # kiểm tra lại một lần nữa trước khi chờ giao diện.
+            _handle_photo_after_card(page)
             _wait_for_muse_interface(page)
             _wait_for_app_shell(page)
             redeem_code = _load_redeem_code()

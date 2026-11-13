@@ -6,6 +6,7 @@ khung log bị ép còn ~1px, luồng chạy chết lặng, bơm sự kiện ch�
   tự bỏ qua (SKIP) chứ không fail.
 - Dùng keyring giả + thư mục dữ liệu tạm; không chạm file thật, không mạng.
 """
+import json
 import queue
 import sys
 import tempfile
@@ -271,6 +272,128 @@ def test_vault_and_run_visible_without_scrolling():
         app.destroy()
 
 
+def test_first_launch_migration_opens_window():
+    """Hồi quy cho sự cố 2026-11-13 18:43 (bản 4f3814f8): lần mở
+    đầu sau nâng cấp, migration chuyển thẻ sang file + dọn thẻ mồ
+    côi, rồi MuseTab ghi log báo cáo NGAY LÚC DỰNG giao diện —
+    nhưng log_text chỉ được tạo SAU các tab trong _build_ui nên
+    append_log vỡ AttributeError và app chết trước khi hiện cửa
+    sổ ("chạy py main.py k lên luôn"). Mô phỏng đúng trạng thái
+    máy Long: vault.json có Thẻ 1, vault.pending.json còn 2 thẻ
+    chờ, CM còn Thẻ 1 + 80 thẻ mồ côi + capsolver/mail. App phải
+    mở được, log phải có báo cáo chuyển/dọn, kho phải có 3 thẻ,
+    capsolver/mail không bị đụng."""
+    _store.clear()
+    for name in (
+        "vault.json",
+        "vault.pending.json",
+        "cards.json",
+        "cards.json.tmp",
+        "vault.json.tmp",
+    ):
+        try:
+            (TMP / name).unlink()
+        except OSError:
+            pass
+    main_id = "card-aaaabbbb"
+    (TMP / "vault.json").write_text(
+        json.dumps(
+            {
+                "active": "",
+                "cards": [
+                    {
+                        "id": main_id,
+                        "label": "Thẻ 1",
+                        "limit": 0,
+                        "used": 0,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (TMP / "vault.pending.json").write_text(
+        json.dumps(
+            [
+                {"id": "card-ccccdddd", "label": "Thẻ 2", "limit": 0,
+                 "used": 0},
+                {"id": "card-eeeeffff", "label": "Thẻ 3", "limit": 0,
+                 "used": 0},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def _put_card(service, number):
+        for field, value in (
+            ("number", number),
+            ("expiry", "11/27"),
+            ("cvv", "122"),
+            ("zip", "10001"),
+        ):
+            _store[(service, field)] = value
+        _store[(service, "card_success_count")] = "0"
+
+    prefix = "MuseAIHelper:card:"
+    _put_card(f"{prefix}{main_id}", "4111111111111111")
+    for i in range(80):
+        _put_card(f"{prefix}card-orphan{i:04d}", "4000056655665556")
+    _store[("MuseAIHelper:capsolver", "api_key")] = "fake-key"
+    _store[("MuseAIHelper:mail.tm", "x")] = "y"
+
+    # TargetName như CM thật ghi (WinVaultKeyring): trường ghi
+    # cuối nằm ở TargetName=service, còn lại dạng gộp
+    # {username}@{service}.
+    targets = []
+    by_service = {}
+    for service, field in list(_store):
+        by_service.setdefault(service, []).append(field)
+    for service, fields in by_service.items():
+        if service.startswith(prefix):
+            targets.append(service)
+            for field in fields[:-1]:
+                targets.append(f"{field}@{service}")
+        else:
+            targets.append(service)
+    fake_win32cred = types.ModuleType("win32cred")
+    fake_win32cred.CredEnumerate = (
+        lambda f, fl: [{"TargetName": t} for t in targets]
+    )
+    fake_pywin32 = types.ModuleType("win32ctypes.pywin32")
+    fake_pywin32.win32cred = fake_win32cred
+    sys.modules["win32ctypes"] = types.ModuleType("win32ctypes")
+    sys.modules["win32ctypes.pywin32"] = fake_pywin32
+    sys.modules["win32ctypes.pywin32.win32cred"] = fake_win32cred
+    storage._MIGRATION_DONE = False
+    storage._LAST_MIGRATION = None
+    storage._WIN32CRED = storage._UNSET
+
+    app = _make_app()
+    try:
+        # App mở được (trước đây vỡ AttributeError ở đây).
+        assert app.winfo_exists(), "cửa sổ không mở được"
+        report = storage._last_migration_report()
+        assert report is not None, "không có báo cáo migration"
+        assert report["migrated"] == 1, f"migrated={report}"
+        assert report["orphans_removed"] == 80, f"orphans={report}"
+        content = app.log_text.get("1.0", "end")
+        assert "đã chuyển 1 thẻ" in content, f"thiếu log chuyển: {content}"
+        assert "đã dọn 80 thẻ mồ côi" in content, f"thiếu log dọn: {content}"
+        children = app.muse_tab.vault_tree.get_children()
+        assert len(children) == 3, f"kho phải có 3 thẻ, có {len(children)}"
+        assert (TMP / "cards.json").exists(), "thiếu file cards.json"
+        assert _store.get(("MuseAIHelper:capsolver", "api_key")) == (
+            "fake-key"
+        ), "capsolver bị đụng khi dọn mồ côi"
+        assert _store.get(("MuseAIHelper:mail.tm", "x")) == "y", (
+            "mail bị đụng khi dọn mồ côi"
+        )
+    finally:
+        app.destroy()
+
+
 if __name__ == "__main__":
     _run("lane crash resets running + finished", test_lane_crash_resets_running)
     _run("login loop crash resets running + finished",
@@ -285,6 +408,8 @@ if __name__ == "__main__":
          test_log_frame_height, needs_display=True)
     _run("vault + run buttons visible without scrolling",
          test_vault_and_run_visible_without_scrolling, needs_display=True)
+    _run("first launch migration opens window + logs report",
+         test_first_launch_migration_opens_window, needs_display=True)
     failed = [n for n, ok, _ in RESULTS if ok is False]
     skipped = [n for n, ok, _ in RESULTS if ok is None]
     print(f"--- {len(RESULTS) - len(failed) - len(skipped)}/"

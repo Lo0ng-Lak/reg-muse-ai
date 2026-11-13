@@ -1320,7 +1320,10 @@ def _ensure_cards_migrated():
     Manager sang file cards.json + dọn các mục CM mồ côi của kho
     thẻ. Chạy lúc đọc kho lần đầu (giao diện chính và helper đều
     đi qua đây); sau lần đầu không còn gì để chuyển thì không ghi
-    gì thêm. Kết quả xem _last_migration_report()."""
+    gì thêm. Kết quả xem _last_migration_report(). Lỗi trong lúc
+    chuyển KHÔNG được phá lần mở app: lỗi ghi vào report["error"]
+    để giao diện hiện trong log, thẻ vẫn còn ở chỗ cũ và lần sau
+    thử lại."""
     global _MIGRATION_DONE, _LAST_MIGRATION
     if _MIGRATION_DONE:
         return
@@ -1333,7 +1336,22 @@ def _ensure_cards_migrated():
         "orphan_credentials_removed": 0,
         "enumerated": False,
         "cleanup_error": "",
+        "error": "",
     }
+    try:
+        _ensure_cards_migrated_inner(report)
+    except Exception as error:
+        # Chuyển đổi không được phá lần mở app: thẻ vẫn còn ở
+        # chỗ cũ (CM/file), lần sau thử lại; lỗi ghi vào báo cáo
+        # để giao diện hiện trong log thay vì chết lặng.
+        report["error"] = _short_error_text(error)
+    _LAST_MIGRATION = report
+
+
+def _ensure_cards_migrated_inner(report):
+    """Chuyển thẻ từ CM sang file + dọn mồ côi (phần việc thật
+    của _ensure_cards_migrated). Lỗi ở đây được hàm ngoài nuốt
+    vào report["error"] — không bao giờ phá lần mở app."""
     _migrate_vault_index_to_file()
     entries = _load_vault_index_raw()
     if not entries and _migrate_legacy_card():
@@ -1378,7 +1396,6 @@ def _ensure_cards_migrated():
     report["orphan_credentials_removed"] = cleanup["removed_credentials"]
     report["enumerated"] = cleanup["enumerated"]
     report["cleanup_error"] = cleanup["error"]
-    _LAST_MIGRATION = report
 
 
 def _last_migration_report():
@@ -1482,6 +1499,20 @@ def _set_vault_card_limit(card_id, limit):
             _save_vault_index(entries)
             return True
     return False
+
+
+def _set_all_vault_card_limits(limit):
+    """Đặt MỘT giới hạn chung cho TẤT CẢ thẻ trong kho (0 = không
+    giới hạn, kẹp 0–100). Ghi đè giới hạn từng thẻ — thẻ nào muốn
+    khác thì đặt riêng lại sau bằng _set_vault_card_limit.
+    Trả về số thẻ đã đặt (0 khi kho trống)."""
+    limit = max(0, min(int(limit), 100))
+    entries = _load_vault_index()
+    for entry in entries:
+        entry["limit"] = limit
+    if entries:
+        _save_vault_index(entries)
+    return len(entries)
 
 def _parse_bulk_card_line(line, taken_labels, taken_numbers):
     """Phân tích MỘT dòng nhập thẻ hàng loạt.
