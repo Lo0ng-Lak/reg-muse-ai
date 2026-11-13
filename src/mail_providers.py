@@ -66,6 +66,30 @@ MAILTM_BASE = "https://api.mail.tm"
 GUERRILLA_BASE = "https://api.guerrillamail.com/ajax.php"
 
 
+def inbox_url(provider_id, email):
+    """Link mở hộp thư để lấy mã OTP của một địa chỉ.
+
+    tempmail.plus: link thẳng vào hộp thư — trang họ là SPA
+    hashbang, địa chỉ nằm sau "#!" (kiểm chứng từ index.js
+    của họ, 2026-11-13: fex.hash đặt location.hash = "#!" +
+    địa chỉ). Các dịch vụ còn lại không có link thẳng vào
+    từng hộp thư nên trả trang hộp thư của họ (mở ra rồi
+    nhập địa chỉ): maildrop.cc/inbox/ (đã kiểm chứng
+    /inbox/<tên> trả 404), mail.tm/en (đăng nhập mới xem
+    được hộp thư), guerrillamail.com (hộp thư gắn phiên
+    trình duyệt, không có link riêng).
+    """
+    if provider_id == "tempmail.plus":
+        return "https://tempmail.plus/en/#!" + email
+    if provider_id == "maildrop.cc":
+        return "https://maildrop.cc/inbox/"
+    if provider_id == "mail.tm":
+        return "https://mail.tm/en"
+    if provider_id == "guerrillamail":
+        return "https://www.guerrillamail.com/"
+    return ""
+
+
 def _http_json(method, url, payload=None, headers=None, provider="temp mail"):
     """Một cổng HTTP duy nhất cho mọi dịch vụ: trả JSON đã parse.
 

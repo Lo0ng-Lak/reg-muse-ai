@@ -391,10 +391,14 @@ set up first, in the **Meta** tab:
   **Chọn ảnh…**; the path is kept in gitignored `selfie.txt`.
 
 The Meta password is generated randomly for each account's form and
-is **not saved anywhere** (Muse login later uses an email OTP code,
-not the password). Saved accounts go to
+is **saved** in the `Mật khẩu Meta` column (empty for accounts Meta
+does not ask a password for), together with a `Link lấy OTP` column
+holding the inbox link for the account's mailbox (a direct inbox
+link for tempmail.plus; the inbox page for the other providers).
+Saved accounts go to
 `%LOCALAPPDATA%\MuseAIHelper\meta_accounts.xlsx` with columns
-Thời gian tạo, Email Meta, Mật khẩu hộp thư, Username Meta. The Meta
+Thời gian tạo, Email Meta, Mật khẩu hộp thư, Username Meta,
+Nhà cung cấp, Muse, Mật khẩu Meta, Link lấy OTP. The Meta
 run reuses the proxy pool / VPN mode, lane count, temp-mail provider
 and account target of the main window; it does not use the saved card
 or invite codes.
@@ -413,8 +417,12 @@ and the run reads each row's Email Meta / Mật khẩu hộp thư /
 Nhà cung cấp columns — **no new mailbox is created**. Each account
 logs in with an email OTP, then submits the saved card (from the
 Muse.ai tab) at the card step, exactly like a signup from there on.
-A successful login is saved to `accounts.xlsx` and marked in the
-Meta file's **Muse** column, so the next run skips it. No invite
+A successful login is saved to `accounts.xlsx` — email, mailbox
+secret, session cookie and invite code as usual, plus the Meta
+password copied from the Meta file's `Mật khẩu Meta` column (empty
+for older rows that have none) and the mailbox's `Link lấy OTP` —
+and marked in the Meta file's **Muse** column, so the next run
+skips it. No invite
 code is redeemed in login mode. The run uses the Meta tab's proxy
 pool / VPN mode, lane count and account target (0 = log in all
 pending rows). The card cap is not enforced in login runs.

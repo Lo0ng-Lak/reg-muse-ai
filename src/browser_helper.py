@@ -2150,6 +2150,20 @@ def _meta_write_username(username):
         pass
 
 
+def _meta_write_password(password):
+    """Ghi mật khẩu Meta vừa sinh ra file để app chính lưu vào
+    sheet (giống username). Không có mật khẩu (tài khoản Meta
+    không hỏi mật khẩu) thì không ghi gì. Không bao giờ ghi log."""
+    if not password:
+        return
+    try:
+        paths.data_file(
+            f"meta_password{LANE_SUFFIX}.txt"
+        ).write_text(password + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _meta_logged_in(page):
     """Đã đăng nhập Meta AI chưa.
 
@@ -2366,19 +2380,16 @@ def _meta_click_login(page):
                 "Cửa sổ Chromium đã đóng trước khi bấm được Log in."
             )
         if _meta_app_error_visible(page):
-            # Trang sập SAU khi đã mở (lỗi React xuất hiện muộn):
-            # tải lại rồi thử tiếp vòng sau (giới hạn bởi deadline
-            # 90 giây của vòng bấm này).
-            _status(
-                "Meta: trang lỗi ứng dụng trong lúc chờ Log in — "
-                "tải lại trang..."
+            # Lỗi ứng dụng ngay lúc mới vào (chưa làm gì: chưa nhập
+            # mail, chưa OTP) — bỏ tài khoản này luôn, không tải
+            # lại thử (chủ trương 2026-11-13: mới bắt đầu mà lỗi
+            # thì tắt đi, bắt đầu cái khác; chỉ sau khi đã up
+            # selfie mới cố tải lại cho bằng được).
+            raise RuntimeError(
+                "Trang meta.ai lỗi ứng dụng (Application Error) ngay "
+                "lúc mới vào — bỏ tài khoản này, chuyển sang tài "
+                "khoản khác."
             )
-            try:
-                page.reload(wait_until="domcontentloaded")
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
-            continue
         attempts += 1
         if _meta_testid_login(page):
             break
@@ -2697,6 +2708,10 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     deadline = time.monotonic() + META_POST_OTP_TIMEOUT_SECONDS
     selfie_done = False
     selfie_uploaded = False
+    # Đã up selfie lần nào trong lượt này chưa — quyết định tải
+    # lại bền bỉ khi trang lỗi; KHÔNG reset khi tải lại (khác
+    # selfie_uploaded: cờ đó reset để up lại ảnh sau khi hồi).
+    selfie_ever_uploaded = False
     selfie_error_logged = False
     relogin_tried = False
     error_reloads = 0
@@ -2714,6 +2729,25 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 "Cửa sổ Chromium đã đóng trước khi xong đăng ký Meta."
             )
         if _meta_app_error_visible(page):
+            if selfie_ever_uploaded:
+                # Đã up selfie rồi: tài khoản gần xong — tải lại
+                # tới khi trang hết lỗi, không giới hạn 3 lần (chỉ
+                # giới hạn bởi deadline của vòng sau-OTP). Tải lại
+                # làm mất trạng thái trang nên up lại ảnh từ đầu
+                # (file up lại không tốn gì; Meta có thể đã mất
+                # bản up trước khi trang sập).
+                selfie_uploaded = False
+                selfie_done = False
+                _status(
+                    "Meta: trang lỗi sau khi đã up selfie — tải lại "
+                    "trang (thử tới khi được), sẽ up lại ảnh..."
+                )
+                try:
+                    page.reload(wait_until="domcontentloaded")
+                except Exception:
+                    pass
+                page.wait_for_timeout(2000)
+                continue
             if error_reloads >= 3:
                 raise RuntimeError(
                     "Trang Meta báo lỗi ứng dụng (Application Error) "
@@ -2871,6 +2905,7 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                 )
                 if uploaded:
                     selfie_uploaded = True
+                    selfie_ever_uploaded = True
                 elif not selfie_error_logged:
                     selfie_error_logged = True
                     _status(
@@ -3127,6 +3162,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     if password_field.count():
         meta_password = _random_meta_password()
         password_field.first.fill(meta_password)
+        _meta_write_password(meta_password)
         _status(
             "Meta: đã điền xong ngày sinh + mật khẩu, "
             "đang bấm Continue..."
