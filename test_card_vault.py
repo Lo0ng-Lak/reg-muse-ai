@@ -3,7 +3,9 @@
 Chạy:  python test_card_vault.py
 Không cần Windows hay Credential Manager thật: keyring được thay
 bằng một bản giả lưu trong dict, nạp vào sys.modules TRƯỚC khi
-import storage / coordinator / browser_helper. Không dùng số thẻ
+import storage / coordinator / browser_helper; win32cred và
+win32crypt cũng được thay bằng bản giả (chỉ trong test cần) để
+kiểm tra dọn thẻ mồ côi và mã hoá DPAPI. Không dùng số thẻ
 thật — chỉ dùng các số thẻ TEST chuẩn (4111…, 4222…, 4000…).
 Giao diện tkinter (muse_tab) không được kiểm tra ở đây — cần chạy
 trên máy Windows của Long.
@@ -63,11 +65,61 @@ def reset():
         "vault.pending.json",
         "vault.json.tmp",
         "vault.pending.json.tmp",
+        "cards.json",
+        "cards.json.tmp",
     ):
         try:
             (TMP / name).unlink()
         except OSError:
             pass
+    # Đặt lại bộ nhớ đệm của storage để mỗi test chạy như một
+    # tiến trình mới: chuyển đổi CM -> file, backend DPAPI,
+    # module win32cred, lỗi đọc file thẻ.
+    storage._MIGRATION_DONE = False
+    storage._LAST_MIGRATION = None
+    storage._DPAPI_BACKEND = storage._UNSET
+    storage._WIN32CRED = storage._UNSET
+    storage._LAST_CARDS_READ_ERROR = ""
+    sys.modules.pop("win32cred", None)
+    sys.modules.pop("win32crypt", None)
+
+
+def _seed_cm_vault_card(card_id, number, count=0):
+    """Ghi thẳng một thẻ vào keyring giả theo định dạng CM cũ
+    (4 trường + bộ đếm), như bản trước khi chuyển sang file."""
+    service = f"MuseAIHelper:card:{card_id}"
+    _FAKE_KEYRING.store[(service, "number")] = number
+    _FAKE_KEYRING.store[(service, "expiry")] = "12/28"
+    _FAKE_KEYRING.store[(service, "cvv")] = "123"
+    _FAKE_KEYRING.store[(service, "zip")] = "10001"
+    if count:
+        _FAKE_KEYRING.store[(service, "card_success_count")] = str(count)
+
+
+class _FakeWin32Crypt:
+    """DPAPI giả: mã hoá = đảo ngược bytes + tiền tố, để test
+    chứng minh file thẻ không chứa chữ số thẻ ở dạng đọc được."""
+
+    @staticmethod
+    def CryptProtectData(data, description, *args):
+        return b"ENC:" + bytes(data)[::-1]
+
+    @staticmethod
+    def CryptUnprotectData(blob, *args):
+        assert blob.startswith(b"ENC:")
+        return ("", blob[4:][::-1])
+
+
+class _FakeWin32Cred:
+    """win32cred giả: liệt kê các TargetName đã cho."""
+
+    CRED_TYPE_GENERIC = 1
+
+    def __init__(self, targets):
+        self.targets = list(targets)
+
+    def CredEnumerate(self, _filter, _flags):
+        return [{"TargetName": target} for target in self.targets]
 
 
 def _add_test_card(number, label, limit=0, used=0):
@@ -131,6 +183,11 @@ def test_save_load_card_and_count():
     storage._save_vault_card_success_count(card_id, 3)
     assert storage._load_vault_card_success_count(card_id) == 3
     assert storage._load_vault_card("card-khong-co") == {}
+    # Bộ đếm nằm trong danh mục vault.json (không ở file thẻ),
+    # danh mục không chứa chữ số thẻ nào.
+    raw = (TMP / "vault.json").read_text(encoding="utf-8")
+    assert CARD_A not in raw, "danh mục không được chứa chữ số thẻ"
+    assert '"used": 3' in raw, "bộ đếm nằm trong danh mục"
 
 
 def test_delete_card_removes_index_and_active():
@@ -139,6 +196,8 @@ def test_delete_card_removes_index_and_active():
     storage._save_vault_active(id_a)
     storage._delete_vault_card(id_a)
     assert storage._load_vault_card(id_a) == {}
+    cards, _ = storage._read_cards_file()
+    assert id_a not in cards, "thẻ xoá phải biến khỏi file thẻ"
     assert storage._load_vault_card_success_count(id_a) == 0
     assert [e["id"] for e in storage._load_vault_index()] == [id_b]
     assert storage._load_vault_active() == "", "xoá thẻ đang chọn phải bỏ chọn"
@@ -163,10 +222,11 @@ def test_set_limit():
 
 
 def test_migrate_legacy_card():
-    storage._save_card_to_keyring(
-        {"number": CARD_A, "expiry": "12/28", "cvv": "123", "zip": "10001"}
-    )
-    storage._save_card_success_count(3)
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "number")] = CARD_A
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "expiry")] = "12/28"
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "cvv")] = "123"
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "zip")] = "10001"
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "card_success_count")] = "3"
     vault = storage._load_vault()
     assert len(vault) == 1
     assert vault[0]["label"] == "Thẻ 1"
@@ -174,6 +234,9 @@ def test_migrate_legacy_card():
     assert vault[0]["used"] == 3, "bộ đếm cũ được mang sang"
     assert storage._load_card_from_keyring() == {}, "thẻ đơn cũ đã bị xoá"
     assert storage._load_card_success_count() == 0
+    assert storage._load_vault_card(vault[0]["id"])["number"] == CARD_A, (
+        "thẻ đơn cũ phải nằm trong file thẻ"
+    )
     assert len(storage._load_vault()) == 1, "không nhập trùng lần hai"
 
 
@@ -258,9 +321,9 @@ def test_bulk_import_empty_text():
 # --- Danh mục kho ở file + nhập hàng loạt lớn --------------------------
 
 def test_bulk_import_100_cards():
-    """Kho mở rộng tới 100 thẻ: danh mục nằm ở file vault.json
-    (không còn giới hạn blob 2560 byte của Credential Manager)
-    nên nhập một đợt lớn vẫn ghi được."""
+    """Kho mở rộng tới 100 thẻ: thẻ nằm ở file cards.json (không
+    còn qua Credential Manager) nên nhập một đợt lớn vẫn ghi
+    được, và không còn giới hạn blob 2560 byte nào."""
     lines = [f"4111111111{i:06d}|12/28|123" for i in range(100)]
     added, errors, skipped = storage._import_bulk_cards("\n".join(lines))
     assert errors == [], errors
@@ -268,9 +331,14 @@ def test_bulk_import_100_cards():
     assert added == [f"Thẻ {i}" for i in range(1, 101)]
     assert len(storage._load_vault()) == 100
     assert (TMP / "vault.json").exists(), "danh mục kho phải nằm ở file vault.json"
+    assert (TMP / "cards.json").exists(), "thẻ phải nằm ở file cards.json"
     assert ("MuseAIHelper:cards", "index") not in _FAKE_KEYRING.store, (
         "danh mục không còn ghi vào Credential Manager"
     )
+    assert not any(
+        service.startswith("MuseAIHelper:card:")
+        for service, _field in _FAKE_KEYRING.store
+    ), "thẻ không còn ghi vào Credential Manager"
     # Nhập lại đúng 100 dòng đó: toàn bộ trùng, không thêm thẻ nào.
     added2, errors2, skipped2 = storage._import_bulk_cards("\n".join(lines))
     assert added2 == []
@@ -304,19 +372,45 @@ def test_index_migrates_from_keyring_to_file():
     ]
 
 
-def test_index_save_failure_keeps_cards():
-    """Lưu danh mục lỗi sau khi đã ghi thẻ: import raise lỗi
-    rõ ràng bằng tiếng Việt (không mã Windows), thẻ được giữ
-    trong vault.pending.json và tự hoà vào kho ở lần đọc sau."""
-    original_write = storage._write_vault_index_file
+def test_cards_file_write_failure_adds_nothing():
+    """Ghi file thẻ lỗi: import raise lỗi rõ ràng bằng tiếng Việt,
+    không thẻ nào được thêm, danh mục không đổi."""
+    original_write = storage._write_cards_file
 
-    def _failing_write(entries):
+    def _failing_write(cards):
         raise OSError("disk full (giả lập)")
 
-    storage._write_vault_index_file = _failing_write
+    storage._write_cards_file = _failing_write
     try:
         try:
             storage._import_bulk_cards(f"{CARD_A}|12/28|123")
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải raise RuntimeError khi ghi file thẻ lỗi")
+        assert "1783" not in message and "CredWrite" not in message
+        assert "cards.json" in message
+        assert "1 thẻ" in message
+    finally:
+        storage._write_cards_file = original_write
+    assert storage._load_vault() == [], "ghi file lỗi thì không thêm thẻ nào"
+    assert not (TMP / "cards.json").exists()
+
+
+def test_index_save_failure_rolls_back_cards_file():
+    """Lưu danh mục lỗi sau khi đã ghi file thẻ: import raise lỗi
+    rõ ràng, file thẻ được hoàn lại như cũ (không mất thẻ cũ,
+    không thêm thẻ mới)."""
+    _add_test_card(CARD_A, "Thẻ A")
+    original_save = storage._save_vault_index
+
+    def _failing_save(entries):
+        raise OSError("disk full (giả lập)")
+
+    storage._save_vault_index = _failing_save
+    try:
+        try:
+            storage._import_bulk_cards(f"{CARD_B}|12/28|123")
         except RuntimeError as error:
             message = str(error)
         else:
@@ -324,42 +418,25 @@ def test_index_save_failure_keeps_cards():
         assert "1783" not in message and "CredWrite" not in message
         assert "danh mục" in message
         assert "1 thẻ" in message
-        assert (TMP / "vault.pending.json").exists()
     finally:
-        storage._write_vault_index_file = original_write
-    # Lần đọc sau tự hoà thẻ đang chờ vào kho, không mất thẻ.
+        storage._save_vault_index = original_save
     vault = storage._load_vault()
-    assert [c["label"] for c in vault] == ["Thẻ 1"]
+    assert [c["label"] for c in vault] == ["Thẻ A"], "thẻ mới phải bị hoàn lại"
+    cards, _ = storage._read_cards_file()
+    assert len(cards) == 1, "file thẻ phải hoàn lại như cũ"
     assert storage._load_vault_card(vault[0]["id"])["number"] == CARD_A
-    assert not (TMP / "vault.pending.json").exists(), "mục chờ đã hoà xong thì xoá"
 
 
-def test_write_failure_surfaces_real_error():
-    """Ghi thẻ vào Credential Manager lỗi: lý do thật (mã lỗi
-    + tên hàm) phải hiện trong lỗi từng dòng, không bao giờ
-    chứa chữ số thẻ; probe vẫn qua được (nó dùng mục nháp
-    khác) nên lỗi nằm đúng ở bước ghi thẻ."""
-    original_set = _FAKE_KEYRING.set_password
-
-    def _failing_set(service, field, value):
-        if service.startswith("MuseAIHelper:card:"):
-            raise OSError(1783, "The stub received bad data")
-        return original_set(service, field, value)
-
-    _FAKE_KEYRING.set_password = _failing_set
-    try:
-        added, errors, skipped = storage._import_bulk_cards(
-            f"{CARD_A}|12/28|123"
-        )
-    finally:
-        _FAKE_KEYRING.set_password = original_set
-    assert added == []
-    assert skipped == 0
-    assert len(errors) == 1
-    line_no, reason = errors[0]
-    assert line_no == 1
-    assert "1783" in reason, "mã lỗi thật phải lộ ra để chẩn đoán"
-    assert CARD_A not in reason, "lý do không được chứa chữ số thẻ"
+def test_import_writes_no_card_to_keyring():
+    """Nhập thẻ không ghi bất cứ mục thẻ nào vào Credential
+    Manager — CM không còn là database của thẻ."""
+    storage._import_bulk_cards(f"{CARD_A}|12/28|123\n{CARD_B}|12/28|123")
+    assert _FAKE_KEYRING.store == {}, (
+        "nhập thẻ không được chạm tới Credential Manager"
+    )
+    cards, protected = storage._read_cards_file()
+    assert len(cards) == 2
+    assert protected is False, "Linux không có DPAPI nên file lưu dạng thường"
 
 
 def test_skipped_header_lines():
@@ -377,6 +454,130 @@ def test_skipped_header_lines():
     assert added == ["Thẻ 1"]
     assert errors == []
     assert skipped == 3
+
+
+# --- Chuyển sang file + dọn CM mồ côi + DPAPI ------------------------
+
+def test_migrate_cm_vault_cards_to_file_and_cleanup_orphans():
+    """Nâng cấp từ bản CM cũ: thẻ trong danh mục được chuyển sang
+    file (kèm bộ đếm), mục CM của thẻ đó bị xoá; thẻ mồ côi (có
+    mục CM nhưng không trong danh mục) bị dọn; dịch vụ khác
+    (capsolver) không bị đụng."""
+    _seed_cm_vault_card("card-keep0001", CARD_A, count=2)
+    _seed_cm_vault_card("card-orph0001", CARD_B)
+    _seed_cm_vault_card("card-orph0002", CARD_C)
+    _FAKE_KEYRING.store[("MuseAIHelper:capsolver", "api_key")] = "cap-key-giu-lai"
+    storage._save_vault_index(
+        [{"id": "card-keep0001", "label": "Thẻ giữ", "limit": 0}]
+    )
+    sys.modules["win32cred"] = _FakeWin32Cred(
+        [
+            "MuseAIHelper:card:card-keep0001",
+            "number@MuseAIHelper:card:card-orph0001",
+            "expiry@MuseAIHelper:card:card-orph0001",
+            "cvv@MuseAIHelper:card:card-orph0001",
+            "zip@MuseAIHelper:card:card-orph0001",
+            "card_success_count@MuseAIHelper:card:card-orph0001",
+            "MuseAIHelper:card:card-orph0002",
+            "api_key@MuseAIHelper:capsolver",
+        ]
+    )
+    try:
+        vault = storage._load_vault()
+    finally:
+        sys.modules.pop("win32cred", None)
+    assert [c["label"] for c in vault] == ["Thẻ giữ"]
+    assert vault[0]["used"] == 2, "bộ đếm CM được mang sang danh mục"
+    assert storage._load_vault_card("card-keep0001")["number"] == CARD_A
+    assert storage._load_vault_card("card-orph0001") == {}
+    assert storage._load_vault_card("card-orph0002") == {}
+    remaining = set(_FAKE_KEYRING.store)
+    assert ("MuseAIHelper:capsolver", "api_key") in remaining, (
+        "dịch vụ khác không được đụng"
+    )
+    assert not any(
+        service.startswith("MuseAIHelper:card:")
+        for service, _field in remaining
+    ), "mục CM của kho thẻ phải được dọn hết"
+    report = storage._last_migration_report()
+    assert report["migrated"] == 1
+    assert report["counts_migrated"] == 1
+    assert report["orphans_removed"] == 2
+    assert report["enumerated"] is True
+    # Đọc lại lần hai: không chuyển trùng, không mất thẻ.
+    assert [c["label"] for c in storage._load_vault()] == ["Thẻ giữ"]
+
+
+def test_migrate_without_enumeration_keeps_orphans_but_moves_catalogued():
+    """Không liệt kê được CM (không phải Windows): thẻ trong danh
+    mục vẫn chuyển sang file, thẻ mồ côi ở lại CM, báo cáo ghi rõ
+    không liệt kê được — không mất thẻ, không lỗi."""
+    _seed_cm_vault_card("card-keep0001", CARD_A, count=1)
+    _seed_cm_vault_card("card-orph0001", CARD_B)
+    storage._save_vault_index(
+        [{"id": "card-keep0001", "label": "Thẻ giữ", "limit": 0}]
+    )
+    vault = storage._load_vault()
+    assert [c["label"] for c in vault] == ["Thẻ giữ"]
+    assert storage._load_vault_card("card-keep0001")["number"] == CARD_A
+    assert ("MuseAIHelper:card:card-orph0001", "number") in _FAKE_KEYRING.store, (
+        "không liệt kê được thì thẻ mồ côi ở lại CM, không tự xoá bừa"
+    )
+    report = storage._last_migration_report()
+    assert report["migrated"] == 1
+    assert report["enumerated"] is False
+    assert report["cleanup_error"] != ""
+    assert report["orphans_removed"] == 0
+
+
+def test_dpapi_fake_round_trip():
+    """Có DPAPI (giả): file thẻ mã hoá — không chứa chữ số thẻ ở
+    dạng đọc được; đọc lại vẫn đủ 4 trường; không có cảnh báo."""
+    sys.modules["win32crypt"] = _FakeWin32Crypt()
+    try:
+        card_id = _add_test_card(CARD_A, "Thẻ A")
+        raw = (TMP / "cards.json").read_text(encoding="utf-8")
+        assert CARD_A not in raw, "file mã hoá không được chứa số thẻ"
+        assert '"protected": true' in raw
+        assert storage._load_vault_card(card_id) == {
+            "number": CARD_A,
+            "expiry": "12/28",
+            "cvv": "123",
+            "zip": "10001",
+        }
+        assert storage._cards_protection_warning() is None
+    finally:
+        sys.modules.pop("win32crypt", None)
+
+
+def test_plaintext_fallback_warns():
+    """Không có DPAPI (Linux): file thẻ lưu dạng thường + cảnh báo
+    rõ; thẻ vẫn dùng được."""
+    card_id = _add_test_card(CARD_A, "Thẻ A")
+    raw = (TMP / "cards.json").read_text(encoding="utf-8")
+    assert '"protected": false' in raw
+    warning = storage._cards_protection_warning()
+    assert warning is not None
+    assert "KHÔNG mã hoá" in warning
+    assert storage._load_vault_card(card_id)["number"] == CARD_A
+
+
+def test_pending_from_old_build_merges_and_migrates():
+    """Bản d9800689 để lại vault.pending.json (thẻ đã ghi CM mà
+    lưu danh mục lỗi): lần đọc sau hoà mục chờ vào kho, thẻ
+    chuyển sang file, file chờ bị xoá."""
+    _seed_cm_vault_card("card-pend0001", CARD_A)
+    (TMP / "vault.pending.json").write_text(
+        json.dumps(
+            [{"id": "card-pend0001", "label": "Thẻ chờ", "limit": 0}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    vault = storage._load_vault()
+    assert [c["label"] for c in vault] == ["Thẻ chờ"]
+    assert storage._load_vault_card("card-pend0001")["number"] == CARD_A
+    assert not (TMP / "vault.pending.json").exists()
 
 
 # --- Chạy: giữ chỗ / xoay thẻ / giới hạn -------------------------------
@@ -485,9 +686,10 @@ def test_helper_saved_card_fallback_chain():
     # Kho trống: thẻ đơn cũ.
     storage._delete_vault_card(id_a)
     storage._delete_vault_card(id_b)
-    storage._save_card_to_keyring(
-        {"number": CARD_C, "expiry": "12/28", "cvv": "123", "zip": "10001"}
-    )
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "number")] = CARD_C
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "expiry")] = "12/28"
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "cvv")] = "123"
+    _FAKE_KEYRING.store[("MuseAIHelper:card", "zip")] = "10001"
     assert browser_helper._saved_card()["number"] == CARD_C
     # Không còn gì: dict rỗng — bước thẻ chờ nhập tay.
     storage._delete_card_from_keyring()
@@ -516,9 +718,15 @@ TESTS = [
     test_bulk_import_empty_text,
     test_bulk_import_100_cards,
     test_index_migrates_from_keyring_to_file,
-    test_index_save_failure_keeps_cards,
-    test_write_failure_surfaces_real_error,
+    test_cards_file_write_failure_adds_nothing,
+    test_index_save_failure_rolls_back_cards_file,
+    test_import_writes_no_card_to_keyring,
     test_skipped_header_lines,
+    test_migrate_cm_vault_cards_to_file_and_cleanup_orphans,
+    test_migrate_without_enumeration_keeps_orphans_but_moves_catalogued,
+    test_dpapi_fake_round_trip,
+    test_plaintext_fallback_warns,
+    test_pending_from_old_build_merges_and_migrates,
     test_rotation_across_limits,
     test_rotation_all_exhausted_stops,
     test_manual_mode_only_uses_selected_card,

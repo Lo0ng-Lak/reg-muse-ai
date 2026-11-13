@@ -327,19 +327,24 @@ lookup or a non-US IP only logs a warning and the run continues.
 
 ### Card vault (kho thẻ)
 
-The **Kho thẻ** panel in the window holds multiple cards. Each card is
-stored as its own entry in Windows Credential Manager — the same
-OS-protected store the app already uses for its passwords — under
-`MuseAIHelper:card:<id>` (the id is a random `card-<hex>`, never derived
-from the card number). The vault index (labels + per-card limits, no
-card numbers) lives in the file `vault.json` next to the other run-data
-files — it holds no secrets, so it does not need Credential Manager,
-and a file has no 2560-byte blob limit, so a vault of hundreds of
-cards still imports (an old index still in Credential Manager is
-moved to the file once, automatically). A card is never written to a
-file, never added to the Excel sheet, and no digit of it ever appears
-in the on-screen log; the panel shows only the label you gave it, its
-limit, its usage count and its status.
+The **Kho thẻ** panel in the window holds multiple cards. Cards live in
+the file `cards.json` next to the other run-data files — Windows
+Credential Manager is NOT the card database (it overwrites entries
+that share a service name and failed with errors 1783 and 8 on bulk
+imports, so the tool stopped using it for cards). On Windows the file
+is encrypted with DPAPI (CryptProtectData, tied to the Windows account
+running the tool — only that account can open it); if DPAPI is not
+available the file is stored in plain form and the log warns clearly
+about it. The vault index (labels + per-card limits + usage counts, no
+card numbers, plus the manually picked card) lives in the file
+`vault.json` — a vault of hundreds of cards still imports, and an old
+vault still in Credential Manager is moved to the files once,
+automatically, on first launch (including orphaned entries left by a
+failed bulk import, which are deleted from Credential Manager; other
+services such as CapSolver are never touched). A card is never added
+to the Excel sheet, and no digit of it ever appears in the on-screen
+log; the panel shows only the label you gave it, its limit, its usage
+count and its status.
 
 **Bulk import (nhập nhiều thẻ cùng lúc):** paste a list into the box,
 one card per line, in this format:
@@ -352,16 +357,15 @@ ZIP defaults to 10001 and the label auto-numbers as Thẻ 1, Thẻ 2, …;
 ZIP and the label can also be given as 4th and 5th fields
 (`số thẻ|MM/YY|CVV|ZIP|nhãn`). Example line:
 `4111111111111111|12/28|123`. **Nhập kho thẻ** stores
-each valid line straight into Credential Manager. Lines that fail are
+each valid line straight into the card file. Lines that fail are
 reported by line number only (e.g. "dòng 3: số thẻ không hợp lệ") —
 the line content and card digits are never shown or logged — and the
 rest of the batch is still imported. Header/separator lines (no digits
-at all) are skipped and counted, not treated as errors. If Credential
-Manager refuses a write, the error shows the real reason (Windows
-error code included) instead of a generic message, so the cause can be
-diagnosed; and if saving the index fails after cards were written,
-those cards are kept and merged back into the vault on the next load —
-never lost. The paste box is cleared
+at all) are skipped and counted, not treated as errors. If writing the
+card file fails, no card is added and the error says so plainly; if
+saving the index fails after the cards were written, the card file is
+rolled back to how it was — no card is lost and no half-imported batch
+is left behind. The paste box is cleared
 immediately after import, whether it succeeded or not, so card numbers
 never linger on screen. A card already in the vault (same number or
 same label) is rejected as a duplicate.
@@ -369,7 +373,7 @@ same label) is rejected as a duplicate.
 **Per-card limit (Giới hạn / thẻ):** select a card, set its limit
 (0 = unlimited, max 100) and press **Lưu giới hạn**. The usage count
 is the number of successful accounts that used that card; it persists
-across runs in Credential Manager, keyed by the card id.
+across runs in `vault.json`, keyed by the card id.
 
 **Rotation:** by default the run uses the vault in order and
 automatically moves to the next available card when the current one
@@ -377,10 +381,10 @@ hits its limit; when every card is exhausted the run stops with a
 clear message. **Chọn thẻ này** pins one card manually — the run then
 uses only that card and stops when it hits its limit. **Tự động xoay**
 clears the manual pick and returns to rotation. **Xoá thẻ** removes a
-card from the vault (its Credential Manager entry too).
+card from the vault (its card-file entry too).
 
 At the card step the signup browser reads the card the run reserved
-for that account from Credential Manager, fills the form, verifies the
+for that account from the card file, fills the form, verifies the
 number landed intact, and clicks Confirm; if the fill fails for any
 reason, the run falls back to waiting for manual entry. If the vault
 is empty, every account waits for manual entry at the card step
@@ -388,8 +392,10 @@ is empty, every account waits for manual entry at the card step
 imported into the vault automatically on first use (label "Thẻ 1",
 limit 0, usage count carried over).
 
-Passwords are stored by Python `keyring` in the Windows Credential Manager.
-The Excel sheet contains mailbox passwords and live session cookies in
+Passwords (CapSolver key and the like) are stored by Python `keyring`
+in the Windows Credential Manager — cards are not stored there anymore;
+they live in `cards.json` (see above). The Excel sheet contains mailbox
+passwords and live session cookies in
 readable form, so protect the file and do not share or sync it to an
 untrusted location.
 

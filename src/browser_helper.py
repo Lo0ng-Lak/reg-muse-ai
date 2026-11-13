@@ -18,6 +18,7 @@ import keyring
 import capsolver
 import mail_providers
 import paths
+import storage
 
 
 # Ép stdout/stderr sang UTF-8. Trên Windows, print() tiếng Việt vào pipe
@@ -74,18 +75,10 @@ LANE_SUFFIX = ""
 # Chế độ IP máy (VPN): proxy.txt chứa câu "DIRECT" thì helper
 # chạy Chromium thẳng, không qua proxy. main() gán từ _load_proxy().
 DIRECT_MODE = False
-CARD_SERVICE = "MuseAIHelper:card"
-# Kho thẻ: mỗi thẻ một mục Credential Manager riêng
-# "MuseAIHelper:card:<id>" (id dạng card-<hex>, không phải số
-# thẻ). Danh mục kho nằm ở file vault.json (app chính quản lý);
-# mục "MuseAIHelper:cards" / trường "index" chỉ còn là dự phòng
-# cho bản cũ, trường "active" vẫn là id thẻ đang chọn tay
-# ("" = tự động xoay). Mục đơn cũ CARD_SERVICE chỉ còn dùng
-# làm dự phòng khi chạy helper độc lập.
-CARD_SERVICE_PREFIX = "MuseAIHelper:card:"
-CARD_VAULT_INDEX_SERVICE = "MuseAIHelper:cards"
-CARD_VAULT_INDEX_FIELD = "index"
-CARD_VAULT_ACTIVE_FIELD = "active"
+# Kho thẻ: thẻ nằm ở FILE cards.json (xem storage — DPAPI nếu có),
+# danh mục kho nằm ở file vault.json (app chính quản lý). Helper
+# đọc qua storage; thẻ chưa chuyển sang file thì storage đọc dự
+# phòng từ Credential Manager cũ, thẻ đơn cũ cũng vậy.
 CODE_TIMEOUT_SECONDS = 180
 PAGE_TIMEOUT_MS = 45000
 BUTTON_TIMEOUT_MS = 90000
@@ -332,68 +325,22 @@ def _ensure_profile_form(page):
         )
 
 
-def _load_card_service(service):
-    """Đọc 4 trường thẻ (number, expiry, cvv, zip) từ một mục
-    Credential Manager. Trả về dict rỗng khi thiếu số thẻ."""
-    card = {}
-    for field in ("number", "expiry", "cvv", "zip"):
-        try:
-            value = keyring.get_password(service, field)
-        except Exception:
-            value = None
-        if value:
-            card[field] = value
-    return card if card.get("number") else {}
-
-
 def _vault_card_ids():
-    """Id các thẻ trong kho, theo thứ tự kho. Danh mục nằm ở
-    file vault.json (app chính quản lý) — đọc file trước; còn
-    mục CM cũ thì đọc dự phòng để helper chạy độc lập với bản
-    cũ vẫn thấy thẻ."""
+    """Id các thẻ trong kho, theo thứ tự kho. Danh mục nằm ở file
+    vault.json (app chính quản lý) — đọc qua storage, chấp nhận
+    cả định dạng cũ (list) lẫn mới (dict)."""
     try:
-        raw = paths.data_file("vault.json").read_text(encoding="utf-8")
-        entries = json.loads(raw)
-        if isinstance(entries, list):
-            ids = [
-                str(entry.get("id", ""))
-                for entry in entries
-                if isinstance(entry, dict) and entry.get("id")
-            ]
-            if ids:
-                return ids
-    except Exception:
-        pass
-    try:
-        raw = keyring.get_password(
-            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_INDEX_FIELD
-        )
+        return [entry["id"] for entry in storage._load_vault_index()]
     except Exception:
         return []
-    if not raw:
-        return []
-    try:
-        entries = json.loads(raw)
-    except (ValueError, TypeError):
-        return []
-    if not isinstance(entries, list):
-        return []
-    return [
-        str(entry.get("id", ""))
-        for entry in entries
-        if isinstance(entry, dict) and entry.get("id")
-    ]
 
 
 def _vault_active_card_id():
     """Id thẻ đang chọn tay trong kho ("" = tự động xoay)."""
     try:
-        value = keyring.get_password(
-            CARD_VAULT_INDEX_SERVICE, CARD_VAULT_ACTIVE_FIELD
-        )
+        return storage._load_vault_active()
     except Exception:
         return ""
-    return value or ""
 
 
 def _saved_card(card_id=None):
@@ -402,24 +349,26 @@ def _saved_card(card_id=None):
        đã giữ chỗ cho tài khoản này);
     2. thẻ đang chọn tay trong kho (trường active);
     3. thẻ đầu tiên trong kho;
-    4. thẻ đơn cũ (mục MuseAIHelper:card) — để helper chạy độc
-       lập vẫn dùng được thẻ đã lưu trước khi có kho.
-    Trả về dict rỗng khi không có thẻ nào — bước thẻ chờ nhập tay.
-    Không chữ số nào của thẻ được in ra log."""
+    4. thẻ đơn cũ — để helper chạy độc lập vẫn dùng được thẻ đã
+       lưu trước khi có kho.
+    Thẻ đọc từ file cards.json (xem storage); chưa chuyển sang
+    file thì đọc dự phòng từ Credential Manager cũ. Trả về dict
+    rỗng khi không có thẻ nào — bước thẻ chờ nhập tay. Không chữ
+    số nào của thẻ được in ra log."""
     if card_id:
-        card = _load_card_service(CARD_SERVICE_PREFIX + card_id)
+        card = storage._load_vault_card(card_id)
         if card:
             return card
     active = _vault_active_card_id()
     if active:
-        card = _load_card_service(CARD_SERVICE_PREFIX + active)
+        card = storage._load_vault_card(active)
         if card:
             return card
     for vault_id in _vault_card_ids():
-        card = _load_card_service(CARD_SERVICE_PREFIX + vault_id)
+        card = storage._load_vault_card(vault_id)
         if card:
             return card
-    return _load_card_service(CARD_SERVICE)
+    return storage._load_card_from_keyring()
 
 
 def _fill_card_form(page, card):

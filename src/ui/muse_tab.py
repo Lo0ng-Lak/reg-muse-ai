@@ -195,7 +195,7 @@ class MuseTab(ttk.Frame):
             self.meta_excel_entry.insert(0, saved_excel)
 
     def _refresh_vault(self):
-        """Vẽ lại danh sách kho thẻ từ Credential Manager.
+        """Vẽ lại danh sách kho thẻ từ file kho thẻ.
 
         Chỉ hiện nhãn + giới hạn + số lần dùng + trạng thái —
         không chữ số nào của thẻ xuất hiện ở giao diện. Trạng
@@ -206,6 +206,7 @@ class MuseTab(ttk.Frame):
             self.vault_tree.delete(item)
         active = storage._load_vault_active()
         self._vault_cards = storage._load_vault()
+        self._log_vault_notices_once()
         for card in self._vault_cards:
             if card["id"] == active:
                 status = "Đang chọn"
@@ -223,6 +224,36 @@ class MuseTab(ttk.Frame):
                 text=card["label"],
                 values=(limit, card["used"], status),
             )
+
+    def _log_vault_notices_once(self):
+        """Ghi log một lần mỗi lần mở app: báo cáo chuyển thẻ từ
+        Credential Manager sang file (nếu vừa chuyển) và cảnh báo
+        khi file thẻ đang lưu không mã hoá."""
+        if getattr(self, "_vault_notices_logged", False):
+            return
+        self._vault_notices_logged = True
+        report = storage._last_migration_report()
+        if report and (report["migrated"] or report["orphans_removed"]):
+            parts = []
+            if report["migrated"]:
+                parts.append(
+                    f"đã chuyển {report['migrated']} thẻ từ Credential "
+                    "Manager sang file kho thẻ"
+                )
+            if report["orphans_removed"]:
+                parts.append(
+                    f"đã dọn {report['orphans_removed']} thẻ mồ côi khỏi "
+                    "Credential Manager"
+                )
+            if not report["enumerated"] and report["cleanup_error"]:
+                parts.append(
+                    "không liệt kê được Credential Manager để dọn hết "
+                    f"thẻ mồ côi ({report['cleanup_error']})"
+                )
+            self.app.append_log("Kho thẻ: " + "; ".join(parts) + ".")
+        warning = storage._cards_protection_warning()
+        if warning:
+            self.app.append_log(warning)
 
     def _vault_selection(self):
         """Thẻ đang chọn trong danh sách kho (dict id/label/limit/
@@ -247,8 +278,8 @@ class MuseTab(ttk.Frame):
 
         Định dạng dòng: số thẻ|MM/YY|CVV (ZIP mặc định 10001,
         nhãn tự đặt; có thể thêm ZIP và nhãn làm trường thứ 4
-        và thứ 5). Thẻ hợp lệ ghi thẳng vào Windows
-        Credential Manager (mỗi thẻ một mục riêng). Ô dán được
+        và thứ 5). Thẻ hợp lệ ghi thẳng vào file kho thẻ
+        (cards.json, mã hoá bằng DPAPI của Windows khi có). Ô dán được
         XOÁ NGAY sau khi đọc — dù thành công hay lỗi — để số
         thẻ không nằm lại trên màn hình; dòng lỗi chỉ báo theo
         số dòng, không hiện nội dung dòng hay chữ số thẻ.
@@ -295,7 +326,7 @@ class MuseTab(ttk.Frame):
         message = " ".join(summary)
         if added and not errors:
             self.app.append_log(
-                message + " Thẻ đã lưu vào Windows Credential Manager."
+                message + " Thẻ đã lưu vào file kho thẻ."
             )
         elif added:
             messagebox.showwarning("Nhập thẻ xong (có dòng lỗi)", message)
@@ -337,8 +368,7 @@ class MuseTab(ttk.Frame):
         )
 
     def _delete_vault_card(self):
-        """Xoá thẻ khỏi kho (cả mục Credential Manager lẫn danh
-        mục). Hộp xác nhận chỉ nêu nhãn thẻ, không nêu số thẻ."""
+        """Xoá thẻ khỏi kho (cả file thẻ lẫn danh mục). Hộp xác nhận chỉ nêu nhãn thẻ, không nêu số thẻ."""
         if self.coordinator.running:
             return
         card = self._vault_selection()
@@ -351,10 +381,14 @@ class MuseTab(ttk.Frame):
         if not messagebox.askokcancel(
             "Xoá thẻ",
             f"Xoá thẻ {card['label']} khỏi kho thẻ? Thẻ sẽ bị xoá "
-            "khỏi Windows Credential Manager và không dùng được nữa.",
+            "khỏi file kho thẻ và không dùng được nữa.",
         ):
             return
-        storage._delete_vault_card(card["id"])
+        try:
+            storage._delete_vault_card(card["id"])
+        except Exception as error:
+            messagebox.showerror("Không xoá được thẻ", str(error))
+            return
         self._refresh_vault()
         self.app.append_log(f"Đã xoá thẻ {card['label']} khỏi kho thẻ.")
 

@@ -18,3 +18,5 @@ vault.json
 vault.pending.json
 vault.json.tmp
 vault.pending.json.tmp
+cards.json
+cards.json.tmp
