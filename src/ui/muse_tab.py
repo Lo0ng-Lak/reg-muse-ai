@@ -430,7 +430,8 @@ class MuseTab(ttk.Frame):
             return
         # Đăng nhập vẫn nộp thẻ đã lưu ở bước thẻ — chưa có thẻ thì
         # mỗi tài khoản sẽ chờ nhập tay tới 4 phút.
-        if not storage._load_card_from_keyring():
+        saved_card = storage._load_card_from_keyring()
+        if not saved_card:
             if not messagebox.askokcancel(
                 "Chưa lưu thẻ",
                 "Chưa có thẻ nào được lưu. Mỗi tài khoản đăng nhập "
@@ -438,6 +439,25 @@ class MuseTab(ttk.Frame):
                 "Chromium (tối đa 4 phút). Vẫn chạy?",
             ):
                 return
+        # Giới hạn / thẻ áp dụng như lượt đăng ký: đủ giới hạn thì
+        # lượt chạy tự dừng, đổi thẻ tay rồi chạy tiếp.
+        try:
+            card_limit = int(self.card_limit_var.get())
+        except (tk.TclError, ValueError):
+            card_limit = 0
+        card_limit = max(0, min(card_limit, 100))
+        card_tracked = bool(saved_card) and card_limit > 0
+        card_used = (
+            storage._load_card_success_count() if card_tracked else 0
+        )
+        if card_tracked and card_used >= card_limit:
+            messagebox.showwarning(
+                "Thẻ đã đủ giới hạn",
+                f"Thẻ đang lưu đã dùng cho {card_used} tài khoản thành "
+                f"công (giới hạn {card_limit} / thẻ). Đổi thẻ ở hàng "
+                "Thẻ rồi bấm Lưu thẻ để bộ đếm reset về 0, rồi chạy lại.",
+            )
+            return
         settings = RunSettings(
             total=setup["total"],
             pool=setup["pool"],
@@ -447,9 +467,9 @@ class MuseTab(ttk.Frame):
             direct=setup["direct"],
             meta_login=True,
             meta_excel_path=excel_text,
-            card_limit=0,
-            card_used=0,
-            card_tracked=False,
+            card_limit=card_limit,
+            card_used=card_used,
+            card_tracked=card_tracked,
             bad_file=self.panel.bad_file,
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
@@ -477,6 +497,12 @@ class MuseTab(ttk.Frame):
             self.app.append_log(
                 f"Kho proxy: {len(setup['pool'])} proxy, mỗi proxy "
                 f"{setup['per_proxy']} tài khoản."
+            )
+        if card_tracked:
+            self.app.append_log(
+                f"Giới hạn thẻ đang lưu: {card_used}/{card_limit} tài "
+                "khoản thành công — đủ giới hạn là lượt chạy tự dừng, "
+                "không tự đổi thẻ."
             )
         self.coordinator.start(settings)
 
