@@ -2476,17 +2476,51 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     )
 
 
+def _meta_pick_email_signup(page):
+    """Vào form nhập email ở auth.meta.com (2 biến thể).
+
+    Sau khi bấm Log in, auth.meta.com có 2 dạng: (A) màn hình
+    chọn phương thức — phải bấm "Use mobile number or email"
+    (quan sát tay 2026-11-13); (B) vào thẳng form "What's your
+    mobile number or email?" (live 2026-11-13 10:20 — không có
+    màn hình chọn). Chờ tới khi một trong hai hiện ra: thấy ô
+    email thì khỏi bấm chọn, thấy nút chọn thì bấm. Lỗi rõ ràng
+    nếu 30 giây không thấy bên nào.
+    """
+    email_field = page.get_by_placeholder("Mobile number or email")
+    chooser = page.get_by_text("Use mobile number or email", exact=True)
+    deadline = time.monotonic() + 30
+    while True:
+        if _page_closed(page):
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi vào form email."
+            )
+        if _first_visible(email_field) is not None:
+            return
+        if _first_visible(chooser) is not None:
+            _meta_click(page, chooser, "Use mobile number or email")
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Trang auth.meta.com không hiện form email hay nút "
+                "chọn đăng ký bằng email sau 30 giây."
+            )
+        page.wait_for_timeout(250)
+
+
 def _run_meta_registration(page, email, mailbox, existing_ids):
     """Đăng ký một tài khoản Meta ở meta.ai (chế độ --meta).
 
     Thứ tự theo quan sát tay của chủ tool (2026-11-13):
-    meta.ai -> Log in -> "Use mobile number or email" -> nhập
-    temp mail -> ngày sinh (trên 18) + mật khẩu ngẫu nhiên (không
-    lưu) -> giữ nguyên username tự sinh, bấm Confirm -> nhập mã
-    OTP từ hộp thư -> CAPTCHA (CapSolver) + up ảnh selfie -> vào
-    tài khoản. Xong tới đây thì tài khoản Meta đã tạo xong; app
-    chính lưu lại (email + bí mật hộp thư + username) và DỪNG —
-    không qua Muse (đăng nhập Muse là bước riêng sau này).
+    meta.ai -> Log in -> "Use mobile number or email" (có khi
+    auth.meta.com vào thẳng form email, không có màn hình chọn)
+    -> nhập temp mail -> ngày sinh (trên 18) + mật khẩu ngẫu
+    nhiên (không lưu) -> giữ nguyên username tự sinh, bấm
+    Confirm -> nhập mã OTP từ hộp thư -> CAPTCHA (CapSolver) +
+    up ảnh selfie -> vào tài khoản. Xong tới đây thì tài khoản
+    Meta đã tạo xong; app chính lưu lại (email + bí mật hộp thư
+    + username) và DỪNG — không qua Muse (đăng nhập Muse là
+    bước riêng sau này).
     """
     api_key = _capsolver_key()
     if not api_key:
@@ -2504,11 +2538,7 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     page.goto(META_URL, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
     _meta_click_login(page)
     _status("Meta: đang chọn đăng ký bằng email...")
-    _meta_click(
-        page,
-        page.get_by_text("Use mobile number or email", exact=True),
-        "Use mobile number or email",
-    )
+    _meta_pick_email_signup(page)
     email_field = _meta_wait_visible(
         page,
         page.get_by_placeholder("Mobile number or email"),
