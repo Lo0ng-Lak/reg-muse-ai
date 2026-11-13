@@ -3149,8 +3149,11 @@ def _select_birth_date(page, birth_date):
         native_select = page.locator(
             f'select[autocomplete="bday-{label.lower()}"]'
         )
+        # Tên combobox: Muse.ai đặt đúng "Month"/"Day"/"Year",
+        # còn Meta đặt "Select month"/"Select day"/"Select year"
+        # (quan sát DOM 2026-11-13) — chấp nhận cả hai.
         control = page.get_by_role(
-            "combobox", name=re.compile(f"^{label}$", re.I)
+            "combobox", name=re.compile(f"^(Select )?{label}$", re.I)
         )
         if control.count():
             control = control.first
@@ -3189,7 +3192,7 @@ def _select_birth_date(page, birth_date):
 def _wait_for_birthday_value(page, control, option_value, value, label):
     deadline = time.monotonic() + 10
     while True:
-        if _birthday_value_matches(control, option_value, value):
+        if _birthday_value_matches(control, option_value, value, label):
             return
         if time.monotonic() >= deadline:
             raise RuntimeError(
@@ -3198,7 +3201,7 @@ def _wait_for_birthday_value(page, control, option_value, value, label):
         page.wait_for_timeout(250)
 
 
-def _birthday_value_matches(control, option_value, value):
+def _birthday_value_matches(control, option_value, value, label=None):
     tag_name = control.evaluate("(element) => element.tagName.toLowerCase()")
     if tag_name == "select":
         selected_value = control.input_value()
@@ -3211,10 +3214,21 @@ def _birthday_value_matches(control, option_value, value):
             else control.inner_text().strip()
         )
         selected_value = control.get_attribute("value")
-    return (
-        (selected_value is None or selected_value == option_value)
-        and displayed_value == value
-    )
+    if selected_value is not None and selected_value != option_value:
+        return False
+    if displayed_value == value:
+        return True
+    # Combobox tự vẽ (Meta): inner_text gồm cả nhãn ("Month")
+    # lẫn giá trị ("November") — "Month\nNovember" hoặc dính
+    # liền "MonthNovember". Bỏ phần nhãn ở đầu rồi so, hoặc
+    # giá trị là một dòng riêng trong đó. Không dùng endswith:
+    # ngày "2" mà hiển thị "12" thì endswith vẫn khớp sai.
+    if label and displayed_value.startswith(label):
+        if displayed_value[len(label):].strip() == value:
+            return True
+    return value in [
+        line.strip() for line in displayed_value.splitlines()
+    ]
 
 
 def _wait_for_browser_close(page):
