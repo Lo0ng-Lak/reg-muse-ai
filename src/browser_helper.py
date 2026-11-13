@@ -2150,20 +2150,6 @@ def _meta_write_username(username):
         pass
 
 
-def _meta_write_password(password):
-    """Ghi mật khẩu Meta vừa sinh ra file để app chính lưu vào
-    sheet (giống username). Không có mật khẩu (tài khoản Meta
-    không hỏi mật khẩu) thì không ghi gì. Không bao giờ ghi log."""
-    if not password:
-        return
-    try:
-        paths.data_file(
-            f"meta_password{LANE_SUFFIX}.txt"
-        ).write_text(password + "\n", encoding="utf-8")
-    except OSError:
-        pass
-
-
 def _meta_logged_in(page):
     """Đã đăng nhập Meta AI chưa.
 
@@ -3162,7 +3148,6 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     if password_field.count():
         meta_password = _random_meta_password()
         password_field.first.fill(meta_password)
-        _meta_write_password(meta_password)
         _status(
             "Meta: đã điền xong ngày sinh + mật khẩu, "
             "đang bấm Continue..."

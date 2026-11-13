@@ -52,7 +52,6 @@ SPREADSHEET_HEADERS = [
     "Mật khẩu hộp thư",
     "Cookie phiên đăng nhập",
     "Mã mời",
-    "Mật khẩu Meta",
     "Link lấy OTP",
 ]
 
@@ -63,7 +62,6 @@ META_SPREADSHEET_HEADERS = [
     "Username Meta",
     "Nhà cung cấp",
     "Muse",
-    "Mật khẩu Meta",
     "Link lấy OTP",
 ]
 
@@ -83,7 +81,7 @@ def _migrate_legacy_sheet(sheet):
         for index, cell in enumerate(row):
             cell.value = migrated[index] if index < len(migrated) else None
 
-def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", meta_password="", otp_link=""):
+def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", otp_link=""):
     temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
     try:
         SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +122,6 @@ def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", meta_
                 mail_password,
                 cookie,
                 invite,
-                meta_password,
                 otp_link,
             ]
         )
@@ -204,14 +201,14 @@ def _last_invite_from_sheet():
             continue
     return ""
 
-def _append_meta_row(email, mail_password="", username="", provider="", meta_password="", otp_link=""):
+def _append_meta_row(email, mail_password="", username="", provider="", otp_link=""):
     """Ghi một tài khoản Meta đã tạo vào meta_accounts.xlsx.
 
     Cùng nhịp chống khoá file như _append_spreadsheet_row (thử
     lại 3 lần, vẫn khoá thì giữ vào meta_accounts.pending.xlsx
-    Mật khẩu Meta được lưu vào cột "Mật khẩu Meta" (trống với
-    tài khoản Meta không hỏi mật khẩu) để bước đăng nhập Muse
-    sau này có đủ bộ khôi phục: mail + mật khẩu + link lấy OTP.
+    Không có cột mật khẩu Meta — mật khẩu đăng ký Meta không
+    được lưu (đăng nhập Muse sau này dùng mã OTP qua mail;
+    người dùng xác nhận 2026-11-13: Meta chỉ để lấy mail).
     dùng mã OTP qua mail).
     """
     temporary_file = META_SPREADSHEET_FILE.with_name(
@@ -245,7 +242,6 @@ def _append_meta_row(email, mail_password="", username="", provider="", meta_pas
                 username,
                 provider,
                 "",
-                meta_password,
                 otp_link,
             ]
         )
@@ -331,22 +327,6 @@ def _read_meta_username(suffix=""):
         pass
     return username.splitlines()[0].strip() if username else ""
 
-def _read_meta_password(suffix=""):
-    """Mật khẩu Meta helper vừa ghi (đọc xong xoá file để tài
-    khoản sau không đọc nhầm mật khẩu cũ). Trống với tài khoản
-    Meta không hỏi mật khẩu."""
-    password_file = paths.data_file(f"meta_password{suffix}.txt")
-    try:
-        password = password_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    try:
-        password_file.unlink()
-    except OSError:
-        pass
-    return password.splitlines()[0].strip() if password else ""
-
-
 # Domain hộp thư -> dịch vụ temp mail (để bước đăng nhập Muse
 # suy ra dịch vụ của một tài khoản Meta cũ, khi file Excel không
 # có cột "Nhà cung cấp"). mail.tm lấy danh sách domain qua API
@@ -398,7 +378,7 @@ def _pending_meta_logins(excel_path):
     meta_accounts.xlsx trong AppData, nhưng có thể là bản sao
     khác). Một dòng là "chưa đăng nhập" khi cột "Muse" trống
     (file cũ không có cột này thì mọi dòng đều chưa đăng nhập).
-    Trả về list dict {email, secret, provider, username, password} theo
+    Trả về list dict {email, secret, provider, username} theo
     thứ tự trong file. File không có/không đọc được -> [].
     """
     try:
@@ -414,7 +394,6 @@ def _pending_meta_logins(excel_path):
         secret_col = columns.get("Mật khẩu hộp thư")
         username_col = columns.get("Username Meta")
         provider_col = columns.get("Nhà cung cấp")
-        password_col = columns.get("Mật khẩu Meta")
         muse_col = columns.get("Muse")
         valid_providers = {pid for pid, _ in mail_providers.PROVIDERS}
         pending = []
@@ -427,9 +406,6 @@ def _pending_meta_logins(excel_path):
             secret = ""
             if secret_col and len(row) >= secret_col:
                 secret = str(row[secret_col - 1] or "")
-            password = ""
-            if password_col and len(row) >= password_col:
-                password = str(row[password_col - 1] or "")
             username = ""
             if username_col and len(row) >= username_col:
                 username = str(row[username_col - 1] or "")
@@ -444,7 +420,6 @@ def _pending_meta_logins(excel_path):
                     "secret": secret,
                     "provider": provider,
                     "username": username,
-                    "password": password,
                 }
             )
         return pending

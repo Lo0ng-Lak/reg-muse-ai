@@ -509,16 +509,14 @@ class Coordinator:
                 except OSError:
                     pass
                 if settings.meta:
-                    # Xoá username/mật khẩu cũ (nếu có) để tài khoản
-                    # này không đọc nhầm của tài khoản trước.
-                    for stale_name in (
-                        f"meta_username{suffix}.txt",
-                        f"meta_password{suffix}.txt",
-                    ):
-                        try:
-                            paths.data_file(stale_name).unlink()
-                        except OSError:
-                            pass
+                    # Xoá username cũ (nếu có) để tài khoản này
+                    # không đọc nhầm username của tài khoản trước.
+                    try:
+                        paths.data_file(
+                            f"meta_username{suffix}.txt"
+                        ).unlink()
+                    except OSError:
+                        pass
                 helper_ok, burned, waitlisted, cookie, own_invite = self._run_helper(
                     helper, address, display, label_total, settings.meta
                 )
@@ -536,7 +534,6 @@ class Coordinator:
                             mail_password = mailbox.get("secret") or ""
                             if settings.meta:
                                 username = storage._read_meta_username(suffix)
-                                meta_password = storage._read_meta_password(suffix)
                                 otp_link = mail_providers.inbox_url(
                                     settings.provider_id, address
                                 )
@@ -545,7 +542,6 @@ class Coordinator:
                                     mail_password=mail_password,
                                     username=username,
                                     provider=settings.provider_id,
-                                    meta_password=meta_password,
                                     otp_link=otp_link,
                                 )
                             else:
@@ -928,7 +924,6 @@ class Coordinator:
                                 row["secret"],
                                 cookie=cookie,
                                 invite=own_invite,
-                                meta_password=row.get("password", ""),
                                 otp_link=mail_providers.inbox_url(
                                     row["provider"], address
                                 ),
