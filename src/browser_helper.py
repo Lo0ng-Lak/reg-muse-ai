@@ -3555,17 +3555,32 @@ def _on_facebook(page):
 
 
 def _muse_request_blocked(page):
-    """Form email báo 'We couldn't complete that request. Try again.'
+    """Form email bị Muse từ chối gửi OTP trên IP này.
 
-    Muse từ chối gửi OTP trên IP này. Trang vẫn đứng ở form
-    email, nút Continue vẫn xanh.
+    Hai câu trên form email đều bỏ IP, không chờ mã:
+    'We couldn't complete that request. Try again.' và
+    'Too many attempts. Try again later.'
+    'Too many failed attempts' ở bước thẻ là câu khác: tải lại
+    trang rồi điền lại đúng thẻ, không đổi proxy. Câu đó không
+    chứa cụm 'too many attempts'.
+    Trả về 'request', 'attempts', hoặc chuỗi rỗng.
     """
     try:
         text = page.locator("body").inner_text(timeout=2000).lower()
     except Exception:
-        return False
+        return ""
     text = text.replace("\u2019", "'").replace("\u2018", "'")
-    return "couldn't complete that request" in text
+    if "couldn't complete that request" in text:
+        return "request"
+    if "too many attempts" in text:
+        return "attempts"
+    return ""
+
+
+def _blocked_request_label(kind):
+    if kind == "attempts":
+        return "Too many attempts. Try again later."
+    return "We couldn't complete that request"
 
 
 class _NeedFreshBrowser(RuntimeError):
@@ -3578,14 +3593,16 @@ def _reject_blocked_request_proxy(page):
     Không chờ OTP trên cùng IP. In PROXY_BURN để app chính đưa
     proxy vào kho lỗi và chuyển sang proxy kế.
     """
-    if not _muse_request_blocked(page):
+    kind = _muse_request_blocked(page)
+    if not kind:
         return
     _status(
-        "PROXY_BURN: Muse báo 'We couldn't complete that request' "
+        "PROXY_BURN: Muse báo "
+        f"'{_blocked_request_label(kind)}' "
         "— bỏ proxy này, đổi sang proxy khác."
     )
     raise RuntimeError(
-        "Muse báo không hoàn tất được yêu cầu trên IP này. "
+        "Muse từ chối gửi OTP trên IP này. "
         "Đã bỏ proxy, đổi sang proxy khác."
     )
 
@@ -3596,10 +3613,11 @@ def _reject_blocked_request_browser(page):
     Không chờ OTP trên cửa sổ đang đứng. Người gọi đóng cửa sổ
     và mở một trình duyệt mới cho cùng mail.
     """
-    if not _muse_request_blocked(page):
+    kind = _muse_request_blocked(page)
+    if not kind:
         return
     _status(
-        "Muse báo 'We couldn't complete that request' — "
+        f"Muse báo '{_blocked_request_label(kind)}' — "
         "đóng trình duyệt này và mở trình duyệt mới."
     )
     raise _NeedFreshBrowser(
@@ -6199,9 +6217,10 @@ def _wait_for_verification_code(page, mailbox, existing_ids,
             # Đăng nhập lại lấy cookie: đóng trình duyệt này,
             # người gọi mở trình duyệt mới. Không chờ hết giờ OTP.
             _reject_blocked_request_browser(page)
-        elif reject_blocked:
-            # Đăng nhập Meta → Muse: form email báo không hoàn tất
-            # được yêu cầu thì bỏ proxy ngay, không chờ hết giờ OTP.
+        elif _muse_request_blocked(page) == "attempts" or reject_blocked:
+            # 'Too many attempts' trên form email thì bỏ proxy ở
+            # cả đăng ký lẫn đăng nhập Muse. 'Couldn't complete'
+            # vẫn chỉ bỏ proxy khi đang đăng nhập Muse.
             _reject_blocked_request_proxy(page)
         if code is None:
             try:

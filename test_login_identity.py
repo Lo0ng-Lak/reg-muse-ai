@@ -688,6 +688,44 @@ def test_blocked_request_drops_proxy_on_muse_login():
     browser_helper._reject_blocked_request_proxy(clean)
 
 
+def test_email_too_many_attempts_drops_proxy():
+    """Form email 'Too many attempts. Try again later.' thì bỏ proxy.
+
+    Câu 'Too many failed attempts' ở bước thẻ không được đụng:
+    bước thẻ vẫn tải lại và điền lại đúng thẻ.
+    """
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.body_text = (
+        "Log in or create an account\n"
+        "muse26c95893ca@fexbox.org\n"
+        "Too many attempts. Try again later.\n"
+        "Continue"
+    )
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._wait_for_verification_code(
+                page, {"provider": "tempmail.plus", "address": "a@b.c"},
+                set(), reject_blocked=False,
+            )
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải bỏ proxy khi form email bị giới hạn")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("PROXY_BURN") for line in captured), captured
+    assert "Too many attempts" in " ".join(captured)
+    assert "proxy" in message.lower()
+    card = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    card.body_text = (
+        "Too many failed attempts. Please try again later.\nOK"
+    )
+    browser_helper._reject_blocked_request_proxy(card)
+
+
 def test_facebook_page_signals_drop_proxy():
     """Proxy đẩy sang facebook.com thì báo bỏ proxy và dừng,
     không bấm form Log into Facebook."""
@@ -1034,6 +1072,7 @@ TESTS = [
     test_login_cookie_requires_hatch_sess,
     test_blocked_request_relogin_asks_for_new_browser,
     test_blocked_request_drops_proxy_on_muse_login,
+    test_email_too_many_attempts_drops_proxy,
     test_facebook_page_signals_drop_proxy,
     test_link_screen_clicks_card_button_not_login_continue,
     test_link_screen_continue_is_clicked_only_once,
