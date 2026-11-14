@@ -445,10 +445,18 @@ def _relogin_done_emails(output_path):
         return set()
     try:
         sheet = workbook.active
+        if sheet is None:
+            return set()
+        # Không dùng sheet[1]: file xuất trống (chưa có dòng nào)
+        # làm openpyxl ném IndexError và sập nút Đăng nhập lại.
+        try:
+            header = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
+        except StopIteration:
+            return set()
         columns = {}
-        for cell in sheet[1]:
-            if isinstance(cell.value, str):
-                columns[cell.value.strip()] = cell.column
+        for index, value in enumerate(header or (), start=1):
+            if isinstance(value, str) and value.strip():
+                columns[value.strip()] = index
         email_col = columns.get("Email")
         cookie_col = columns.get("Cookie đăng nhập")
         if not email_col or not cookie_col:
@@ -468,6 +476,8 @@ def _relogin_done_emails(output_path):
             ):
                 done.add(email)
         return done
+    except Exception:
+        return set()
     finally:
         workbook.close()
 

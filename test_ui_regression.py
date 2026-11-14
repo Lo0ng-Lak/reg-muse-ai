@@ -182,6 +182,9 @@ def test_relogin_sheet_reads_email_and_writes_cookie_file():
         output
     )
     assert storage._relogin_done_emails(TMP / "chua-co.xlsx") == set()
+    empty = Workbook()
+    empty.save(TMP / "cookie-trong.xlsx")
+    assert storage._relogin_done_emails(TMP / "cookie-trong.xlsx") == set()
 
 
 def test_login_loop_crash_resets_running():
