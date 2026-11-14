@@ -832,15 +832,33 @@ def _get_started_button(page):
 
 
 def _click_get_started(page):
-    """Bấm Get started trên cổng disclosure. Không bấm nút khác."""
+    """Bấm đúng giữa nút Get started xanh. Không bấm nút khác.
+
+    Bấm theo vai trò đôi khi trúng chữ bên trong, nút nháy rồi
+    xanh lại, trang không chuyển. Bấm bằng chuột vào giữa nút.
+    """
     target = _get_started_button(page)
     if target is not None:
         try:
             target.scroll_into_view_if_needed(timeout=3000)
         except Exception:
             pass
+        box = None
         try:
-            target.click(timeout=5000)
+            box = target.bounding_box()
+        except Exception:
+            box = None
+        if box and box.get("width", 0) > 20 and box.get("height", 0) > 10:
+            try:
+                page.mouse.click(
+                    box["x"] + box["width"] / 2,
+                    box["y"] + box["height"] / 2,
+                )
+                return True
+            except Exception:
+                pass
+        try:
+            target.click(timeout=5000, force=True)
             return True
         except Exception:
             pass
@@ -848,15 +866,25 @@ def _click_get_started(page):
         clicked = bool(
             page.evaluate(
                 """() => {
+                    const norm = (value) =>
+                        (value || "").replace(/\\s+/g, " ").trim();
                     const nodes = [...document.querySelectorAll(
-                        'button, a, [role="button"]'
+                        'button, a, [role="button"], div, span'
                     )];
-                    const el = nodes.find((node) =>
-                        (node.innerText || "").replace(/\\s+/g, " ").trim()
-                        === "Get started"
-                    );
-                    if (!el) return false;
-                    el.click();
+                    const hits = nodes.filter((node) => {
+                        if (norm(node.innerText) !== "Get started") {
+                            return false;
+                        }
+                        const r = node.getBoundingClientRect();
+                        return r.width > 80 && r.height > 20;
+                    });
+                    if (!hits.length) return false;
+                    hits.sort((a, b) => {
+                        const ra = a.getBoundingClientRect();
+                        const rb = b.getBoundingClientRect();
+                        return (rb.width * rb.height) - (ra.width * ra.height);
+                    });
+                    hits[0].click();
                     return true;
                 }"""
             )
@@ -864,6 +892,47 @@ def _click_get_started(page):
     except Exception:
         clicked = False
     return clicked
+
+
+def _pass_disclosure_gate(page, timeout_seconds=90):
+    """Ở trang 'A few things to know' thì bấm Get started cho tới khi qua.
+
+    Một lần bấm thường không chuyển, nút xanh lại. Còn đúng trang
+    này thì bấm lại. Hết giờ mà vẫn ở đó thì thôi, không coi là
+    đã vào chat.
+    """
+    if not _disclosure_gate(page):
+        return
+    deadline = time.monotonic() + timeout_seconds
+    clicks = 0
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return
+        if not _disclosure_gate(page):
+            _status("Đã qua trang 'A few things to know'.")
+            return
+        if _click_get_started(page):
+            clicks += 1
+            if clicks == 1:
+                _status("Đã bấm 'Get started' để vào Muse.")
+            else:
+                _status(
+                    "Nút Get started vẫn xanh — bấm lại lần "
+                    f"{clicks}."
+                )
+        else:
+            _status(
+                "Đang ở trang 'A few things to know' nhưng chưa "
+                "bấm được nút Get started."
+            )
+        try:
+            page.wait_for_timeout(2000)
+        except Exception:
+            return
+    if _disclosure_gate(page):
+        _status(
+            "Vẫn đứng ở nút Get started sau nhiều lần bấm."
+        )
 
 
 def _confirm_final_step(page, timeout_seconds=30, email=None,
@@ -883,7 +952,6 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
     """
     deadline = time.monotonic() + timeout_seconds
     clicks = 0
-    disclosure_clicks = 0
     last_click = None
     interface_since = None
     link_clicked = False
@@ -892,24 +960,12 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
             return
         _reject_facebook_proxy(page)
         if _disclosure_gate(page):
-            # Trang "A few things to know": bấm Get started một
-            # lần thường không chuyển, nút xanh lại đúng chỗ.
-            # Còn nút xanh trên đúng trang này thì bấm lại, không
-            # dừng sau 3 lần rồi đứng đó.
-            if _get_started_button(page) is not None:
-                if _click_get_started(page):
-                    disclosure_clicks += 1
-                    if disclosure_clicks == 1:
-                        _status("Đã bấm 'Get started' để vào Muse.")
-                    else:
-                        _status(
-                            "Nút Get started vẫn xanh trên trang "
-                            "này — bấm lại lần "
-                            f"{disclosure_clicks}."
-                        )
-                page.wait_for_timeout(1500)
-            else:
-                page.wait_for_timeout(800)
+            # Trang "A few things to know" không nằm trong hạn 30
+            # giây của bước này: bấm Get started cho tới khi rời
+            # trang, kể cả khi lần bấm đầu nút xanh lại.
+            _pass_disclosure_gate(page)
+            if _disclosure_gate(page):
+                return
             continue
         if link_clicked and _meta_account_link_screen(page) is not None:
             page.wait_for_timeout(1000)
@@ -5660,6 +5716,9 @@ def main():
                 _confirm_final_step(
                     page, email=email, allow_create_new=not muse_login
                 )
+            # Kể cả khi bước thẻ bị bỏ qua: trang "A few things to
+            # know" vẫn có thể đang mở. Bấm Get started cho tới khi qua.
+            _pass_disclosure_gate(page)
             # Ảnh có thể hiện sau khi bấm nút xác nhận cuối:
             # kiểm tra lại một lần nữa trước khi chờ giao diện.
             _handle_photo_after_card(page)
