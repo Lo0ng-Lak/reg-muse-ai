@@ -68,12 +68,23 @@ class _FakeElement:
         self.kind = kind
         self.name = name
         self.text = text if text is not None else (name or "")
+        self.value = ""
 
     def is_visible(self):
         return True
 
     def is_enabled(self):
         return True
+
+    def wait_for(self, state=None, timeout=None):
+        return None
+
+    def fill(self, value, timeout=None):
+        self.value = value
+        return None
+
+    def input_value(self, timeout=None):
+        return self.value
 
     def click(self, timeout=None):
         self.page.clicked.append(self.name or self.kind)
@@ -89,12 +100,27 @@ class _FakeElement:
         # Màn "Continue with your Meta Account": bấm Continue khi
         # email khớp → tới bước thẻ; bấm "Create new account"
         # khi không khớp (đang tạo tài khoản mới) → về form hồ sơ.
+        # Tài khoản đã đăng nhập sẵn (after_link_continue =
+        # "chat-ui") thì bấm Continue vào thẳng giao diện chat.
         if self.kind == "button" and self.name == "Continue":
             if self.page.state == "meta-link-match":
-                self.page.state = "card"
-                self.page.body_text = (
-                    "Enter your card number to continue with Muse."
-                )
+                if getattr(self.page, "after_link_continue", "card") == "chat-ui":
+                    self.page.state = "chat-ui"
+                    self.page.body_text = (
+                        "Ask Meta AI anything...\n"
+                        "Welcome to Muse. Start a new chat."
+                    )
+                else:
+                    self.page.state = "card"
+                    self.page.body_text = (
+                        "Enter your card number to continue with Muse."
+                    )
+        # Bấm Confirm trên form thẻ → bước thẻ hoàn tất, vào
+        # giao diện Muse.
+        if self.kind == "button" and self.name == "Confirm":
+            if self.page.state == "card":
+                self.page.state = "muse"
+                self.page.body_text = "Welcome to Muse."
         if self.kind == "text" and self.name == "Create new account":
             if self.page.state == "meta-link-mismatch":
                 self.page.state = "profile"
@@ -217,6 +243,13 @@ class _FakePage:
         self.keyboard = _FakeKeyboard(self)
         # Các nút đăng ký theo (role, tên) để get_by_role tìm.
         self.buttons = []
+        # Các ô nhập (theo placeholder) — giữ nguyên đối tượng
+        # qua các lần gọi để giá trị đã điền còn đọc lại được.
+        self.fields = {}
+        # Bấm Continue ở màn liên kết thì đi đâu: "card" (tới
+        # bước thẻ, mặc định) hoặc "chat-ui" (tài khoản đã đăng
+        # nhập sẵn, vào thẳng giao diện chat).
+        self.after_link_continue = "card"
 
     def is_closed(self):
         return self.closed
@@ -271,6 +304,25 @@ class _FakePage:
         return _FakeLocator(found)
 
     def get_by_placeholder(self, text, exact=False):
+        wanted = text.pattern if hasattr(text, "pattern") else str(text)
+        lowered = wanted.lower()
+        # Khung chat của giao diện Muse ("Ask Meta AI...").
+        if self.state == "chat-ui" and "ask meta ai" in lowered:
+            return _FakeLocator(
+                [_FakeElement(self, "field", "Ask Meta AI anything...")]
+            )
+        # Các ô nhập của form thẻ.
+        if self.state == "card" and lowered in (
+            "card number",
+            "mm/yy",
+            "cvv",
+            "zip code",
+        ):
+            if lowered not in self.fields:
+                self.fields[lowered] = _FakeElement(
+                    self, "field", text
+                )
+            return _FakeLocator([self.fields[lowered]])
         return _FakeLocator([])
 
     def locator(self, selector):
@@ -585,6 +637,84 @@ def test_confirm_final_step_continues_on_matched_link():
     assert page.state == "card", "đúng email thì bấm Continue rồi đi tiếp"
 
 
+# --- 6. Bấm Continue ở màn liên kết mà tài khoản ĐÃ đăng nhập
+# sẵn: vào thẳng giao diện Muse — KHÔNG đăng nhập lại. ------
+# (sư huynh 2026-11-14: "tài khoản đó như vậy là đã được đăng
+# nhập và lấy cookie rồi, bỏ đi còn đăng nhập lại làm gì")
+
+def _meta_link_page_to_chat_ui():
+    """Màn liên kết mà bấm Continue thì vào thẳng giao diện chat
+    (tài khoản đã đăng nhập sẵn)."""
+    page = _meta_link_page(INTENDED)
+    page.after_link_continue = "chat-ui"
+    return page
+
+
+def test_wait_for_profile_or_card_link_match_to_chat_ui_logged_in():
+    page = _meta_link_page_to_chat_ui()
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 2000)
+        == "logged-in"
+    ), (
+        "bấm Continue ở màn liên kết mà tài khoản đã vào được "
+        "Muse thì phải báo đã đăng nhập xong, không chờ form "
+        "hồ sơ hay form thẻ nữa"
+    )
+    assert "Continue" in page.clicked, page.clicked
+    assert page.state == "chat-ui"
+
+
+def test_ensure_profile_form_link_match_to_chat_ui_logged_in():
+    page = _meta_link_page_to_chat_ui()
+    assert (
+        browser_helper._ensure_profile_form(page, email=INTENDED)
+        == "logged-in"
+    ), (
+        "đăng ký mà bấm Continue ở màn liên kết rồi vào thẳng "
+        "giao diện thì không điền hồ sơ nữa"
+    )
+    assert "Continue" in page.clicked, page.clicked
+
+
+def test_confirm_final_step_link_match_to_chat_ui_returns():
+    page = _meta_link_page_to_chat_ui()
+    browser_helper._confirm_final_step(
+        page, timeout_seconds=5, email=INTENDED, allow_create_new=False,
+    )
+    assert page.clicked == ["Continue"], (
+        "vào thẳng giao diện thì chỉ bấm Continue ở màn liên "
+        f"kết, không bấm thêm nút nào: {page.clicked}"
+    )
+
+
+def test_do_card_step_if_present_chat_ui_skips():
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "chat-ui"
+    page.body_text = "Ask Meta AI anything...\nWelcome to Muse."
+    assert (
+        browser_helper._do_card_step_if_present(page, None) is False
+    ), (
+        "đã vào giao diện chat thì không có form thẻ — bỏ qua "
+        "bước thẻ, không chờ, không điền"
+    )
+    assert page.clicked == [], "không được bấm gì khi bỏ qua bước thẻ"
+
+
+def test_do_card_step_if_present_card_form_fills_saved_card():
+    # Phiên chưa vào giao diện mà form thẻ hiện: bước thẻ VẪN
+    # chạy như thường — chỉ bỏ qua khi đã vào được Muse.
+    storage._import_bulk_cards("4111111111111111|12/28|123")
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "card"
+    page.body_text = "Enter your card number to continue with Muse."
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    assert (
+        browser_helper._do_card_step_if_present(page, None) is True
+    ), "form thẻ hiện thì phải điền thẻ đã lưu và hoàn tất bước thẻ"
+    assert "Confirm" in page.clicked, page.clicked
+    assert page.state == "muse", "điền thẻ xong phải vào giao diện"
+
+
 TESTS = [
     test_open_clean_page_uses_fresh_context,
     test_open_clean_page_same_proxy_still_clean,
@@ -605,6 +735,11 @@ TESTS = [
     test_wait_for_profile_or_card_continues_on_matched_link,
     test_confirm_final_step_stops_on_mismatched_link,
     test_confirm_final_step_continues_on_matched_link,
+    test_wait_for_profile_or_card_link_match_to_chat_ui_logged_in,
+    test_ensure_profile_form_link_match_to_chat_ui_logged_in,
+    test_confirm_final_step_link_match_to_chat_ui_returns,
+    test_do_card_step_if_present_chat_ui_skips,
+    test_do_card_step_if_present_card_form_fills_saved_card,
 ]
 
 
@@ -616,6 +751,12 @@ def main():
             (TMP / "mailbox.txt").unlink()
         except OSError:
             pass
+        # Kho thẻ của test trước không được rò sang test sau.
+        for vault_name in ("cards.json", "vault.json"):
+            try:
+                (TMP / vault_name).unlink()
+            except OSError:
+                pass
         storage._MIGRATION_DONE = False
         storage._LAST_MIGRATION = None
         try:

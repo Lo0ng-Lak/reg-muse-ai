@@ -235,6 +235,91 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
     return "timeout"
 
 
+_CARD_FORM_MARKERS = (
+    "card number",
+    "card details",
+    "enter your card",
+    "add a card",
+    "payment method",
+)
+
+
+def _card_form_visible(page):
+    """Form nhập thẻ có đang hiện trên màn hình không."""
+    try:
+        text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        return False
+    return any(marker in text for marker in _CARD_FORM_MARKERS)
+
+
+def _do_card_step(page, card_id):
+    """Bước nhập thẻ sau khi đã đăng nhập (chế độ tự động).
+
+    Điền thẻ đã lưu (hoặc chờ nhập tay tối đa 4 phút) rồi chờ
+    bước thẻ hoàn tất. Trả về True khi xong. Ném RuntimeError
+    khi form thẻ hiện mà không hoàn tất được — như luồng cũ.
+    """
+    card = _saved_card(card_id)
+    auto_filled = False
+    if card:
+        try:
+            _fill_card_form(page, card)
+            auto_filled = True
+        except Exception as error:
+            _status(
+                "Tự điền thẻ không xong ("
+                + _short_error(error)
+                + ") — chuyển sang chờ bạn nhập tay."
+            )
+    if auto_filled:
+        card_outcome = _wait_for_card_step_done(page, timeout_seconds=120)
+    else:
+        _status(
+            "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US "
+            "trong cửa sổ Chromium. Tool chờ tối đa 4 phút; "
+            "thẻ được chấp nhận thì mới lưu tài khoản."
+        )
+        card_outcome = _wait_for_card_step_done(page)
+    if card_outcome != "done":
+        raise RuntimeError(
+            "Chưa hoàn tất bước nhập thẻ "
+            f"(kết quả chờ: {card_outcome}) — tài khoản "
+            "không được lưu."
+        )
+    return True
+
+
+def _do_card_step_if_present(page, card_id, settle_seconds=10):
+    """Bước nhập thẻ CHỈ khi form thẻ thật sự hiện — dùng cho
+    tài khoản đã đăng nhập sẵn qua màn liên kết.
+
+    Đã vào giao diện chat Muse thì không có form thẻ — trả về
+    False ngay, KHÔNG chờ, KHÔNG điền. Form thẻ chưa hiện mà
+    cũng chưa vào giao diện thì chờ một lúc (trang đang chuyển
+    cảnh); hết giờ mà vẫn không thấy form thẻ thì trả False.
+    Trả về True khi đã hoàn tất bước thẻ.
+    """
+    try:
+        if _is_muse_chat_ui(page):
+            return False
+    except Exception:
+        pass
+    deadline = time.monotonic() + settle_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        try:
+            if _is_muse_chat_ui(page):
+                return False
+        except Exception:
+            pass
+        if _card_form_visible(page):
+            return _do_card_step(page, card_id)
+        page.wait_for_timeout(1000)
+    return False
+
+
 def _profile_form_present(page):
     """Nhận diện form hồ sơ bằng NHIỀU dấu hiệu độc lập.
 
@@ -309,6 +394,10 @@ def _ensure_profile_form(page, email=None, allow_create_new=True):
     form hồ sơ (Meta đã liên kết sẵn tài khoản) — xử lý nó trước:
     khớp email mới bấm Continue, không khớp thì bấm "Create new
     account" để tạo tài khoản mới (đang đăng ký).
+    Trả về "logged-in" khi bấm Continue ở màn liên kết mà tài
+    khoản đã đăng nhập sẵn và vào thẳng giao diện chat Muse —
+    không còn form hồ sơ để điền nữa. Các trường hợp khác trả
+    về None khi đã tới được form hồ sơ.
     """
     link = _handle_meta_account_link(page, email, allow_create_new)
     if link == "stop":
@@ -319,6 +408,16 @@ def _ensure_profile_form(page, email=None, allow_create_new=True):
         )
     if link in ("continue", "create-new"):
         page.wait_for_timeout(1500)
+        # Bấm Continue ở màn liên kết mà tài khoản đã đăng nhập
+        # sẵn thì vào thẳng giao diện Muse — không còn form hồ
+        # sơ để điền, cũng không điền lại.
+        if _is_muse_chat_ui(page):
+            _status(
+                "Đã đăng nhập qua màn liên kết tài khoản Meta — "
+                "tài khoản đã vào được Muse, bỏ qua các bước "
+                "đăng nhập còn lại."
+            )
+            return "logged-in"
     if _wait_for_profile_form(page, 15000):
         return
     # Màn liên kết có thể hiện muộn trong lúc chờ form hồ sơ:
@@ -331,8 +430,25 @@ def _ensure_profile_form(page, email=None, allow_create_new=True):
             "đăng nhập tài khoản cũ."
         )
     if link in ("continue", "create-new"):
+        page.wait_for_timeout(1500)
+        if _is_muse_chat_ui(page):
+            _status(
+                "Đã đăng nhập qua màn liên kết tài khoản Meta — "
+                "tài khoản đã vào được Muse, bỏ qua các bước "
+                "đăng nhập còn lại."
+            )
+            return "logged-in"
         if _wait_for_profile_form(page, 15000):
             return
+    if _is_muse_chat_ui(page):
+        # Đã vào thẳng giao diện Muse mà không qua form nào —
+        # tài khoản đã đăng nhập sẵn, không cần điền hồ sơ.
+        _status(
+            "Đã đăng nhập qua màn liên kết tài khoản Meta — "
+            "tài khoản đã vào được Muse, bỏ qua các bước "
+            "đăng nhập còn lại."
+        )
+        return "logged-in"
     if not _code_form_present(page):
         raise RuntimeError(
             "Form nhập mã đã biến mất nhưng chưa nhận diện được "
@@ -491,6 +607,11 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
             )
         if link in ("continue", "create-new"):
             page.wait_for_timeout(1000)
+            # Bấm Continue ở màn liên kết mà tài khoản đã đăng
+            # nhập sẵn thì vào thẳng giao diện Muse — không còn
+            # nút xác nhận cuối nào để bấm nữa.
+            if _is_muse_chat_ui(page):
+                return
             continue
         if clicks >= 1 and _in_muse_interface(page):
             # Đã bấm qua cổng và đã ở trong giao diện: phần còn
@@ -2540,7 +2661,10 @@ def _wait_for_profile_or_card(page, email=None, timeout_ms=15000,
     nhầm tài khoản cũ). Màn "Continue with your Meta Account"
     được xử lý TRƯỚC màn chọn chung: khớp email mới bấm
     Continue, không khớp thì tạo tài khoản mới (đăng ký) hoặc
-    dừng (đăng nhập).
+    dừng (đăng nhập). Trả về "logged-in" khi tài khoản ĐÃ vào
+    thẳng giao diện chat Muse — xảy ra sau khi bấm Continue ở
+    màn liên kết mà email khớp: tài khoản đã đăng nhập sẵn,
+    không còn form hồ sơ hay form thẻ nào để điền nữa.
     """
     card_markers = (
         "card number",
@@ -2553,6 +2677,11 @@ def _wait_for_profile_or_card(page, email=None, timeout_ms=15000,
     while time.monotonic() < deadline:
         if page.is_closed():
             return None
+        # Đã vào thẳng giao diện chat Muse (bấm Continue ở màn
+        # liên kết mà tài khoản đã đăng nhập sẵn) thì dừng ngay:
+        # không còn form hồ sơ hay form thẻ nào để chờ nữa.
+        if _is_muse_chat_ui(page):
+            return "logged-in"
         if _profile_form_present(page):
             return "profile"
         try:
@@ -4408,6 +4537,11 @@ def main():
                         use_api = False
                     else:
                         tos_version, requires_name = confirmed
+        # Tài khoản đã đăng nhập sẵn qua màn liên kết tài khoản
+        # Meta (bấm Continue mà email khớp rồi vào thẳng giao
+        # diện chat): True khi đó — bỏ qua các bước đăng nhập
+        # còn lại, không nhập lại email/mã, không chờ form thẻ.
+        already_logged_in = False
         if not use_api:
             _click_when_ready(page, continue_button, "Continue")
             # Mốc thư cũ chụp lại sau khi bấm: mã OTP của lần gửi
@@ -4461,7 +4595,18 @@ def main():
                         "có email cần đăng nhập — dừng lại thay vì "
                         "đăng nhập nhầm tài khoản cũ."
                     )
-                if where == "profile":
+                if where == "logged-in":
+                    # Bấm Continue ở màn liên kết mà email khớp:
+                    # tài khoản ĐÃ đăng nhập sẵn và vào thẳng giao
+                    # diện chat — không nhập lại email/mã, không
+                    # điền hồ sơ, không chờ form thẻ nữa.
+                    already_logged_in = True
+                    _status(
+                        "Đã đăng nhập qua màn liên kết tài khoản "
+                        "Meta — tài khoản đã vào được Muse, bỏ qua "
+                        "các bước đăng nhập còn lại."
+                    )
+                elif where == "profile":
                     _status("Mã đã xác nhận, đang điền hồ sơ...")
                     _fill_profile(page)
                     finish_button = page.get_by_role(
@@ -4479,13 +4624,19 @@ def main():
                         "để bước phân loại bên dưới quyết định."
                     )
             else:
-                _ensure_profile_form(page, email=email)
-                _status("Mã đã xác nhận, đang điền hồ sơ...")
-                _fill_profile(page)
-                finish_button = page.get_by_role(
-                    "button", name="Confirm", exact=True
-                )
-                _click_when_ready(page, finish_button, "Confirm")
+                profile_result = _ensure_profile_form(page, email=email)
+                if profile_result == "logged-in":
+                    # Đăng ký mà bấm Continue ở màn liên kết rồi
+                    # vào thẳng giao diện: tài khoản đã có sẵn,
+                    # không điền hồ sơ nữa.
+                    already_logged_in = True
+                else:
+                    _status("Mã đã xác nhận, đang điền hồ sơ...")
+                    _fill_profile(page)
+                    finish_button = page.get_by_role(
+                        "button", name="Confirm", exact=True
+                    )
+                    _click_when_ready(page, finish_button, "Confirm")
         else:
             # API đã xác nhận OTP: gửi hoàn tất hồ sơ qua API
             # LUÔN, không mở lại trang để điền form hồ sơ trước.
@@ -4551,99 +4702,92 @@ def main():
                     page, completion, completion_label
                 )
         if auto:
-            if muse_login:
-                # Checkpoint có thể hiện muộn (sau khi bấm Confirm
-                # ở form hồ sơ) — xử lý nốt trước khi phân loại.
-                # Không có checkpoint thì hàm này trả về ngay.
+            card_done = False
+            if already_logged_in:
+                # Tài khoản đã đăng nhập sẵn qua màn liên kết —
+                # KHÔNG quay lại nhập email/mã, KHÔNG chờ phân
+                # loại màn hình (phân loại sẽ trượt vì giao diện
+                # Muse không có form thẻ). Chỉ xử lý màn xác minh
+                # thật nếu nó hiện muộn, rồi tới bước thẻ NẾU
+                # form thẻ hiện; không có form thẻ thì bỏ qua
+                # bước thẻ, tới thẳng lấy mã mời + cookie.
                 _handle_login_checkpoint(page)
-            _status(
-                "Đã đăng nhập, đang chờ màn hình tiếp theo..."
-                if muse_login
-                else "Đã gửi hồ sơ, đang chờ màn hình tiếp theo..."
-            )
-            outcome = _classify_after_profile(page)
-            if outcome == "error":
-                _status(
-                    "PROXY_BURN: Meta chặn tạo tài khoản trên IP này "
-                    "('Something went wrong')."
-                )
-                if DIRECT_MODE:
-                    detail = (
-                        "Meta báo không thể tạo tài khoản lúc này — IP "
-                        "của máy (VPN) đã bị chặn; đổi server VPN "
-                        "khác rồi chạy lại."
-                    )
-                else:
-                    detail = (
-                        "Meta báo không thể tạo tài khoản lúc này — IP "
-                        "của proxy đang dùng đã bị chặn; đổi proxy khác."
-                    )
-                raise RuntimeError(detail)
-            if outcome == "waitlist":
-                _status(
-                    "WAITLIST: IP thoát rơi vào khu vực chưa được "
-                    "hỗ trợ ('Join the waitlist')."
-                )
-                if DIRECT_MODE:
-                    detail = (
-                        "Ra màn hình 'Join the waitlist' — Muse chưa "
-                        "khả dụng ở IP hiện tại. Hãy đổi sang server "
-                        "VPN US khác rồi chạy lại."
-                    )
-                else:
-                    detail = (
-                        "Ra màn hình 'Join the waitlist' — Muse chưa khả "
-                        "dụng ở IP thoát hiện tại. Hãy đổi sang proxy US "
-                        "khác rồi chạy lại."
-                    )
-                raise RuntimeError(detail)
-            if outcome != "card":
-                step = "đăng nhập" if muse_login else "hồ sơ"
-                raise RuntimeError(
-                    f"Sau {step} không ra bước nhập thẻ, cũng không ra "
-                    "waitlist — bước tiếp theo chưa rõ, hãy chụp màn "
-                    "hình gửi lại để bổ sung vào tool."
-                )
-            card = _saved_card(card_id)
-            auto_filled = False
-            if card:
-                try:
-                    _fill_card_form(page, card)
-                    auto_filled = True
-                except Exception as error:
+                card_done = _do_card_step_if_present(page, card_id)
+                if not card_done:
+                    _status("CARD_SKIPPED")
                     _status(
-                        "Tự điền thẻ không xong ("
-                        + _short_error(error)
-                        + ") — chuyển sang chờ bạn nhập tay."
+                        "Bỏ qua bước thẻ — tài khoản đã đăng nhập "
+                        "sẵn qua màn liên kết, không có form thẻ "
+                        "trên màn hình; tới thẳng lấy mã mời + "
+                        "cookie."
                     )
-            if auto_filled:
-                card_outcome = _wait_for_card_step_done(
-                    page, timeout_seconds=120
-                )
             else:
+                if muse_login:
+                    # Checkpoint có thể hiện muộn (sau khi bấm Confirm
+                    # ở form hồ sơ) — xử lý nốt trước khi phân loại.
+                    # Không có checkpoint thì hàm này trả về ngay.
+                    _handle_login_checkpoint(page)
                 _status(
-                    "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US "
-                    "trong cửa sổ Chromium. Tool chờ tối đa 4 phút; "
-                    "thẻ được chấp nhận thì mới lưu tài khoản."
+                    "Đã đăng nhập, đang chờ màn hình tiếp theo..."
+                    if muse_login
+                    else "Đã gửi hồ sơ, đang chờ màn hình tiếp theo..."
                 )
-                card_outcome = _wait_for_card_step_done(page)
-            if card_outcome != "done":
-                raise RuntimeError(
-                    "Chưa hoàn tất bước nhập thẻ "
-                    f"(kết quả chờ: {card_outcome}) — tài khoản "
-                    "không được lưu."
-                )
+                outcome = _classify_after_profile(page)
+                if outcome == "error":
+                    _status(
+                        "PROXY_BURN: Meta chặn tạo tài khoản trên IP này "
+                        "('Something went wrong')."
+                    )
+                    if DIRECT_MODE:
+                        detail = (
+                            "Meta báo không thể tạo tài khoản lúc này — IP "
+                            "của máy (VPN) đã bị chặn; đổi server VPN "
+                            "khác rồi chạy lại."
+                        )
+                    else:
+                        detail = (
+                            "Meta báo không thể tạo tài khoản lúc này — IP "
+                            "của proxy đang dùng đã bị chặn; đổi proxy khác."
+                        )
+                    raise RuntimeError(detail)
+                if outcome == "waitlist":
+                    _status(
+                        "WAITLIST: IP thoát rơi vào khu vực chưa được "
+                        "hỗ trợ ('Join the waitlist')."
+                    )
+                    if DIRECT_MODE:
+                        detail = (
+                            "Ra màn hình 'Join the waitlist' — Muse chưa "
+                            "khả dụng ở IP hiện tại. Hãy đổi sang server "
+                            "VPN US khác rồi chạy lại."
+                        )
+                    else:
+                        detail = (
+                            "Ra màn hình 'Join the waitlist' — Muse chưa khả "
+                            "dụng ở IP thoát hiện tại. Hãy đổi sang proxy US "
+                            "khác rồi chạy lại."
+                        )
+                    raise RuntimeError(detail)
+                if outcome != "card":
+                    step = "đăng nhập" if muse_login else "hồ sơ"
+                    raise RuntimeError(
+                        f"Sau {step} không ra bước nhập thẻ, cũng không ra "
+                        "waitlist — bước tiếp theo chưa rõ, hãy chụp màn "
+                        "hình gửi lại để bổ sung vào tool."
+                    )
+                card_done = _do_card_step(page, card_id)
             # Bước up ảnh nằm SAU bước nhập thẻ (sư huynh dặn
             # 2026-11-13): vào được Muse rồi thì khỏi up, chỉ
             # nhập mã và lấy mã; Muse vẫn đòi ảnh thì up như cũ.
             _handle_photo_after_card(page)
-            _status(
-                "Đã qua bước nhập thẻ — xử lý bước xác nhận cuối "
-                "để vào giao diện Muse..."
-            )
-            _confirm_final_step(
-                page, email=email, allow_create_new=not muse_login
-            )
+            if card_done:
+                _status(
+                    "Đã qua bước nhập thẻ — xử lý bước xác nhận cuối "
+                    "để vào giao diện Muse..."
+                )
+                _confirm_final_step(
+                    page, email=email, allow_create_new=not muse_login
+                )
             # Ảnh có thể hiện sau khi bấm nút xác nhận cuối:
             # kiểm tra lại một lần nữa trước khi chờ giao diện.
             _handle_photo_after_card(page)

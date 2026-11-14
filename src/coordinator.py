@@ -655,7 +655,7 @@ class Coordinator:
                         ).unlink()
                     except OSError:
                         pass
-                helper_ok, burned, waitlisted, load_failed, cookie, own_invite = self._run_helper(
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped = self._run_helper(
                     helper,
                     address,
                     display,
@@ -706,7 +706,12 @@ class Coordinator:
                             # thẻ, nên đây đúng là 1 lượt dùng thẻ
                             # đang giữ chỗ. Không có thẻ trong kho
                             # (nhập tay ở bước thẻ) thì không đếm.
-                            shared["vault"].record_success(card)
+                            # Ngoại lệ: tài khoản đã đăng nhập sẵn
+                            # qua màn liên kết nên bỏ qua bước thẻ
+                            # (CARD_SKIPPED) — thẻ chưa hề dùng,
+                            # không được tính lượt.
+                            if not card_skipped:
+                                shared["vault"].record_success(card)
                         except RuntimeError as error:
                             shared["fail"] += 1
                             save_error = error
@@ -1097,7 +1102,7 @@ class Coordinator:
                         self.events.put(
                             ("log", f"[{display}/{label_total}] {error}")
                         )
-                helper_ok, burned, waitlisted, load_failed, cookie, own_invite = (
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped = (
                     self._run_helper(
                         helper, address, display, label_total,
                         muse_login=True,
@@ -1130,7 +1135,12 @@ class Coordinator:
                             # thẻ, nên đây đúng là 1 lượt dùng thẻ
                             # đang giữ chỗ. Không có thẻ trong kho
                             # (nhập tay ở bước thẻ) thì không đếm.
-                            shared["vault"].record_success(card)
+                            # Ngoại lệ: tài khoản đã đăng nhập sẵn
+                            # qua màn liên kết nên bỏ qua bước thẻ
+                            # (CARD_SKIPPED) — thẻ chưa hề dùng,
+                            # không được tính lượt.
+                            if not card_skipped:
+                                shared["vault"].record_success(card)
                         except RuntimeError as error:
                             shared["fail"] += 1
                             save_error = error
@@ -1158,7 +1168,13 @@ class Coordinator:
                             (
                                 "log",
                                 f"[{display}/{label_total}] ✔ Đăng nhập Muse thành công "
-                                f"{address} — đã nộp thẻ và lưu vào sheet Excel.",
+                                f"{address} — "
+                                + (
+                                    "đã đăng nhập sẵn qua màn liên kết, "
+                                    "bỏ qua bước thẻ, đã lưu vào sheet Excel."
+                                    if card_skipped
+                                    else "đã nộp thẻ và lưu vào sheet Excel."
+                                ),
                             )
                         )
                     else:
@@ -1311,7 +1327,7 @@ class Coordinator:
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False, False, False, "", ""
+            return False, False, False, False, "", "", False
         self.helper_process = process
         with self._process_lock:
             self.helper_processes.add(process)
@@ -1321,6 +1337,7 @@ class Coordinator:
             "load_fail": False,
             "cookie": "",
             "invite": "",
+            "card_skipped": False,
         }
 
         def forward_output():
@@ -1341,6 +1358,13 @@ class Coordinator:
                     invite = _invite_from_line(line)
                     if invite is not None:
                         signals["invite"] = invite
+                        continue
+                    if line == "CARD_SKIPPED":
+                        # Tài khoản đã đăng nhập sẵn qua màn liên
+                        # kết nên bỏ qua bước thẻ — thẻ giữ chỗ
+                        # cho tài khoản này KHÔNG bị tính lượt
+                        # dùng (xem hai chỗ gọi _run_helper).
+                        signals["card_skipped"] = True
                         continue
                     self.events.put(("log", f"[{index}/{total}] {line}"))
 
@@ -1373,4 +1397,4 @@ class Coordinator:
             self.helper_processes.discard(process)
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"]
+        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"], signals["card_skipped"]
