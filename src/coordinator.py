@@ -1498,11 +1498,30 @@ class Coordinator:
         vào file xuất. Không cookie thì bỏ qua mail đó.
         """
         rows = storage._relogin_accounts(settings.relogin_excel_path)
+        done = storage._relogin_done_emails(settings.relogin_output_path)
+        pending = [
+            row for row in rows if row["email"].lower() not in done
+        ]
+        skipped = len(rows) - len(pending)
+        if skipped:
+            self.events.put(
+                (
+                    "log",
+                    f"Bỏ qua {skipped} mail đã có cookie trong file "
+                    f"xuất. Còn {len(pending)} mail chưa lấy.",
+                )
+            )
+        rows = pending
         if settings.total:
             rows = rows[: max(0, int(settings.total))]
         if not rows:
             self.events.put(
-                ("log", "Không có mail nào để đăng nhập lại.")
+                (
+                    "log",
+                    "Không còn mail nào chưa lấy cookie."
+                    if skipped
+                    else "Không có mail nào để đăng nhập lại.",
+                )
             )
             return 0, 0
         requested = max(1, min(int(settings.lanes or 1), 10))

@@ -610,6 +610,84 @@ def test_link_screen_detects_shown_email():
     assert browser_helper._meta_account_link_screen(normal) is None
 
 
+def test_login_cookie_requires_hatch_sess():
+    """Cookie lúc đang đăng nhập không có hatch_sess thì chưa dùng được."""
+    pending = (
+        "datr=1; _fbp=2; fr=3; hatch_native_auth_csrf=a; "
+        "hatch_native_auth_temp=b; hatch_native_auth_state=c; "
+        "hatch_native_auth_device=d"
+    )
+    assert browser_helper._cookie_has_hatch_sess(pending) is False
+    assert browser_helper._cookie_has_hatch_sess("") is False
+    assert browser_helper._cookie_has_hatch_sess(
+        "datr=1; hatch_sess=abc"
+    ) is True
+    assert browser_helper._cookie_has_hatch_sess("hatch_sess=abc") is True
+    logged_in = (
+        "datr=abc; wd=1280x720; dpr=1; "
+        "hatch_native_auth_temp=v1; _fbp=fb.1; locale=en_US; "
+        "hatch_sess=57325bd8.v1%3Atoken; "
+        "theme=%7B%22chatThemeCache%22%3A%7B%7D%7D"
+    )
+    assert browser_helper._cookie_has_hatch_sess(logged_in) is True
+
+
+def test_blocked_request_relogin_asks_for_new_browser():
+    """Đăng nhập lại lấy cookie: lỗi này thì bỏ trình duyệt hiện tại."""
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.body_text = (
+        "Log in or create an account\n"
+        "We couldn't complete that request. Try again.\n"
+        "Continue"
+    )
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._reject_blocked_request_browser(page)
+        except browser_helper._NeedFreshBrowser as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải đóng trình duyệt khi Muse từ chối")
+    finally:
+        browser_helper._status = orig
+    assert any("trình duyệt mới" in line for line in captured), captured
+    assert "trình duyệt" in message.lower()
+    clean = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    clean.body_text = "Enter the code we sent"
+    browser_helper._reject_blocked_request_browser(clean)
+
+
+def test_blocked_request_drops_proxy_on_muse_login():
+    """Form email báo không hoàn tất được yêu cầu thì bỏ proxy,
+    không chờ OTP trên IP đó."""
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.body_text = (
+        "Log in or create an account\n"
+        "muse50313da45f@merepost.com\n"
+        "We couldn't complete that request. Try again.\n"
+        "Continue"
+    )
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._reject_blocked_request_proxy(page)
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải bỏ proxy khi Muse từ chối yêu cầu")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("PROXY_BURN") for line in captured), captured
+    assert "proxy" in message.lower()
+    clean = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    clean.body_text = "Enter the code we sent"
+    browser_helper._reject_blocked_request_proxy(clean)
+
+
 def test_facebook_page_signals_drop_proxy():
     """Proxy đẩy sang facebook.com thì báo bỏ proxy và dừng,
     không bấm form Log into Facebook."""
@@ -953,6 +1031,9 @@ TESTS = [
     test_chooser_without_intended_email_returns_chooser,
     test_no_chooser_normal_flow_unaffected,
     test_link_screen_detects_shown_email,
+    test_login_cookie_requires_hatch_sess,
+    test_blocked_request_relogin_asks_for_new_browser,
+    test_blocked_request_drops_proxy_on_muse_login,
     test_facebook_page_signals_drop_proxy,
     test_link_screen_clicks_card_button_not_login_continue,
     test_link_screen_continue_is_clicked_only_once,

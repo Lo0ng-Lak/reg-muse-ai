@@ -168,6 +168,20 @@ def test_relogin_sheet_reads_email_and_writes_cookie_file():
     assert values[1] == ("muse111@flubai.com", "cookie-b"), values
     assert values[2] == ("muse222@mailto.plus", "cookie-c"), values
     assert len(values) == 3
+    # Cookie lúc còn form đăng nhập không có hatch_sess — chưa
+    # tính là đã lấy, lượt sau phải lấy lại.
+    assert storage._relogin_done_emails(output) == set()
+    storage._write_relogin_cookie(
+        output, rows[0]["email"], "datr=1; hatch_sess=abc"
+    )
+    assert storage._relogin_done_emails(output) == {
+        "muse111@flubai.com",
+    }
+    storage._write_relogin_cookie(output, "muse333@mailto.plus", "   ")
+    assert "muse333@mailto.plus" not in storage._relogin_done_emails(
+        output
+    )
+    assert storage._relogin_done_emails(TMP / "chua-co.xlsx") == set()
 
 
 def test_login_loop_crash_resets_running():

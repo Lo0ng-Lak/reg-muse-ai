@@ -428,6 +428,50 @@ def _relogin_accounts(excel_path):
         workbook.close()
 
 
+def _relogin_done_emails(output_path):
+    """Mail đã lấy cookie, đọc từ file xuất.
+
+    Chỉ tính dòng có email và cookie chứa hatch_sess. Cookie lúc
+    còn form đăng nhập (chỉ hatch_native_auth_* và cookie
+    Facebook) không tính — lượt sau lấy lại. File chưa có hoặc
+    không đọc được thì trả set rỗng. So khớp không phân biệt hoa thường.
+    """
+    path = Path(output_path) if output_path else None
+    if path is None or not path.is_file():
+        return set()
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+    except Exception:
+        return set()
+    try:
+        sheet = workbook.active
+        columns = {}
+        for cell in sheet[1]:
+            if isinstance(cell.value, str):
+                columns[cell.value.strip()] = cell.column
+        email_col = columns.get("Email")
+        cookie_col = columns.get("Cookie đăng nhập")
+        if not email_col or not cookie_col:
+            return set()
+        done = set()
+        need = max(email_col, cookie_col)
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if not row or len(row) < need:
+                continue
+            email = str(row[email_col - 1] or "").strip().lower()
+            cookie = str(row[cookie_col - 1] or "").strip()
+            # Cookie lúc còn form đăng nhập không có hatch_sess.
+            # Dòng đó chưa dùng được — lượt sau lấy lại.
+            if (
+                "@" in email
+                and re.search(r"(?:^|;\s*)hatch_sess=", cookie)
+            ):
+                done.add(email)
+        return done
+    finally:
+        workbook.close()
+
+
 def _write_relogin_cookie(output_path, email, cookie):
     """Ghi một dòng Email + Cookie đăng nhập vào file xuất.
 

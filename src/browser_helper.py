@@ -1438,6 +1438,53 @@ def _session_cookie_header(page):
     return "; ".join(parts)
 
 
+def _cookie_has_hatch_sess(header):
+    """Chuỗi cookie đã có phiên đăng nhập Muse chưa.
+
+    hatch_sess là cookie phiên chính. hatch_native_auth_* và
+    cookie Facebook có từ lúc còn form đăng nhập, trước khi
+    Muse cấp phiên — chuỗi thiếu hatch_sess không chạy được job.
+    """
+    return bool(
+        re.search(r"(?:^|;\s*)hatch_sess=", header or "")
+    )
+
+
+def _hatch_session_cookie(page):
+    """Cookie phiên chỉ khi đã đăng nhập xong (có hatch_sess).
+
+    Dạng đúng, giống header Cookie của một request muse.ai sau
+    khi đã vào chat: "tên=giá trị; tên=giá trị", trong đó có
+    hatch_sess=... cùng các cookie còn lại (datr, hatch_native_auth_*,
+    theme, ...). Thiếu hatch_sess thì trả chuỗi rỗng.
+    """
+    header = _session_cookie_header(page)
+    if _cookie_has_hatch_sess(header):
+        return header
+    return ""
+
+
+def _relogin_chat_ready(page):
+    """Đã vào chat và cookie đã có hatch_sess.
+
+    Trang chủ lúc chưa đăng nhập cũng có ô chat, nên ô chat một
+    mình không đủ. Form "Log in or create an account" còn hiện
+    thì chắc chắn chưa xong. Cookie lúc đó chỉ có
+    hatch_native_auth_* và cookie Facebook.
+    """
+    try:
+        if _email_login_form_visible(page):
+            return False
+    except Exception:
+        return False
+    try:
+        if not _is_muse_chat_ui(page):
+            return False
+    except Exception:
+        return False
+    return bool(_hatch_session_cookie(page))
+
+
 def _load_redeem_code():
     """Mã mời cần quy đổi cho tài khoản này (app chính ghi redeem.txt).
 
@@ -3451,6 +3498,60 @@ def _on_facebook(page):
     return host == "facebook.com" or host.endswith(".facebook.com")
 
 
+def _muse_request_blocked(page):
+    """Form email báo 'We couldn't complete that request. Try again.'
+
+    Muse từ chối gửi OTP trên IP này. Trang vẫn đứng ở form
+    email, nút Continue vẫn xanh.
+    """
+    try:
+        text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        return False
+    text = text.replace("\u2019", "'").replace("\u2018", "'")
+    return "couldn't complete that request" in text
+
+
+class _NeedFreshBrowser(RuntimeError):
+    """Đăng nhập lại gặp lỗi yêu cầu: đóng trình duyệt, mở cái mới."""
+
+
+def _reject_blocked_request_proxy(page):
+    """IP bị Muse từ chối yêu cầu thì bỏ proxy luôn.
+
+    Không chờ OTP trên cùng IP. In PROXY_BURN để app chính đưa
+    proxy vào kho lỗi và chuyển sang proxy kế.
+    """
+    if not _muse_request_blocked(page):
+        return
+    _status(
+        "PROXY_BURN: Muse báo 'We couldn't complete that request' "
+        "— bỏ proxy này, đổi sang proxy khác."
+    )
+    raise RuntimeError(
+        "Muse báo không hoàn tất được yêu cầu trên IP này. "
+        "Đã bỏ proxy, đổi sang proxy khác."
+    )
+
+
+def _reject_blocked_request_browser(page):
+    """Đăng nhập lại lấy cookie: lỗi này thì bỏ trình duyệt hiện tại.
+
+    Không chờ OTP trên cửa sổ đang đứng. Người gọi đóng cửa sổ
+    và mở một trình duyệt mới cho cùng mail.
+    """
+    if not _muse_request_blocked(page):
+        return
+    _status(
+        "Muse báo 'We couldn't complete that request' — "
+        "đóng trình duyệt này và mở trình duyệt mới."
+    )
+    raise _NeedFreshBrowser(
+        "Muse báo không hoàn tất được yêu cầu. "
+        "Đóng trình duyệt này và mở trình duyệt mới."
+    )
+
+
 def _reject_facebook_proxy(page):
     """Proxy nào đẩy sang facebook.com thì bỏ proxy đó luôn.
 
@@ -4951,7 +5052,9 @@ def _run_muse_relogin(page, email, mailbox, existing_ids):
         "Đã gửi email, đang chờ mã OTP từ "
         f"{mailbox['provider']}..."
     )
-    code = _wait_for_verification_code(page, mailbox, existing_ids)
+    code = _wait_for_verification_code(
+        page, mailbox, existing_ids, reject_blocked="browser"
+    )
     _status("Đã nhận mã OTP, đang điền...")
     _fill_verification_code(page, code)
     page.wait_for_timeout(UI_SETTLE_MS)
@@ -4978,33 +5081,45 @@ def _run_muse_relogin(page, email, mailbox, existing_ids):
             )
         if link == "continue":
             link_clicked = True
-        cookie = _session_cookie_header(page)
-        if cookie and (
-            _in_muse_interface(page) or _app_shell_visible(page)
-        ):
-            break
-        if _card_form_visible(page):
-            if cookie:
+        if _disclosure_gate(page):
+            _click_get_started(page)
+            page.wait_for_timeout(1000)
+            continue
+        # Chỉ lấy khi đã vào chat và cookie có hatch_sess, đúng
+        # dạng header Cookie của request muse.ai lúc đang chat.
+        # Hết giờ mà chưa đủ hai điều đó thì không ghi gì.
+        if _relogin_chat_ready(page):
+            page.wait_for_timeout(1500)
+            if _relogin_chat_ready(page):
                 break
+        elif _card_form_visible(page):
             raise RuntimeError(
                 "Đăng nhập xong Muse đòi nhập thẻ — tab đăng nhập "
                 "lại không nộp thẻ."
             )
         page.wait_for_timeout(1000)
     else:
-        cookie = _session_cookie_header(page)
-        if not cookie:
-            raise RuntimeError(
-                "Đăng nhập xong nhưng không lấy được cookie phiên."
-            )
+        raise RuntimeError(
+            "Chưa vào được trang chat, hoặc cookie không có "
+            "hatch_sess — không ghi cookie này."
+        )
+    cookie = _hatch_session_cookie(page)
+    if not cookie or not _relogin_chat_ready(page):
+        raise RuntimeError(
+            "Chưa vào được trang chat, hoặc cookie không có "
+            "hatch_sess — không ghi cookie này."
+        )
     _verify_muse_account(page, email)
-    cookie = _session_cookie_header(page)
+    cookie = _hatch_session_cookie(page)
     if not cookie:
         raise RuntimeError(
-            "Không còn cookie phiên sau khi kiểm tra đúng mail."
+            "Sau khi vào chat vẫn không có hatch_sess — "
+            "không ghi cookie này."
         )
     _status(f"SESSION_COOKIE: {cookie}")
-    _status("Đã đăng nhập lại và lấy cookie phiên.")
+    _status(
+        "Đã vào chat và lấy cookie phiên có hatch_sess."
+    )
 
 
 def main():
@@ -5120,7 +5235,43 @@ def main():
             )
             existing_ids = set()
         if relogin:
-            _run_muse_relogin(page, email, mailbox, existing_ids)
+            # Form email báo không hoàn tất được yêu cầu thì đóng
+            # cửa sổ đang đứng và mở trình duyệt mới cho cùng mail.
+            # Tối đa 2 lần mở lại; vẫn lỗi thì bỏ mail này.
+            fresh_left = 2
+            while True:
+                try:
+                    _run_muse_relogin(page, email, mailbox, existing_ids)
+                    break
+                except _NeedFreshBrowser:
+                    if fresh_left <= 0:
+                        raise RuntimeError(
+                            "Muse vẫn báo không hoàn tất được yêu cầu "
+                            "sau khi mở trình duyệt mới — bỏ mail này."
+                        )
+                    fresh_left -= 1
+                    _status(
+                        "Đóng trình duyệt này, mở trình duyệt mới "
+                        "để đăng nhập lại cùng mail."
+                    )
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                    browser = playwright.chromium.launch(
+                        headless=False,
+                        proxy=None if DIRECT_MODE else proxy,
+                    )
+                    context, page = _open_clean_page(browser)
+                    page.set_default_timeout(PAGE_TIMEOUT_MS)
+                    try:
+                        existing_ids = _get_message_ids(mailbox)
+                    except Exception:
+                        pass
             if auto:
                 _status("RESULT: SUCCESS")
             else:
@@ -5239,7 +5390,10 @@ def main():
                 "Đã gửi email, đang chờ mã xác minh từ "
                 f"{mailbox['provider']}..."
             )
-            code = _wait_for_verification_code(page, mailbox, existing_ids)
+            code = _wait_for_verification_code(
+                page, mailbox, existing_ids,
+                reject_blocked=muse_login,
+            )
             _status("Đã nhận mã xác minh, đang điền mã...")
             _fill_verification_code(page, code)
             page.wait_for_timeout(UI_SETTLE_MS)
@@ -5974,13 +6128,22 @@ def _verification_input(page):
     return None
 
 
-def _wait_for_verification_code(page, mailbox, existing_ids):
+def _wait_for_verification_code(page, mailbox, existing_ids,
+                                 reject_blocked=False):
     deadline = time.monotonic() + CODE_TIMEOUT_SECONDS
     code = None
     warned = False
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError("Cửa sổ Chromium đã đóng trước khi xác minh.")
+        if reject_blocked == "browser":
+            # Đăng nhập lại lấy cookie: đóng trình duyệt này,
+            # người gọi mở trình duyệt mới. Không chờ hết giờ OTP.
+            _reject_blocked_request_browser(page)
+        elif reject_blocked:
+            # Đăng nhập Meta → Muse: form email báo không hoàn tất
+            # được yêu cầu thì bỏ proxy ngay, không chờ hết giờ OTP.
+            _reject_blocked_request_proxy(page)
         if code is None:
             try:
                 code = _verification_code_from_new_messages(

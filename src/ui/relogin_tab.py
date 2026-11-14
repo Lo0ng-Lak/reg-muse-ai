@@ -183,6 +183,17 @@ class ReloginTab(ttk.Frame):
                 "dòng mail nào.",
             )
             return
+        done = storage._relogin_done_emails(output)
+        pending = [
+            row for row in rows if row["email"].lower() not in done
+        ]
+        if not pending:
+            messagebox.showinfo(
+                "Đã lấy hết cookie",
+                f"Cả {len(rows)} mail đã có cookie trong file xuất. "
+                "Lượt này không đăng nhập lại.",
+            )
+            return
         try:
             storage._save_relogin_source_path(source)
             storage._save_relogin_output_path(output)
@@ -198,11 +209,20 @@ class ReloginTab(ttk.Frame):
         )
         try:
             self.app.on_run_started(None)
-            planned = len(rows) if count == 0 else min(count, len(rows))
+            planned = (
+                len(pending) if count == 0 else min(count, len(pending))
+            )
+            skipped = len(rows) - len(pending)
             self.app.append_log(
                 "--- Bắt đầu ĐĂNG NHẬP LẠI: "
-                f"{planned} mail trong {Path(source).name} ---"
+                f"{planned} mail chưa có cookie trong "
+                f"{Path(source).name} ---"
             )
+            if skipped:
+                self.app.append_log(
+                    f"Bỏ qua {skipped} mail đã có cookie trong "
+                    f"{Path(output).name}."
+                )
             self.app.append_log(
                 f"Chạy {lanes} luồng. Không dùng proxy. OTP lấy từ "
                 "hộp thư của đúng mail đó. Cookie ghi vào "
