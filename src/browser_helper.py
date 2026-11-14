@@ -295,7 +295,7 @@ def _code_form_present(page):
         return False
 
 
-def _ensure_profile_form(page):
+def _ensure_profile_form(page, email=None, allow_create_new=True):
     """Đưa trang tới form hồ sơ sau khi điền mã — KHÔNG bấm mò.
 
     Form mã tự gửi khi nhập đủ số nên thường trang tự sang form hồ
@@ -305,9 +305,34 @@ def _ensure_profile_form(page):
     gửi form hồ sơ còn trống (ngày sinh mặc định = ngày hôm nay,
     tuổi 0) và bị chặn dưới 18 tuổi. Trường hợp đó phải dừng và
     báo rõ, tuyệt đối không bấm.
+    Màn "Continue with your Meta Account" có thể hiện thay cho
+    form hồ sơ (Meta đã liên kết sẵn tài khoản) — xử lý nó trước:
+    khớp email mới bấm Continue, không khớp thì bấm "Create new
+    account" để tạo tài khoản mới (đang đăng ký).
     """
+    link = _handle_meta_account_link(page, email, allow_create_new)
+    if link == "stop":
+        raise RuntimeError(
+            "Màn 'Continue with your Meta Account' hiện ra mà email "
+            "không khớp email cần đăng nhập — dừng lại thay vì "
+            "đăng nhập tài khoản cũ."
+        )
+    if link in ("continue", "create-new"):
+        page.wait_for_timeout(1500)
     if _wait_for_profile_form(page, 15000):
         return
+    # Màn liên kết có thể hiện muộn trong lúc chờ form hồ sơ:
+    # kiểm tra lại trước khi kết luận form không hiện.
+    link = _handle_meta_account_link(page, email, allow_create_new)
+    if link == "stop":
+        raise RuntimeError(
+            "Màn 'Continue with your Meta Account' hiện ra mà email "
+            "không khớp email cần đăng nhập — dừng lại thay vì "
+            "đăng nhập tài khoản cũ."
+        )
+    if link in ("continue", "create-new"):
+        if _wait_for_profile_form(page, 15000):
+            return
     if not _code_form_present(page):
         raise RuntimeError(
             "Form nhập mã đã biến mất nhưng chưa nhận diện được "
@@ -435,7 +460,8 @@ def _in_muse_interface(page):
     )
 
 
-def _confirm_final_step(page, timeout_seconds=30):
+def _confirm_final_step(page, timeout_seconds=30, email=None,
+                        allow_create_new=False):
     """Bấm nút xác nhận cuối sau bước thẻ để vào giao diện Muse.
 
     Sau khi thẻ được chấp nhận, Muse.ai còn một màn hình nữa với
@@ -443,6 +469,11 @@ def _confirm_final_step(page, timeout_seconds=30):
     mới vào được giao diện. Nếu có nhiều màn hình nối nhau thì
     bấm tiếp (tối đa 3 lần). Đã ở trong giao diện rồi — hoặc hết
     giờ mà không thấy nút — thì thôi, bước lấy cookie vẫn chạy.
+    Màn "Continue with your Meta Account" có thể hiện ở đây (sau
+    bước thẻ) — kiểm tra TRƯỚC mỗi lần bấm: email trên thẻ phải
+    khớp email cần đăng nhập mới bấm Continue; không khớp thì
+    dừng lại (đăng nhập) hoặc bấm "Create new account" (đăng
+    ký), TUYỆT ĐỐI không bấm Continue mù vào tài khoản cũ.
     """
     deadline = time.monotonic() + timeout_seconds
     clicks = 0
@@ -451,6 +482,16 @@ def _confirm_final_step(page, timeout_seconds=30):
     while time.monotonic() < deadline:
         if page.is_closed():
             return
+        link = _handle_meta_account_link(page, email, allow_create_new)
+        if link == "stop":
+            raise RuntimeError(
+                "Màn 'Continue with your Meta Account' hiện ra mà "
+                "email không khớp email cần đăng nhập — dừng lại "
+                "thay vì đăng nhập tài khoản cũ."
+            )
+        if link in ("continue", "create-new"):
+            page.wait_for_timeout(1000)
+            continue
         if clicks >= 1 and _in_muse_interface(page):
             # Đã bấm qua cổng và đã ở trong giao diện: phần còn
             # lại là giao diện thật, không bấm thêm gì nữa.
@@ -555,6 +596,36 @@ def _app_shell_visible(page):
                     })"""
             )
         )
+    except Exception:
+        return False
+
+
+def _is_muse_chat_ui(page):
+    """Đã vào giao diện chat Muse chưa — tín hiệu chắc chắn hơn
+    _app_shell_visible một mình: URL đã rời khỏi luồng đăng ký /
+    xác minh VÀ khung chat đã dựng (ô nhập "Ask Meta AI
+    anything..." hoặc nút Mời / thanh trái). Nút Mời có thể
+    không hiện với tài khoản này (đó là cái làm bước up ảnh sau
+    thẻ không nhận ra đã vào Muse — 2026-11-14), nên ô chat là
+    tín hiệu chính. Ô chat một mình không đủ tin (trang chưa
+    đăng nhập cũng có nó) nên phải kèm URL giao diện. Dùng để
+    quyết định bỏ qua bước up ảnh sau thẻ: đã vào giao diện
+    chat thì KHÔNG up ảnh nữa."""
+    try:
+        if not _in_muse_interface(page):
+            return False
+    except Exception:
+        return False
+    try:
+        composer = page.get_by_placeholder(
+            re.compile(r"ask meta ai", re.I)
+        )
+        if composer.count() and composer.first.is_visible():
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(_app_shell_visible(page))
     except Exception:
         return False
 
@@ -700,16 +771,20 @@ def _verify_muse_account(page, email):
 
 def _photo_after_card_decision(page):
     """Quyết định bước up ảnh sau bước thẻ:
-    - "skip": đã vào được giao diện Muse (URL + khung giao diện)
-      → khỏi up ảnh.
-    - "photo": đang ở trang up ảnh (ô file / "Upload a
-      verification selfie" / "Upload image" đang hiện) → làm
-      bước ảnh.
+    - "skip": đã vào được giao diện chat Muse (URL giao diện +
+      ô chat / khung giao diện — xem _is_muse_chat_ui) → khỏi
+      up ảnh.
+    - "photo": đang ở trang up ảnh XÁC MINH (ô file trong bối
+      cảnh xác minh / tiêu đề "Upload a verification selfie" /
+      "Upload image" đang hiện — xem _meta_selfie_page_visible)
+      → làm bước ảnh.
     - "none": chưa vào Muse mà cũng không có trang ảnh → không
       có bước ảnh ở đây, để _confirm_final_step xử lý tiếp.
+    Ô file đính kèm của khung chat KHÔNG được tính là trang ảnh
+    (đó là cái làm tool up nhầm ảnh vào khung chat — 2026-11-14).
     Không bao giờ ném lỗi (quyết định sai còn hơn chết luồng)."""
     try:
-        if _in_muse_interface(page) and _app_shell_visible(page):
+        if _is_muse_chat_ui(page):
             return "skip"
     except Exception:
         pass
@@ -771,11 +846,16 @@ def _handle_photo_after_card(page, timeout_seconds=180, settle_seconds=10):
                     "sổ Chromium."
                 )
                 warned = True
-            clicked = _meta_click_button(
-                page, ("Continue", "Confirm", "Submit")
-            )
-            if clicked:
-                _status(f"Đã bấm {clicked} sau khi up ảnh.")
+            # Chỉ bấm nút xác nhận khi VẪN còn ở trang up ảnh xác
+            # minh — trang đã chuyển (ví dụ sang giao diện chat
+            # Muse) thì không bấm gì nữa, để vòng lặp quyết định
+            # lại; bấm mù ở đây có thể gửi nhầm ảnh vào khung chat.
+            if _meta_selfie_page_visible(page):
+                clicked = _meta_click_button(
+                    page, ("Continue", "Confirm", "Submit")
+                )
+                if clicked:
+                    _status(f"Đã bấm {clicked} sau khi up ảnh.")
             page.wait_for_timeout(2000)
             continue
         # "none": chưa vào Muse, không có trang ảnh. Nếu đã hiện
@@ -2294,7 +2374,131 @@ _ACCOUNT_CHOOSER_MARKERS = (
     "chọn tài khoản",
     "tiếp tục với tư cách",
     "đổi tài khoản",
+    # Màn "Continue with your Meta Account" (dự phòng — đã có
+    # _handle_meta_account_link xử lý chính xác trước, chỗ này
+    # chỉ để màn đó không lọt qua như màn hình lạ):
+    "continue with your meta account",
+    "we found a meta account",
+    "will have access to muse",
 )
+
+
+_META_LINK_SCREEN_MARKERS = (
+    "continue with your meta account",
+    "we found a meta account",
+    "will have access to muse",
+)
+
+
+def _meta_account_link_screen(page, body_text=None):
+    """Màn "Continue with your Meta Account" có hiện không —
+    Meta đã liên kết sẵn một tài khoản theo email/thông tin đã
+    nhập (ghi ở phía server nên xoá cookie cũng không xoá được)
+    và hỏi có dùng tài khoản đó không. Trả về email hiện trên
+    thẻ tài khoản, "" khi màn hiện mà không đọc được email,
+    None khi không phải màn này. Không bao giờ ném lỗi."""
+    try:
+        if body_text is None:
+            body_text = page.locator("body").inner_text(timeout=2000)
+    except Exception:
+        body_text = ""
+    if not any(m in (body_text or "").lower() for m in _META_LINK_SCREEN_MARKERS):
+        return None
+    try:
+        heading = page.get_by_text(
+            "Continue with your Meta Account", exact=True
+        )
+        if not (heading.count() and heading.first.is_visible()):
+            return None
+    except Exception:
+        return None
+    try:
+        candidates = page.get_by_text(_ACCOUNT_EMAIL_RE)
+        best = None
+        best_len = None
+        for index in range(candidates.count()):
+            try:
+                text = candidates.nth(index).inner_text(timeout=1000)
+            except Exception:
+                continue
+            found = _ACCOUNT_EMAIL_RE.findall(text or "")
+            if not found:
+                continue
+            # Phần tử nhỏ nhất chứa email thường là chính ô email
+            # trên thẻ (phần tử cha lớn chứa cả trang).
+            if best is None or len(text) < best_len:
+                best = found[0]
+                best_len = len(text)
+        if best:
+            return best
+    except Exception:
+        pass
+    return ""
+
+
+def _handle_meta_account_link(page, email, allow_create_new, body_text=None):
+    """Xử lý màn "Continue with your Meta Account".
+
+    Trả về:
+    - "continue": email trên thẻ khớp email cần đăng nhập, đã
+      bấm "Continue".
+    - "create-new": email không khớp, đang tạo tài khoản mới nên
+      bấm "Create new account".
+    - "stop": email không khớp (hoặc không đọc được) mà đang
+      đăng nhập một tài khoản cụ thể — dừng lại, TUYỆT ĐỐI
+      không bấm "Continue" (đó là đăng nhập tài khoản cũ).
+    - "absent": không phải màn này.
+    Log ghi rõ email hiện ra có khớp hay không (chỉ ghi email,
+    không ghi mật khẩu). Không bao giờ ném lỗi."""
+    try:
+        shown = _meta_account_link_screen(page, body_text=body_text)
+    except Exception:
+        return "absent"
+    if shown is None:
+        return "absent"
+    if not shown:
+        _status(
+            "Màn 'Continue with your Meta Account' hiện ra nhưng "
+            "không đọc được email trên thẻ — dừng lại, không bấm "
+            "Continue."
+        )
+        return "stop"
+    if shown.strip().lower() == (email or "").strip().lower():
+        _status(
+            "Màn liên kết tài khoản Meta: email hiện ra "
+            f"({shown}) khớp email cần đăng nhập — bấm Continue."
+        )
+        for locator in (
+            page.get_by_role("button", name="Continue", exact=True),
+            page.get_by_text("Continue", exact=True),
+        ):
+            try:
+                target = _first_visible(locator)
+                if target is not None:
+                    target.click(timeout=5000)
+                    return "continue"
+            except Exception:
+                continue
+        return "stop"
+    _status(
+        "Màn liên kết tài khoản Meta: email hiện ra "
+        f"({shown}) KHÔNG khớp email cần đăng nhập — không bấm "
+        "Continue."
+    )
+    if allow_create_new:
+        try:
+            link = page.get_by_text("Create new account", exact=True)
+            target = _first_visible(link)
+            if target is not None:
+                target.click(timeout=5000)
+                _status(
+                    "Đã bấm 'Create new account' để tạo tài khoản "
+                    "mới thay vì dùng tài khoản cũ."
+                )
+                return "create-new"
+        except Exception:
+            pass
+    return "stop"
 
 
 def _account_chooser_visible(body_text):
@@ -2324,15 +2528,19 @@ def _click_account_chooser_entry(page, email):
     return False
 
 
-def _wait_for_profile_or_card(page, email=None, timeout_ms=15000):
+def _wait_for_profile_or_card(page, email=None, timeout_ms=15000,
+                              allow_create_new=False):
     """Chờ một trong hai màn hình sau khi mã OTP đã xác nhận ở
     chế độ đăng nhập: form hồ sơ ("profile" — tài khoản Meta
     chưa hoàn tất hồ sơ Muse, cần điền) hoặc bước nhập thẻ
     ("card" — tài khoản đã đăng ký xong, đi thẳng tới thẻ).
     Trả về None khi hết giờ mà không thấy màn hình nào, và
-    "chooser" khi Meta hiện màn chọn tài khoản mà không có
-    email cần đăng nhập trong đó (dừng lại thay vì bấm nhầm
-    tài khoản cũ).
+    "chooser" khi Meta hiện màn chọn / liên kết tài khoản mà
+    không có email cần đăng nhập trong đó (dừng lại thay vì bấm
+    nhầm tài khoản cũ). Màn "Continue with your Meta Account"
+    được xử lý TRƯỚC màn chọn chung: khớp email mới bấm
+    Continue, không khớp thì tạo tài khoản mới (đăng ký) hoặc
+    dừng (đăng nhập).
     """
     card_markers = (
         "card number",
@@ -2351,6 +2559,17 @@ def _wait_for_profile_or_card(page, email=None, timeout_ms=15000):
             body = page.locator("body").inner_text(timeout=2000).lower()
         except Exception:
             body = ""
+        # Màn "Continue with your Meta Account": Meta đã liên kết
+        # sẵn tài khoản theo email/thông tin (xoá cookie không
+        # xoá được) — phải so khớp email TRƯỚC khi bấm gì.
+        link = _handle_meta_account_link(
+            page, email, allow_create_new, body_text=body
+        )
+        if link in ("continue", "create-new"):
+            page.wait_for_timeout(1000)
+            continue
+        if link == "stop":
+            return "chooser"
         if any(marker in body for marker in card_markers):
             return "card"
         if _account_chooser_visible(body):
@@ -3135,50 +3354,120 @@ def _meta_checkpoint_visible(page):
         return False
 
 
-def _meta_selfie_page_visible(page):
-    """Đang ở trang up selfie không: ô file đang HIỆN, hoặc tiêu
-    đề "Upload a verification selfie" / vùng "Upload image" đang
-    hiện. Ô file có trong DOM nhưng ẨN thì CHƯA đủ làm tín hiệu
-    — Meta có thể đã render sẵn bước selfie trong lúc còn ở bước
-    CAPTCHA; ô ẩn chỉ được dùng lúc UP (set_input_files đặt được
-    file vào ô ẩn), không dùng làm tín hiệu trang. Tín hiệu này
-    giữ cho nhánh selfie không bấm nhầm nút Continue của bước
-    khác (OTP, checkpoint)."""
+def _verification_file_input_index(page):
+    """Chỉ số (0-based) của ô file đầu tiên thuộc bối cảnh xác
+    minh, None khi không có. Ô file trần trên trang (như ô đính
+    kèm của khung chat Muse) không tính — tổ tiên của ô phải
+    chứa chữ xác minh/selfie (đi lên tối đa 8 cấp). Ô ẩn vẫn
+    tính (set_input_files đặt được vào ô ẩn). Không bao giờ ném
+    lỗi."""
     try:
-        file_input = page.locator('input[type="file"]')
-        if file_input.count() and file_input.first.is_visible():
-            return True
+        index = page.evaluate("""() => {
+            const markers = ["verification", "verify", "selfie",
+                "upload image", "upload a photo",
+                "confirm your identity"];
+            const inputs = [...document.querySelectorAll(
+                'input[type="file"]')];
+            for (let i = 0; i < inputs.length; i++) {
+                let el = inputs[i];
+                for (let depth = 0; depth < 8 && el; depth++) {
+                    const text = (el.innerText || "").toLowerCase();
+                    if (markers.some((m) => text.includes(m))) {
+                        return i;
+                    }
+                    el = el.parentElement;
+                }
+            }
+            return -1;
+        }""")
     except Exception:
-        pass
-    for label in ("Upload a verification selfie", "Upload image"):
-        try:
+        return None
+    if isinstance(index, bool) or not isinstance(index, int):
+        return None
+    return index if index >= 0 else None
+
+
+def _meta_selfie_page_visible(page):
+    """Đang ở trang up selfie xác minh không.
+
+    Chỉ tin khi có bối cảnh xác minh thật: tiêu đề "Upload a
+    verification selfie" / "Upload image" đang hiện, hoặc ô file
+    nằm trong vùng xác minh (tổ tiên chứa chữ xác minh/selfie),
+    hoặc URL đang ở luồng xác minh. Ô file trần trên trang (như
+    ô đính kèm của khung chat Muse) KHÔNG đủ làm tín hiệu — đó
+    là cái làm tool up nhầm ảnh vào khung chat (2026-11-14).
+    Ô file có trong DOM nhưng ẨN thì CHƯA đủ làm tín hiệu một
+    mình — Meta có thể đã render sẵn bước selfie trong lúc còn
+    ở bước CAPTCHA; ô ẩn chỉ được dùng lúc UP (set_input_files
+    đặt được file vào ô ẩn), không dùng làm tín hiệu trang.
+    Tín hiệu này giữ cho nhánh selfie không bấm nhầm nút
+    Continue của bước khác (OTP, checkpoint)."""
+    try:
+        for label in ("Upload a verification selfie", "Upload image"):
             found = page.get_by_text(label, exact=True)
             if found.count() and found.first.is_visible():
                 return True
-        except Exception:
-            pass
+    except Exception:
+        pass
+    try:
+        url = (page.url or "").lower()
+        in_verification_url = any(
+            part in url
+            for part in (
+                "verification",
+                "checkpoint",
+                "age-verification",
+                "verify",
+                "onboarding",
+            )
+        )
+    except Exception:
+        in_verification_url = False
+    try:
+        file_input = page.locator('input[type="file"]')
+        if file_input.count() and file_input.first.is_visible():
+            if in_verification_url:
+                return True
+            if _verification_file_input_index(page) is not None:
+                return True
+    except Exception:
+        pass
     return False
 
 
 def _meta_upload_selfie(page, selfie_path):
-    """Up ảnh selfie lên trang Meta.
+    """Up ảnh selfie lên trang xác minh Meta.
 
-    Trả (True, "") khi đã đặt file vào ô up (ô file bị ẩn vẫn
-    đặt được — set_input_files không cần ô hiện). Không có ô
-    file trong DOM thì bấm vùng "Upload image" để mở hộp chọn
-    file của hệ thống rồi đặt file vào đó. Trả (False, lý do)
-    khi không up được — phía gọi thử lại ở lần lặp sau (người
-    dùng có thể up tay trong lúc chờ).
+    Chỉ đặt file vào ô file thuộc bối cảnh xác minh (xem
+    _verification_file_input_index) — TUYỆT ĐỐI không đặt vào ô
+    đính kèm của khung chat Muse. Đang ở giao diện chat Muse thì
+    từ chối luôn. Không có ô xác minh thì bấm vùng "Upload image"
+    của trang xác minh để mở hộp chọn file của hệ thống rồi đặt
+    file vào đó. Trả (True, "") khi đã đặt file vào ô up (ô file
+    bị ẩn vẫn đặt được — set_input_files không cần ô hiện).
+    Trả (False, lý do) khi không up được — phía gọi thử lại ở
+    lần lặp sau (người dùng có thể up tay trong lúc chờ).
     """
     try:
-        file_input = page.locator('input[type="file"]')
-        if file_input.count() > 0:
+        if _is_muse_chat_ui(page):
+            return (
+                False,
+                "đang ở giao diện chat Muse — không up ảnh vào khung chat",
+            )
+    except Exception:
+        pass
+    index = _verification_file_input_index(page)
+    if index is not None:
+        try:
+            file_input = page.locator('input[type="file"]').nth(index)
             _status("Meta: đang up ảnh selfie...")
-            file_input.first.set_input_files(str(selfie_path))
+            file_input.set_input_files(str(selfie_path))
             return True, ""
-    except Exception as error:
-        return False, f"ô up file lỗi ({_short_error(error)})"
+        except Exception as error:
+            return False, f"ô up file lỗi ({_short_error(error)})"
     try:
+        if _is_muse_chat_ui(page):
+            return False, "không thấy ô up ảnh xác minh"
         with page.expect_file_chooser(timeout=5000) as chooser_info:
             page.get_by_text("Upload image", exact=True).click(
                 timeout=5000
@@ -3187,7 +3476,7 @@ def _meta_upload_selfie(page, selfie_path):
         chooser_info.value.set_files(str(selfie_path))
         return True, ""
     except Exception:
-        return False, "không thấy ô up ảnh"
+        return False, "không thấy ô up ảnh xác minh"
 
 
 # Kẹt ở checkpoint mà không phát hiện được captcha quá từng này
@@ -4190,7 +4479,7 @@ def main():
                         "để bước phân loại bên dưới quyết định."
                     )
             else:
-                _ensure_profile_form(page)
+                _ensure_profile_form(page, email=email)
                 _status("Mã đã xác nhận, đang điền hồ sơ...")
                 _fill_profile(page)
                 finish_button = page.get_by_role(
@@ -4352,7 +4641,9 @@ def main():
                 "Đã qua bước nhập thẻ — xử lý bước xác nhận cuối "
                 "để vào giao diện Muse..."
             )
-            _confirm_final_step(page)
+            _confirm_final_step(
+                page, email=email, allow_create_new=not muse_login
+            )
             # Ảnh có thể hiện sau khi bấm nút xác nhận cuối:
             # kiểm tra lại một lần nữa trước khi chờ giao diện.
             _handle_photo_after_card(page)

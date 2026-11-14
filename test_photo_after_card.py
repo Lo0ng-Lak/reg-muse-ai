@@ -101,8 +101,11 @@ class _FakeLocator:
 
 
 class _FakePage:
-    """Trang giả với 4 trạng thái: muse (đã vào giao diện), photo
-    (đang ở trang up ảnh), gate (đang ở cổng Get started),
+    """Trang giả với 5 trạng thái: muse (đã vào giao diện, có nút
+    Mời), muse-chat (đã vào giao diện chat nhưng KHÔNG có nút
+    Mời, ô chat hiện, ô file đính kèm của khung chat hiện — đúng
+    trường hợp thật làm tool up nhầm ảnh vào khung chat),
+    photo (đang ở trang up ảnh), gate (đang ở cổng Get started),
     loading (chưa rõ màn nào)."""
 
     def __init__(self, url, state="loading"):
@@ -120,11 +123,32 @@ class _FakePage:
         pass
 
     def evaluate(self, js):
+        if 'input[type="file"]' in js:
+            # _verification_file_input_index: ô file trong bối cảnh
+            # xác minh chỉ có ở trang up ảnh; khung chat chỉ có ô
+            # đính kèm nên trả -1.
+            return 0 if self.state == "photo" else -1
         return False
 
     def locator(self, selector):
-        if selector == 'input[type="file"]' and self.state == "photo":
+        if selector == 'input[type="file"]' and self.state in (
+            "photo",
+            "muse-chat",
+        ):
             return _FakeLocator([_FakeElement(self, "file")])
+        return _FakeLocator([])
+
+    def get_by_placeholder(self, text, exact=False):
+        placeholder = "Ask Meta AI anything..."
+        if self.state in ("muse", "muse-chat"):
+            if hasattr(text, "search"):
+                matched = bool(text.search(placeholder))
+            else:
+                matched = str(text).lower() in placeholder.lower()
+            if matched:
+                return _FakeLocator(
+                    [_FakeElement(self, "textbox", "composer")]
+                )
         return _FakeLocator([])
 
     def get_by_text(self, label, exact=True):
@@ -158,6 +182,10 @@ class _FakePage:
 
 def _muse_page():
     return _FakePage("https://muse.ai/", state="muse")
+
+
+def _muse_chat_page():
+    return _FakePage("https://muse.ai/", state="muse-chat")
 
 
 def _photo_page():
@@ -273,6 +301,47 @@ def test_handle_closed_page():
     assert browser_helper._handle_photo_after_card(page) == "closed"
 
 
+def test_decision_skip_when_in_muse_chat_without_invite_button():
+    """Đúng lỗi thật 2026-11-14: đã vào giao diện chat (ô chat
+    hiện) nhưng nút Mời không hiện — vẫn phải nhận ra đã vào
+    Muse và bỏ qua bước ảnh, không được tính ô file đính kèm
+    của khung chat là trang up ảnh."""
+    page = _muse_chat_page()
+    assert browser_helper._is_muse_chat_ui(page) is True
+    assert (
+        browser_helper._photo_after_card_decision(page) == "skip"
+    ), "ô file của khung chat không được tính là trang up ảnh"
+
+
+def test_selfie_page_not_visible_on_chat_ui():
+    assert (
+        browser_helper._meta_selfie_page_visible(_muse_chat_page())
+        is False
+    ), "ô đính kèm của khung chat không phải ô up ảnh xác minh"
+
+
+def test_upload_refuses_chat_ui():
+    selfie = TMP / "selfie.png"
+    selfie.write_bytes(b"\x89PNG\r\n\x1a\n")
+    page = _muse_chat_page()
+    ok, reason = browser_helper._meta_upload_selfie(page, selfie)
+    assert ok is False, "không được up ảnh khi đang ở giao diện chat"
+    assert "khung chat" in reason, reason
+    assert page.uploaded_files == [], "không được đặt file vào ô chat"
+
+
+def test_handle_skips_photo_in_muse_chat():
+    page = _muse_chat_page()
+    captured, orig = _capture_status()
+    try:
+        result = browser_helper._handle_photo_after_card(page)
+    finally:
+        browser_helper._status = orig
+    assert result == "skipped", result
+    assert page.uploaded_files == [], "không được up gì vào khung chat"
+    assert any("bỏ qua bước up ảnh" in s for s in captured), captured
+
+
 TESTS = [
     test_decision_skip_when_in_muse,
     test_decision_photo_when_prompt_visible,
@@ -283,6 +352,10 @@ TESTS = [
     test_handle_none_returns_fast_without_photo,
     test_handle_none_after_settle_when_loading,
     test_handle_closed_page,
+    test_decision_skip_when_in_muse_chat_without_invite_button,
+    test_selfie_page_not_visible_on_chat_ui,
+    test_upload_refuses_chat_ui,
+    test_handle_skips_photo_in_muse_chat,
 ]
 
 

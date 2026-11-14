@@ -86,6 +86,21 @@ class _FakeElement:
             self.page.body_text = (
                 "Enter your card number to continue with Muse."
             )
+        # Màn "Continue with your Meta Account": bấm Continue khi
+        # email khớp → tới bước thẻ; bấm "Create new account"
+        # khi không khớp (đang tạo tài khoản mới) → về form hồ sơ.
+        if self.kind == "button" and self.name == "Continue":
+            if self.page.state == "meta-link-match":
+                self.page.state = "card"
+                self.page.body_text = (
+                    "Enter your card number to continue with Muse."
+                )
+        if self.kind == "text" and self.name == "Create new account":
+            if self.page.state == "meta-link-mismatch":
+                self.page.state = "profile"
+                self.page.body_text = (
+                    "Finish creating your account — your birthday"
+                )
 
     def inner_text(self, timeout=None):
         return self.text
@@ -112,6 +127,18 @@ class _FakeLocator:
 
     def inner_text(self, timeout=None):
         return "\n".join(el.inner_text() for el in self._elements)
+
+    def wait_for(self, state=None, timeout=None):
+        return None
+
+    def is_enabled(self):
+        return bool(self._elements) and all(
+            el.is_enabled() for el in self._elements
+        )
+
+    def click(self, timeout=None):
+        if self._elements:
+            self._elements[0].click(timeout=timeout)
 
 
 class _FakeKeyboard:
@@ -229,6 +256,14 @@ class _FakePage:
 
     def get_by_text(self, text, exact=False):
         found = []
+        if hasattr(text, "search"):
+            # Regex (ví dụ _ACCOUNT_EMAIL_RE): trả một phần tử cho
+            # mỗi email tìm thấy trong nội dung trang.
+            for email in set(text.findall(self.body_text or "")):
+                found.append(
+                    _FakeElement(self, "text", name=email, text=email)
+                )
+            return _FakeLocator(found)
         if text in self.body_text:
             found.append(
                 _FakeElement(self, "text", name=text, text=text)
@@ -263,6 +298,31 @@ def _page_with_menu(email):
     page.buttons.append(_FakeElement(page, "button", name="Account"))
     page.menu_email = email
     page.body_text = "Welcome to Muse."
+    return page
+
+
+def _meta_link_page(shown_email, intended_email=INTENDED):
+    """Trang giả màn 'Continue with your Meta Account': thẻ tài
+    khoản hiện email shown_email, nút Continue, link 'Create new
+    account'."""
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.intended_email = intended_email
+    page.state = (
+        "meta-link-match"
+        if shown_email == intended_email
+        else "meta-link-mismatch"
+    )
+    page.body_text = (
+        "Continue with your Meta Account\n"
+        "We found a Meta Account associated with your info. You "
+        "can use Muse with your existing account, or create a new "
+        "one instead.\n"
+        f"{shown_email}\n"
+        "1 profile will have access to Muse\n"
+        "Continue\n"
+        "Create new account"
+    )
+    page.buttons.append(_FakeElement(page, "button", name="Continue"))
     return page
 
 
@@ -416,6 +476,115 @@ def test_no_chooser_normal_flow_unaffected():
     )
 
 
+# --- 5. Màn "Continue with your Meta Account" ----------------------
+# (sư huynh gửi ảnh 2026-11-14: màn này hiện ra dù cookie đã
+# sạch — Meta liên kết tài khoản phía server nên phải so khớp
+# email trên thẻ trước khi bấm Continue.)
+
+def test_link_screen_detects_shown_email():
+    page = _meta_link_page(OTHER)
+    assert browser_helper._meta_account_link_screen(page) == OTHER
+    page = _meta_link_page(INTENDED)
+    assert browser_helper._meta_account_link_screen(page) == INTENDED
+    normal = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    normal.body_text = "Finish creating your account — your birthday"
+    assert browser_helper._meta_account_link_screen(normal) is None
+
+
+def test_link_screen_match_clicks_continue():
+    page = _meta_link_page(INTENDED)
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        result = browser_helper._handle_meta_account_link(
+            page, INTENDED, allow_create_new=False
+        )
+    finally:
+        browser_helper._status = orig
+    assert result == "continue", result
+    assert "Continue" in page.clicked, page.clicked
+    assert any("khớp" in s for s in captured), captured
+    assert page.state == "card", "bấm Continue đúng email thì đi tiếp"
+
+
+def test_link_screen_mismatch_login_stops_without_click():
+    page = _meta_link_page(OTHER)
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        result = browser_helper._handle_meta_account_link(
+            page, INTENDED, allow_create_new=False
+        )
+    finally:
+        browser_helper._status = orig
+    assert result == "stop", result
+    assert "Continue" not in page.clicked, (
+        "email không khớp thì TUYỆT ĐỐI không bấm Continue, "
+        f"đã bấm: {page.clicked}"
+    )
+    assert any("KHÔNG khớp" in s for s in captured), captured
+
+
+def test_link_screen_mismatch_register_clicks_create_new():
+    page = _meta_link_page(OTHER)
+    result = browser_helper._handle_meta_account_link(
+        page, INTENDED, allow_create_new=True
+    )
+    assert result == "create-new", result
+    assert "Create new account" in page.clicked, page.clicked
+    assert "Continue" not in page.clicked, page.clicked
+    assert page.state == "profile", "tạo tài khoản mới thì về form hồ sơ"
+
+
+def test_wait_for_profile_or_card_stops_on_mismatched_link():
+    page = _meta_link_page(OTHER)
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 2000)
+        == "chooser"
+    ), "màn liên kết sai email thì dừng như màn chọn sai"
+    assert page.clicked == [], "không được bấm gì trên màn liên kết sai"
+
+
+def test_wait_for_profile_or_card_continues_on_matched_link():
+    page = _meta_link_page(INTENDED)
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 2000)
+        == "card"
+    ), "màn liên kết đúng email thì bấm Continue rồi đi tiếp"
+    assert "Continue" in page.clicked, page.clicked
+
+
+def test_confirm_final_step_stops_on_mismatched_link():
+    page = _meta_link_page(OTHER)
+    try:
+        browser_helper._confirm_final_step(
+            page, timeout_seconds=5, email=INTENDED,
+            allow_create_new=False,
+        )
+    except RuntimeError as error:
+        message = str(error)
+    else:
+        raise AssertionError(
+            "màn liên kết sai email sau bước thẻ phải lỗi rõ"
+        )
+    assert "không khớp" in message, message
+    assert "Continue" not in page.clicked, (
+        "không được bấm Continue vào tài khoản cũ, "
+        f"đã bấm: {page.clicked}"
+    )
+
+
+def test_confirm_final_step_continues_on_matched_link():
+    page = _meta_link_page(INTENDED)
+    browser_helper._confirm_final_step(
+        page, timeout_seconds=5, email=INTENDED, allow_create_new=False
+    )
+    assert "Continue" in page.clicked, page.clicked
+    assert page.state == "card", "đúng email thì bấm Continue rồi đi tiếp"
+
+
 TESTS = [
     test_open_clean_page_uses_fresh_context,
     test_open_clean_page_same_proxy_still_clean,
@@ -428,6 +597,14 @@ TESTS = [
     test_chooser_clicks_intended_account,
     test_chooser_without_intended_email_returns_chooser,
     test_no_chooser_normal_flow_unaffected,
+    test_link_screen_detects_shown_email,
+    test_link_screen_match_clicks_continue,
+    test_link_screen_mismatch_login_stops_without_click,
+    test_link_screen_mismatch_register_clicks_create_new,
+    test_wait_for_profile_or_card_stops_on_mismatched_link,
+    test_wait_for_profile_or_card_continues_on_matched_link,
+    test_confirm_final_step_stops_on_mismatched_link,
+    test_confirm_final_step_continues_on_matched_link,
 ]
 
 
