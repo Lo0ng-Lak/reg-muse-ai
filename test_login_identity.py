@@ -81,6 +81,12 @@ class _FakeElement:
 
     def fill(self, value, timeout=None):
         self.value = value
+        filled = getattr(self.page, "filled", None)
+        if isinstance(filled, list):
+            filled.append(value)
+        return None
+
+    def press(self, key):
         return None
 
     def input_value(self, timeout=None):
@@ -103,6 +109,8 @@ class _FakeElement:
         # Tài khoản đã đăng nhập sẵn (after_link_continue =
         # "chat-ui") thì bấm Continue vào thẳng giao diện chat.
         if self.kind == "button" and self.name == "Continue":
+            if getattr(self.page, "hold_link_screen", False):
+                return
             if self.page.state == "meta-link-match":
                 if getattr(self.page, "after_link_continue", "card") == "chat-ui":
                     self.page.state = "chat-ui"
@@ -116,11 +124,52 @@ class _FakeElement:
                         "Enter your card number to continue with Muse."
                     )
         # Bấm Confirm trên form thẻ → bước thẻ hoàn tất, vào
-        # giao diện Muse.
+        # giao diện Muse. reject_next_confirm: lần Confirm đầu
+        # hiện hộp thoại "Unable to Add Card" (thẻ gắn quá nhiều
+        # tài khoản quảng cáo) thay vì vào Muse.
         if self.kind == "button" and self.name == "Confirm":
+            if (
+                getattr(self.page, "reject_next_confirm", False)
+                and self.page.state == "card"
+            ):
+                self.page.reject_next_confirm = False
+                self.page.body_text = (
+                    "Unable to Add Card\n"
+                    "Your card is associated with too many ad accounts. "
+                    "Please select a different payment method and try again.\n"
+                    "OK\nLearn more"
+                )
+                self.page.buttons.append(
+                    _FakeElement(self.page, "button", name="OK")
+                )
+                self.page.buttons.append(
+                    _FakeElement(self.page, "button", name="Learn more")
+                )
+                return
+            if (
+                getattr(self.page, "too_many_attempts_once", False)
+                and self.page.state == "card"
+            ):
+                self.page.too_many_attempts_once = False
+                self.page.restore_card_on_reload = True
+                self.page.body_text = (
+                    "Too many attempts\n"
+                    "Too many failed attempts. Please try again later.\n"
+                    "Confirm your age\n"
+                    "OK"
+                )
+                self.page.buttons.append(
+                    _FakeElement(self.page, "button", name="OK")
+                )
+                return
             if self.page.state == "card":
                 self.page.state = "muse"
                 self.page.body_text = "Welcome to Muse."
+        if self.kind == "button" and self.name == "OK":
+            if "unable to add card" in (self.page.body_text or "").lower():
+                self.page.body_text = (
+                    "Enter your card number to continue with Muse."
+                )
         if self.kind == "text" and self.name == "Create new account":
             if self.page.state == "meta-link-mismatch":
                 self.page.state = "profile"
@@ -260,8 +309,21 @@ class _FakePage:
     def goto(self, url, wait_until=None, timeout=None):
         self.url = url
 
+    def reload(self, wait_until=None, timeout=None):
+        self.reloads = getattr(self, "reloads", 0) + 1
+        if getattr(self, "restore_card_on_reload", False):
+            self.restore_card_on_reload = False
+            self.state = "card"
+            self.body_text = (
+                "Enter your card number to continue with Muse."
+            )
+
     def evaluate(self, script):
         self.evaluated.append(script)
+        if "data-muse-card-continue" in script:
+            if getattr(self, "card_button", None) is not None:
+                return "ok"
+            return ""
         if "getBoundingClientRect" in script:
             # Nút avatar ở góc dưới trái thanh bên.
             for button in self.buttons:
@@ -326,6 +388,9 @@ class _FakePage:
         return _FakeLocator([])
 
     def locator(self, selector):
+        if "data-muse-card-continue" in selector:
+            button = getattr(self, "card_button", None)
+            return _FakeLocator([button] if button is not None else [])
         if selector == "body":
             body = _FakeElement(self, "body", text=self.body_text)
             return _FakeLocator([body])
@@ -374,7 +439,9 @@ def _meta_link_page(shown_email, intended_email=INTENDED):
         "Continue\n"
         "Create new account"
     )
-    page.buttons.append(_FakeElement(page, "button", name="Continue"))
+    button = _FakeElement(page, "button", name="Continue")
+    page.buttons.append(button)
+    page.card_button = button
     return page
 
 
@@ -541,6 +608,69 @@ def test_link_screen_detects_shown_email():
     normal = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
     normal.body_text = "Finish creating your account — your birthday"
     assert browser_helper._meta_account_link_screen(normal) is None
+
+
+def test_facebook_page_signals_drop_proxy():
+    """Proxy đẩy sang facebook.com thì báo bỏ proxy và dừng,
+    không bấm form Log into Facebook."""
+    page = _FakePage(
+        _FakeContext(_FakeBrowser()),
+        "https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com",
+    )
+    page.body_text = "Log into Facebook\nEmail or mobile number\nPassword"
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._reject_facebook_proxy(page)
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải dừng khi ra Facebook")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("PROXY_FACEBOOK") for line in captured), captured
+    assert "Facebook" in message
+    assert page.clicked == []
+    muse = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    browser_helper._reject_facebook_proxy(muse)
+
+
+def test_link_screen_clicks_card_button_not_login_continue():
+    """Nút xanh trên thẻ đôi khi chưa có chữ. Continue của form
+    email vẫn còn trên trang — chỉ bấm nút trên thẻ, không bấm
+    Continue của form (nút đó kéo về màn đăng nhập)."""
+    page = _meta_link_page(INTENDED)
+    login_continue = _FakeElement(page, "button", name="Continue")
+    card = _FakeElement(page, "button", name="")
+    page.buttons = [login_continue]
+    page.card_button = card
+    assert browser_helper._click_linked_meta_continue(page) is True
+    assert page.clicked == ["button"], page.clicked
+
+
+def test_link_screen_continue_is_clicked_only_once():
+    page = _meta_link_page(INTENDED)
+    page.hold_link_screen = True
+    browser_helper._wait_for_profile_or_card(page, INTENDED, 1500)
+    assert page.clicked.count("Continue") == 1, page.clicked
+
+
+def test_wait_returns_checkpoint_before_card():
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://auth.meta.com/checkpoints/")
+    page.body_text = "Confirm you're human to use your account"
+    page.get_by_text = lambda text, exact=False: (
+        _FakeLocator([_FakeElement(page, "text", name=text, text=text)])
+        if text == "Confirm you're human" or (
+            hasattr(text, "search") and text.search(page.body_text)
+        )
+        else _FakeLocator([])
+    )
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 2000)
+        == "checkpoint"
+    )
 
 
 def test_link_screen_match_clicks_continue():
@@ -715,6 +845,101 @@ def test_do_card_step_if_present_card_form_fills_saved_card():
     assert page.state == "muse", "điền thẻ xong phải vào giao diện"
 
 
+def test_relogin_waitlist_drops_account_without_clicking():
+    # muse.ai/access "Join the waitlist": bỏ mail, không bấm nút.
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/access")
+    page.body_text = (
+        "Join the waitlist for Muse\n"
+        "Muse isn't available in your country or region yet.\n"
+        "Join waitlist"
+    )
+    page.buttons.append(_FakeElement(page, "button", name="Join waitlist"))
+    try:
+        browser_helper._open_signup_and_submit_email(
+            page, "muse111@flubai.com", abort_on_waitlist=True
+        )
+    except RuntimeError as error:
+        assert "waitlist" in str(error).lower(), error
+    else:
+        raise AssertionError("waitlist phải bỏ tài khoản")
+    assert page.clicked == [], page.clicked
+
+
+def test_too_many_attempts_reloads_and_fills_same_card():
+    # "Too many attempts" khi điền lần 2: bấm OK, tải lại,
+    # điền lại đúng thẻ đó. Không đánh dấu full.
+    storage._import_bulk_cards("4111111111111111|12/28|123|10001|Thẻ A")
+    entry = next(
+        item for item in storage._load_vault() if item["label"] == "Thẻ A"
+    )
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "card"
+    page.body_text = "Enter your card number to continue with Muse."
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    page.too_many_attempts_once = True
+    page.reloads = 0
+    assert browser_helper._do_card_step(page, entry["id"]) is True
+    assert page.reloads == 1, page.reloads
+    assert page.clicked.count("OK") == 1, page.clicked
+    assert page.clicked.count("Confirm") == 2, page.clicked
+    saved = next(
+        item for item in storage._load_vault() if item["id"] == entry["id"]
+    )
+    assert saved["used"] == 0 and saved["limit"] == 0, saved
+
+
+def test_already_full_card_is_not_typed_again():
+    # Thẻ đã full (luồng khác vừa đánh dấu): không gõ lại số
+    # thẻ đó, điền thẻ kế rồi bấm Confirm để đi tiếp.
+    storage._import_bulk_cards(
+        "4111111111111111|12/28|123|10001|Thẻ A\n"
+        "4222222222222222|11/29|456|10001|Thẻ B"
+    )
+    first = next(
+        entry for entry in storage._load_vault() if entry["label"] == "Thẻ A"
+    )
+    storage._mark_vault_card_full(first["id"])
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "card"
+    page.body_text = "Enter your card number to continue with Muse."
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    page.filled = []
+    assert browser_helper._do_card_step(page, first["id"]) is True
+    assert "4111111111111111" not in page.filled, page.filled
+    assert "4222222222222222" in page.filled, page.filled
+    assert "Confirm" in page.clicked, page.clicked
+
+
+def test_card_blocked_dialog_marks_full_and_fills_next():
+    # "Unable to Add Card" / too many ad accounts: bấm OK, đánh
+    # dấu thẻ đó full, điền thẻ kế. Không bấm Learn more.
+    storage._import_bulk_cards(
+        "4111111111111111|12/28|123|10001|Thẻ A\n"
+        "4222222222222222|11/29|456|10001|Thẻ B"
+    )
+    first = next(
+        entry for entry in storage._load_vault() if entry["label"] == "Thẻ A"
+    )
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "card"
+    page.body_text = "Enter your card number to continue with Muse."
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    page.reject_next_confirm = True
+    assert browser_helper._do_card_step(page, first["id"]) is True
+    assert page.clicked.count("OK") == 1, page.clicked
+    assert "Learn more" not in page.clicked, page.clicked
+    assert page.clicked.count("Confirm") == 2, page.clicked
+    assert page.fields["card number"].value == "4222222222222222"
+    full = next(
+        entry for entry in storage._load_vault() if entry["label"] == "Thẻ A"
+    )
+    other = next(
+        entry for entry in storage._load_vault() if entry["label"] == "Thẻ B"
+    )
+    assert full["limit"] > 0 and full["used"] >= full["limit"], full
+    assert other["used"] == 0, other
+
+
 TESTS = [
     test_open_clean_page_uses_fresh_context,
     test_open_clean_page_same_proxy_still_clean,
@@ -728,6 +953,10 @@ TESTS = [
     test_chooser_without_intended_email_returns_chooser,
     test_no_chooser_normal_flow_unaffected,
     test_link_screen_detects_shown_email,
+    test_facebook_page_signals_drop_proxy,
+    test_link_screen_clicks_card_button_not_login_continue,
+    test_link_screen_continue_is_clicked_only_once,
+    test_wait_returns_checkpoint_before_card,
     test_link_screen_match_clicks_continue,
     test_link_screen_mismatch_login_stops_without_click,
     test_link_screen_mismatch_register_clicks_create_new,
@@ -740,6 +969,10 @@ TESTS = [
     test_confirm_final_step_link_match_to_chat_ui_returns,
     test_do_card_step_if_present_chat_ui_skips,
     test_do_card_step_if_present_card_form_fills_saved_card,
+    test_relogin_waitlist_drops_account_without_clicking,
+    test_too_many_attempts_reloads_and_fills_same_card,
+    test_already_full_card_is_not_typed_again,
+    test_card_blocked_dialog_marks_full_and_fills_next,
 ]
 
 

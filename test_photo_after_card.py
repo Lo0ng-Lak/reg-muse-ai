@@ -330,6 +330,17 @@ def test_upload_refuses_chat_ui():
     assert page.uploaded_files == [], "không được đặt file vào ô chat"
 
 
+def test_disclosure_page_clicks_get_started():
+    # Sau bước thẻ Muse dừng ở muse.ai/access/disclosure
+    # ("A few things to know"). Phải bấm Get started rồi đi tiếp.
+    page = _FakePage(
+        "https://muse.ai/access/disclosure", state="gate"
+    )
+    browser_helper._confirm_final_step(page, timeout_seconds=5)
+    assert "Get started" in page.clicked, page.clicked
+    assert page.url == "https://muse.ai/", page.url
+
+
 def test_handle_skips_photo_in_muse_chat():
     page = _muse_chat_page()
     captured, orig = _capture_status()
@@ -356,6 +367,7 @@ TESTS = [
     test_selfie_page_not_visible_on_chat_ui,
     test_upload_refuses_chat_ui,
     test_handle_skips_photo_in_muse_chat,
+    test_disclosure_page_clicks_get_started,
 ]
 
 

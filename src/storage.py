@@ -12,6 +12,7 @@ import secrets
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 
 import keyring
 from openpyxl import Workbook, load_workbook
@@ -362,6 +363,7 @@ for _domain in mail_providers.TEMPMAIL_PLUS_DOMAINS:
     _PROVIDER_DOMAINS[_domain] = "tempmail.plus"
 _PROVIDER_DOMAINS["maildrop.cc"] = "maildrop.cc"
 _PROVIDER_DOMAINS["fldubai.com"] = "mail.tm"
+_PROVIDER_DOMAINS["flubai.com"] = "mail.tm"
 for _domain in (
     "guerrillamail.com",
     "guerrillamail.net",
@@ -372,6 +374,110 @@ for _domain in (
     "sharklasers.com",
 ):
     _PROVIDER_DOMAINS[_domain] = "guerrillamail"
+
+
+RELOGIN_HEADERS = ["Email", "Cookie đăng nhập"]
+
+
+def _relogin_accounts(excel_path):
+    """Các mail cần đăng nhập lại, đọc từ file Excel người dùng chọn.
+
+    Chỉ lấy cột email (Email Muse.ai, hoặc Email nếu file đặt tên
+    vậy) và mật khẩu hộp thư — mật khẩu chỉ để đọc OTP, không ghi
+    ra file xuất. Mail trùng thì giữ dòng đầu. File không có cột
+    email hoặc không đọc được thì trả về [].
+    """
+    try:
+        workbook = load_workbook(excel_path, read_only=True, data_only=True)
+    except Exception:
+        return []
+    try:
+        sheet = workbook.active
+        columns = {}
+        for cell in sheet[1]:
+            if isinstance(cell.value, str):
+                columns[cell.value.strip()] = cell.column
+        email_col = columns.get("Email Muse.ai") or columns.get("Email")
+        if not email_col:
+            return []
+        secret_col = columns.get("Mật khẩu hộp thư")
+        seen = set()
+        rows = []
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            email = ""
+            if row and len(row) >= email_col and row[email_col - 1]:
+                email = str(row[email_col - 1]).strip()
+            if "@" not in email:
+                continue
+            key = email.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            secret = ""
+            if secret_col and len(row) >= secret_col and row[secret_col - 1]:
+                secret = str(row[secret_col - 1]).strip()
+            rows.append(
+                {
+                    "email": email,
+                    "secret": secret,
+                    "provider": _provider_for_email(email),
+                }
+            )
+        return rows
+    finally:
+        workbook.close()
+
+
+def _write_relogin_cookie(output_path, email, cookie):
+    """Ghi một dòng Email + Cookie đăng nhập vào file xuất.
+
+    File chưa có thì tạo mới. Mail đã có trong file thì thay
+    cookie, không thêm dòng trùng. Không ghi mật khẩu hộp thư.
+    """
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        workbook = load_workbook(path)
+        sheet = workbook.active
+    else:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Cookie"
+        sheet.append(list(RELOGIN_HEADERS))
+    headers = {}
+    for cell in sheet[1]:
+        if isinstance(cell.value, str):
+            headers[cell.value.strip()] = cell.column
+    email_col = headers.get("Email")
+    cookie_col = headers.get("Cookie đăng nhập")
+    if email_col is None:
+        email_col = 1
+        sheet.cell(row=1, column=email_col).value = "Email"
+    if cookie_col is None:
+        cookie_col = 2 if email_col != 2 else 3
+        sheet.cell(row=1, column=cookie_col).value = "Cookie đăng nhập"
+    target = None
+    for row_index in range(2, (sheet.max_row or 1) + 1):
+        value = sheet.cell(row=row_index, column=email_col).value
+        if str(value or "").strip().lower() == email.strip().lower():
+            target = row_index
+            break
+    if target is None:
+        target = (sheet.max_row or 1) + 1
+    sheet.cell(row=target, column=email_col).value = email
+    sheet.cell(row=target, column=cookie_col).value = cookie
+    last_error = None
+    for _ in range(3):
+        try:
+            workbook.save(path)
+            return
+        except PermissionError as error:
+            last_error = error
+            time.sleep(1)
+    raise RuntimeError(
+        f"Không ghi được {path.name} (đang bị khóa, thường do đang "
+        "mở trong Excel). Đóng file đó rồi chạy lại mail này."
+    ) from last_error
 
 
 def _provider_for_email(email):
@@ -603,6 +709,40 @@ def _load_meta_excel_path_text():
 
 def _save_meta_excel_path_text(path):
     paths.data_file(META_EXCEL_PATH_FILE).write_text(
+        path.strip() + "\n", encoding="utf-8"
+    )
+
+
+def _load_relogin_source_path():
+    try:
+        return (
+            paths.data_file("relogin_source.txt")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def _save_relogin_source_path(path):
+    paths.data_file("relogin_source.txt").write_text(
+        path.strip() + "\n", encoding="utf-8"
+    )
+
+
+def _load_relogin_output_path():
+    try:
+        return (
+            paths.data_file("relogin_output.txt")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def _save_relogin_output_path(path):
+    paths.data_file("relogin_output.txt").write_text(
         path.strip() + "\n", encoding="utf-8"
     )
 
@@ -1463,11 +1603,51 @@ def _save_vault_card_success_count(card_id, count):
         entries = _load_vault_index()
         for entry in entries:
             if entry["id"] == card_id:
-                entry["used"] = max(0, int(count))
+                try:
+                    limit = int(entry.get("limit") or 0)
+                    used = int(entry.get("used") or 0)
+                except (TypeError, ValueError):
+                    limit, used = 0, 0
+                new_used = max(0, int(count))
+                # Thẻ đã full (luồng khác vừa đánh dấu) thì không
+                # ghi đè bằng số lần dùng cũ hơn.
+                if limit > 0 and used >= limit and new_used < used:
+                    return
+                entry["used"] = new_used
                 _save_vault_index(entries)
                 return
     except Exception:
         pass
+
+
+def _mark_vault_card_full(card_id):
+    """Thẻ bị Meta từ chối vì gắn quá nhiều tài khoản quảng cáo.
+
+    Đặt số lần dùng bằng giới hạn để mọi lượt sau bỏ qua thẻ
+    này. Giới hạn 0 (không giới hạn) được đặt thành 1 và dùng
+    hết 1 — danh mục kho chỉ hiểu "full" là used >= limit > 0.
+    Trả về True khi ghi được. Raise khi không ghi được file.
+    """
+    entries = _load_vault_index()
+    for entry in entries:
+        if entry["id"] != card_id:
+            continue
+        try:
+            limit = int(entry.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        try:
+            used = int(entry.get("used") or 0)
+        except (TypeError, ValueError):
+            used = 0
+        if limit <= 0:
+            limit = max(used, 1)
+        limit = max(1, min(limit, 100))
+        entry["limit"] = limit
+        entry["used"] = max(used, limit)
+        _save_vault_index(entries)
+        return True
+    return False
 
 
 def _delete_vault_card(card_id):

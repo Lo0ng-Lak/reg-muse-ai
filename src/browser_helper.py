@@ -184,6 +184,7 @@ def _classify_after_profile(page, timeout_seconds=45):
     while time.monotonic() < deadline:
         if page.is_closed():
             return "unknown"
+        _reject_facebook_proxy(page)
         try:
             text = page.locator("body").inner_text(timeout=3000).lower()
         except Exception:
@@ -198,13 +199,113 @@ def _classify_after_profile(page, timeout_seconds=45):
     return "unknown"
 
 
+def _card_add_blocked(page):
+    """Hộp thoại "Unable to Add Card" — thẻ đã gắn quá nhiều
+    tài khoản quảng cáo. Hộp thoại nằm đè lên form thẻ, nên
+    chữ "payment method" vẫn còn trên trang: phải nhận hộp
+    thoại này trước khi kết luận bước thẻ xong hay chưa."""
+    try:
+        text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        return False
+    return (
+        "unable to add card" in text or "too many ad accounts" in text
+    )
+
+
+def _dismiss_card_blocked_dialog(page):
+    """Bấm đúng nút OK. Không bấm Learn more."""
+    try:
+        button = page.get_by_role("button", name="OK", exact=True)
+    except Exception:
+        button = None
+    target = _first_visible(button) if button is not None else None
+    if target is None:
+        _status("Không thấy nút OK trên hộp thoại Unable to Add Card.")
+        return False
+    try:
+        target.click(timeout=5000)
+    except Exception as error:
+        _status(f"Không bấm được OK: {_short_error(error)}")
+        return False
+    _status("Đã bấm OK — không bấm Learn more.")
+    try:
+        page.wait_for_timeout(600)
+    except Exception:
+        pass
+    return True
+
+
+def _card_id_for_step(card_id):
+    """Id thẻ đang điền, cùng thứ tự ưu tiên với _saved_card."""
+    if card_id:
+        return card_id
+    active = _vault_active_card_id()
+    if active and storage._load_vault_card(active):
+        return active
+    for vault_id in _vault_card_ids():
+        if storage._load_vault_card(vault_id):
+            return vault_id
+    return ""
+
+
+def _card_is_full(card_id):
+    """Thẻ đã bị đánh dấu full trên kho (kể cả do luồng khác
+    vừa ghi). Đọc lại file mỗi lần — bộ nhớ của helper không
+    biết các luồng kia vừa làm gì."""
+    if not card_id:
+        return False
+    try:
+        entries = storage._load_vault()
+    except Exception:
+        return False
+    for entry in entries:
+        if entry.get("id") != card_id:
+            continue
+        try:
+            limit = int(entry.get("limit") or 0)
+            used = int(entry.get("used") or 0)
+        except (TypeError, ValueError):
+            return False
+        return limit > 0 and used >= limit
+    return False
+
+
+def _next_open_card_id(skip_ids):
+    """Thẻ kế trong kho còn dùng được (chưa full, chưa thử ở
+    bước thẻ này). "" khi kho hết thẻ."""
+    try:
+        entries = storage._load_vault()
+    except Exception:
+        return ""
+    for entry in entries:
+        cid = entry.get("id") or ""
+        if not cid or cid in skip_ids:
+            continue
+        try:
+            limit = int(entry.get("limit") or 0)
+            used = int(entry.get("used") or 0)
+        except (TypeError, ValueError):
+            limit, used = 0, 0
+        if limit > 0 and used >= limit:
+            continue
+        if storage._load_vault_card(cid):
+            return cid
+    return ""
+
+
 def _wait_for_card_step_done(page, timeout_seconds=240):
     """Chờ người dùng tự nhập thẻ + ZIP US trong cửa sổ Chromium.
 
     Tool không nhận và không tự điền thông tin thẻ. Bước thẻ coi như
     xong khi các dấu hiệu của form thẻ biến mất khỏi trang qua hai lần
     kiểm tra liên tiếp (tránh tính nhầm lúc trang đang chuyển cảnh).
-    Trả về "done", "waitlist", "closed" hoặc "timeout".
+    Hộp thoại "Unable to Add Card" trả về "rejected" ngay — form
+    thẻ vẫn nằm phía sau nên không được tính là xong.
+    "Too many attempts" trả về "retry": tải lại trang rồi điền
+    lại chính thẻ đó, không đánh dấu full.
+    Trả về "done", "retry", "rejected", "waitlist", "closed"
+    hoặc "timeout".
     """
     waitlist_markers = ("join the waitlist", "available in your country")
     card_markers = (
@@ -223,6 +324,16 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
             text = page.locator("body").inner_text(timeout=3000).lower()
         except Exception:
             text = ""
+        if (
+            "too many attempts" in text
+            or "too many failed attempts" in text
+        ):
+            return "retry"
+        if (
+            "unable to add card" in text
+            or "too many ad accounts" in text
+        ):
+            return "rejected"
         if any(marker in text for marker in waitlist_markers):
             return "waitlist"
         if text and not any(marker in text for marker in card_markers):
@@ -257,37 +368,118 @@ def _do_card_step(page, card_id):
     """Bước nhập thẻ sau khi đã đăng nhập (chế độ tự động).
 
     Điền thẻ đã lưu (hoặc chờ nhập tay tối đa 4 phút) rồi chờ
-    bước thẻ hoàn tất. Trả về True khi xong. Ném RuntimeError
-    khi form thẻ hiện mà không hoàn tất được — như luồng cũ.
+    bước thẻ hoàn tất. Meta báo "Unable to Add Card" / quá
+    nhiều tài khoản quảng cáo thì bấm OK, đánh dấu thẻ đó
+    full và điền thẻ kế trong kho. Trả về True khi một thẻ
+    được chấp nhận. Ném RuntimeError khi không hoàn tất được.
     """
-    card = _saved_card(card_id)
-    auto_filled = False
-    if card:
-        try:
+    current = _card_id_for_step(card_id)
+    tried = set()
+    reloads = 0
+    while True:
+        if current and _card_is_full(current):
+            tried.add(current)
+            nxt = _next_open_card_id(tried)
+            if not nxt:
+                raise RuntimeError(
+                    "Thẻ đã full và kho không còn thẻ khác."
+                )
+            _status(
+                "Thẻ này đã full — không nhập lại, chuyển sang thẻ khác."
+            )
+            _status(f"CARD_SWITCH: {nxt}")
+            current = nxt
+            continue
+        card = _saved_card(current) if current else None
+        auto_filled = False
+        if card:
+            if current:
+                tried.add(current)
             _fill_card_form(page, card)
             auto_filled = True
-        except Exception as error:
-            _status(
-                "Tự điền thẻ không xong ("
-                + _short_error(error)
-                + ") — chuyển sang chờ bạn nhập tay."
+        if auto_filled:
+            card_outcome = _wait_for_card_step_done(
+                page, timeout_seconds=120
             )
-    if auto_filled:
-        card_outcome = _wait_for_card_step_done(page, timeout_seconds=120)
-    else:
-        _status(
-            "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US "
-            "trong cửa sổ Chromium. Tool chờ tối đa 4 phút; "
-            "thẻ được chấp nhận thì mới lưu tài khoản."
-        )
-        card_outcome = _wait_for_card_step_done(page)
-    if card_outcome != "done":
-        raise RuntimeError(
-            "Chưa hoàn tất bước nhập thẻ "
-            f"(kết quả chờ: {card_outcome}) — tài khoản "
-            "không được lưu."
-        )
-    return True
+        else:
+            _status(
+                "Đã tới bước nhập thẻ — hãy nhập thẻ và ZIP US "
+                "trong cửa sổ Chromium. Tool chờ tối đa 4 phút; "
+                "thẻ được chấp nhận thì mới lưu tài khoản."
+            )
+            card_outcome = _wait_for_card_step_done(page)
+        if card_outcome == "retry":
+            if reloads >= 2:
+                raise RuntimeError(
+                    "Too many attempts vẫn còn sau khi tải lại "
+                    "— bỏ bước thẻ của tài khoản này."
+                )
+            _dismiss_card_blocked_dialog(page)
+            reloads += 1
+            _status(
+                "Too many attempts — bấm OK, tải lại trang "
+                "và điền lại thẻ."
+            )
+            try:
+                page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    "Không tải lại được trang thẻ: "
+                    + _short_error(error)
+                ) from error
+            form_deadline = time.monotonic() + 30
+            while time.monotonic() < form_deadline:
+                if page.is_closed():
+                    raise RuntimeError(
+                        "Cửa sổ đã đóng sau khi tải lại trang thẻ."
+                    )
+                if _card_form_visible(page):
+                    break
+                page.wait_for_timeout(500)
+            else:
+                raise RuntimeError(
+                    "Tải lại xong không thấy form thẻ để điền lại."
+                )
+            continue
+        if card_outcome == "rejected":
+            _dismiss_card_blocked_dialog(page)
+            if current:
+                try:
+                    storage._mark_vault_card_full(current)
+                except Exception as error:
+                    _status(
+                        "Không ghi được trạng thái full của thẻ: "
+                        + _short_error(error)
+                    )
+                _status(f"CARD_FULL: {current}")
+            _status(
+                "Thẻ bị quá nhiều tài khoản quảng cáo — "
+                "đã bấm OK, đánh dấu full, nhập thẻ kế."
+            )
+            if _card_add_blocked(page):
+                raise RuntimeError(
+                    "Hộp thoại Unable to Add Card vẫn còn sau "
+                    "khi bấm OK — không nhập thẻ kế lên hộp thoại này."
+                )
+            nxt = _next_open_card_id(tried)
+            if not nxt:
+                raise RuntimeError(
+                    "Thẻ bị quá nhiều tài khoản quảng cáo và "
+                    "kho không còn thẻ khác."
+                )
+            _status(f"CARD_SWITCH: {nxt}")
+            current = nxt
+            continue
+        if card_outcome != "done":
+            raise RuntimeError(
+                "Chưa hoàn tất bước nhập thẻ "
+                f"(kết quả chờ: {card_outcome}) — tài khoản "
+                "không được lưu."
+            )
+        return True
 
 
 def _do_card_step_if_present(page, card_id, settle_seconds=10):
@@ -542,16 +734,31 @@ def _fill_card_form(page, card):
     ):
         field = page.get_by_placeholder(placeholder).first
         field.wait_for(state="visible", timeout=15000)
+        field.click(timeout=5000)
+        try:
+            field.press("Control+a")
+            field.press("Backspace")
+        except Exception:
+            pass
+        field.fill("")
         field.fill(value)
         page.wait_for_timeout(250)
     entered = digits(
         page.get_by_placeholder("Card number").first.input_value()
     )
     if entered != number:
+        field = page.get_by_placeholder("Card number").first
+        try:
+            field.type(number, delay=20)
+        except Exception:
+            field.fill(number)
+        entered = digits(field.input_value())
+    if entered != number:
         raise RuntimeError("Số thẻ trong form không khớp với thẻ đã lưu.")
-    _status("Đã điền thẻ — bấm Confirm.")
-    confirm = page.get_by_role("button", name="Confirm", exact=True)
-    _click_when_ready(page, confirm, "Confirm")
+    if not _click_card_submit(page):
+        raise RuntimeError(
+            "Đã nhập thẻ nhưng không bấm được nút để đi tiếp."
+        )
 
 
 def _in_muse_interface(page):
@@ -561,6 +768,11 @@ def _in_muse_interface(page):
     except Exception:
         return False
     if "muse.ai" not in url:
+        return False
+    # muse.ai/access và /access/disclosure vẫn là cổng
+    # (waitlist hoặc "A few things to know"), chưa phải
+    # giao diện chat.
+    if "/access" in url:
         return False
     return not any(
         part in url
@@ -574,6 +786,71 @@ def _in_muse_interface(page):
             "welcome",
         )
     )
+
+
+def _disclosure_gate(page):
+    """Màn "A few things to know" (muse.ai/access/disclosure)
+    với nút Get started. Hiện sau bước thẻ. Chưa phải giao diện."""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    if "/access/disclosure" in url:
+        return True
+    try:
+        text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        return False
+    return "a few things to know" in text
+
+
+def _click_get_started(page):
+    """Bấm Get started trên cổng disclosure. Không bấm nút khác."""
+    for name in ("Get started", "Bắt đầu"):
+        target = None
+        try:
+            target = _first_visible(
+                page.get_by_role("button", name=name, exact=True)
+            )
+        except Exception:
+            target = None
+        if target is None:
+            try:
+                target = _first_visible(
+                    page.get_by_text(name, exact=True)
+                )
+            except Exception:
+                target = None
+        if target is None:
+            continue
+        try:
+            target.click(timeout=5000)
+        except Exception:
+            continue
+        _status(f"Đã bấm '{name}' để vào Muse.")
+        return True
+    try:
+        clicked = bool(
+            page.evaluate(
+                """() => {
+                    const nodes = [...document.querySelectorAll(
+                        'button, a, [role="button"]'
+                    )];
+                    const el = nodes.find((node) =>
+                        (node.innerText || "").replace(/\\s+/g, " ").trim()
+                        === "Get started"
+                    );
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                }"""
+            )
+        )
+    except Exception:
+        clicked = False
+    if clicked:
+        _status("Đã bấm 'Get started' để vào Muse.")
+    return clicked
 
 
 def _confirm_final_step(page, timeout_seconds=30, email=None,
@@ -595,10 +872,29 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
     clicks = 0
     last_click = None
     interface_since = None
+    link_clicked = False
     while time.monotonic() < deadline:
         if page.is_closed():
             return
+        _reject_facebook_proxy(page)
+        if _disclosure_gate(page):
+            if clicks >= 3:
+                return
+            if _click_get_started(page):
+                clicks += 1
+                page.wait_for_timeout(1500)
+            else:
+                page.wait_for_timeout(1000)
+            continue
+        if link_clicked and _meta_account_link_screen(page) is not None:
+            page.wait_for_timeout(1000)
+            continue
         link = _handle_meta_account_link(page, email, allow_create_new)
+        if link == "absent" and _email_login_form_visible(page):
+            _status(
+                "Đang ở form nhập email — không bấm Continue thêm."
+            )
+            return
         if link == "stop":
             raise RuntimeError(
                 "Màn 'Continue with your Meta Account' hiện ra mà "
@@ -606,10 +902,13 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
                 "thay vì đăng nhập tài khoản cũ."
             )
         if link in ("continue", "create-new"):
+            if link == "continue":
+                link_clicked = True
             page.wait_for_timeout(1000)
             # Bấm Continue ở màn liên kết mà tài khoản đã đăng
             # nhập sẵn thì vào thẳng giao diện Muse — không còn
-            # nút xác nhận cuối nào để bấm nữa.
+            # nút xác nhận cuối nào để bấm nữa. Không bấm lần
+            # hai trên cùng thẻ: lần hai kéo về form đăng nhập.
             if _is_muse_chat_ui(page):
                 return
             continue
@@ -940,6 +1239,8 @@ def _handle_photo_after_card(page, timeout_seconds=180, settle_seconds=10):
     while time.monotonic() < deadline:
         if page.is_closed():
             return "closed"
+        if _disclosure_gate(page):
+            return "none"
         decision = _photo_after_card_decision(page)
         if decision == "skip":
             if saw_photo:
@@ -2587,24 +2888,19 @@ def _handle_meta_account_link(page, email, allow_create_new, body_text=None):
     if shown.strip().lower() == (email or "").strip().lower():
         _status(
             "Màn liên kết tài khoản Meta: email hiện ra "
-            f"({shown}) khớp email cần đăng nhập — bấm Continue."
+            f"({shown}) khớp tài khoản Meta đã đăng ký — bấm Continue."
         )
-        for locator in (
-            page.get_by_role("button", name="Continue", exact=True),
-            page.get_by_text("Continue", exact=True),
-        ):
-            try:
-                target = _first_visible(locator)
-                if target is not None:
-                    target.click(timeout=5000)
-                    return "continue"
-            except Exception:
-                continue
+        if _click_linked_meta_continue(page):
+            _status(
+                "Đã bấm Continue trên thẻ Meta — không bấm "
+                "Create new account."
+            )
+            return "continue"
         return "stop"
     _status(
         "Màn liên kết tài khoản Meta: email hiện ra "
         f"({shown}) KHÔNG khớp email cần đăng nhập — không bấm "
-        "Continue."
+        "Continue, cũng không bấm Create new account."
     )
     if allow_create_new:
         try:
@@ -2620,6 +2916,176 @@ def _handle_meta_account_link(page, email, allow_create_new, body_text=None):
         except Exception:
             pass
     return "stop"
+
+
+def _email_login_form_visible(page):
+    """Đúng màn "Log in or create an account".
+
+    Chỉ nhận khi tiêu đề đó đang hiện. Ô email còn trong trang
+    không tính — thẻ Meta và bước sau vẫn có thể còn ô đó.
+    Bấm Continue thêm một lần trên đúng màn này làm Muse quay
+    về form đăng nhập.
+    """
+    try:
+        heading = page.get_by_text(
+            "Log in or create an account", exact=True
+        )
+        return bool(heading.count() and heading.first.is_visible())
+    except Exception:
+        return False
+
+
+_CARD_CONTINUE_JS = r"""
+() => {
+  const norm = (value) => (value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  document.querySelectorAll("[data-muse-card-continue]").forEach((el) => {
+    el.removeAttribute("data-muse-card-continue");
+  });
+  const all = [...document.querySelectorAll("body *")];
+  const marker = all.find((el) => {
+    const direct = [...el.childNodes]
+      .filter((node) => node.nodeType === 3)
+      .map((node) => node.textContent || "")
+      .join("");
+    if (/will have access to muse/i.test(direct) && direct.trim().length < 80) {
+      return true;
+    }
+    const inner = el.innerText || "";
+    return /will have access to muse/i.test(inner) && inner.length < 80;
+  });
+  if (!marker) return "";
+  const createNew = all.find((el) => {
+    const direct = norm(
+      [...el.childNodes]
+        .filter((node) => node.nodeType === 3)
+        .map((node) => node.textContent || "")
+        .join("")
+    );
+    return direct === "create new account";
+  });
+  const usable = (el) => {
+    if (createNew && (el === createNew || el.contains(createNew))) return false;
+    const label = norm(el.innerText || el.getAttribute("aria-label") || "");
+    if (label.includes("create new") || label.includes("new account")) return false;
+    if (label && label !== "continue") return false;
+    if (/will have access to muse/i.test(el.innerText || "") && (el.innerText || "").length > 40) {
+      return false;
+    }
+    const box = el.getBoundingClientRect();
+    if (box.width < 100 || box.height < 28 || box.height > 80) return false;
+    if (box.bottom <= 0 || box.top >= window.innerHeight) return false;
+    if (createNew) {
+      const linkBox = createNew.getBoundingClientRect();
+      if (linkBox.height > 0 && box.top >= linkBox.top - 2) return false;
+    }
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+    return true;
+  };
+  let node = marker.parentElement;
+  for (let depth = 0; depth < 12 && node && node !== document.body; depth += 1) {
+    const blob = norm(node.innerText);
+    if (blob.includes("log in or create an account")) break;
+    const buttons = [...node.querySelectorAll('button, [role="button"], a')].filter(usable);
+    let picked = buttons.sort(
+      (left, right) => right.getBoundingClientRect().width - left.getBoundingClientRect().width
+    )[0];
+    if (!picked && depth <= 6) {
+      const blocks = [...node.querySelectorAll("div")].filter((el) => {
+        if (!usable(el)) return false;
+        const bg = getComputedStyle(el).backgroundColor || "";
+        const match = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (!match) return false;
+        const red = Number(match[1]);
+        const green = Number(match[2]);
+        const blue = Number(match[3]);
+        const alpha = match[4] === undefined ? 1 : Number(match[4]);
+        if (alpha < 0.4) return false;
+        if (red > 245 && green > 245 && blue > 245) return false;
+        return blue > red + 20 && blue > 70;
+      });
+      picked = blocks.sort(
+        (left, right) => right.getBoundingClientRect().width - left.getBoundingClientRect().width
+      )[0];
+    }
+    if (picked) {
+      picked.setAttribute("data-muse-card-continue", "1");
+      return "ok";
+    }
+    node = node.parentElement;
+  }
+  return "";
+}
+"""
+
+
+def _email_field_visible(page):
+    """Ô "Mobile number or email" của form đăng nhập còn hiện không.
+
+    Nút Continue của ô này còn trong trang thì bấm nhầm sẽ kéo
+    Muse về đúng màn đăng nhập. Bấm tay trên thẻ Meta thì không
+    đụng nút đó.
+    """
+    try:
+        field = page.get_by_role(
+            "textbox", name="Mobile number or email"
+        )
+        return bool(field.count() and field.first.is_visible())
+    except Exception:
+        return False
+
+
+def _click_linked_meta_continue(page, timeout_seconds=8):
+    """Bấm một lần nút xanh trên thẻ "Continue with your Meta Account".
+
+    Một lần là đủ: trang sang xác minh, hoặc thẳng tới bước thẻ.
+    Nút xanh đôi khi chưa có chữ — vẫn là nút nằm trên dòng
+    "Create new account", cùng khối với "will have access to Muse".
+    Không bấm "Create new account". Không bấm Continue của form
+    "Mobile number or email" và không bấm nút trống đầu trang
+    (nút Back): hai nút đó kéo về màn đăng nhập, bấm tay trên
+    nút xanh thì không bị.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        try:
+            marked = page.evaluate(_CARD_CONTINUE_JS)
+        except Exception:
+            marked = ""
+        if marked == "ok":
+            try:
+                target = page.locator("[data-muse-card-continue='1']")
+                if target.count() and target.first.is_visible():
+                    target.first.click(timeout=5000)
+                    return True
+            except Exception:
+                pass
+            page.wait_for_timeout(300)
+            continue
+        # Chưa đánh dấu được nút trên thẻ. Form đăng nhập còn
+        # trên trang thì không bấm Continue của form đó — bấm
+        # nhầm là quay về màn "Mobile number or email".
+        if _email_login_form_visible(page) or _email_field_visible(page):
+            page.wait_for_timeout(300)
+            continue
+        try:
+            named = page.get_by_role(
+                "button", name="Continue", exact=True
+            )
+            if named.count() == 1:
+                button = named.first
+                if button.is_visible() and button.is_enabled():
+                    label = (button.inner_text(timeout=500) or "").strip().lower()
+                    if "create new" not in label and "new account" not in label:
+                        button.click(timeout=5000)
+                        return True
+        except Exception:
+            pass
+        page.wait_for_timeout(300)
+    return False
 
 
 def _account_chooser_visible(body_text):
@@ -2674,33 +3140,57 @@ def _wait_for_profile_or_card(page, email=None, timeout_ms=15000,
         "payment method",
     )
     deadline = time.monotonic() + timeout_ms / 1000
+    link_clicked = False
     while time.monotonic() < deadline:
         if page.is_closed():
             return None
-        # Đã vào thẳng giao diện chat Muse (bấm Continue ở màn
-        # liên kết mà tài khoản đã đăng nhập sẵn) thì dừng ngay:
-        # không còn form hồ sơ hay form thẻ nào để chờ nữa.
-        if _is_muse_chat_ui(page):
-            return "logged-in"
-        if _profile_form_present(page):
-            return "profile"
+        _reject_facebook_proxy(page)
         try:
             body = page.locator("body").inner_text(timeout=2000).lower()
         except Exception:
             body = ""
-        # Màn "Continue with your Meta Account": Meta đã liên kết
-        # sẵn tài khoản theo email/thông tin (xoá cookie không
-        # xoá được) — phải so khớp email TRƯỚC khi bấm gì.
+        # Đã bấm Continue trên thẻ Meta một lần rồi mà màn vẫn
+        # còn: chờ trang chuyển, không bấm lần 2. Lần 2 làm
+        # Muse quay về form "Mobile number or email".
+        if link_clicked and _meta_account_link_screen(
+            page, body_text=body
+        ) is not None:
+            page.wait_for_timeout(1000)
+            continue
+        # Màn "Continue with your Meta Account": Meta đã đăng ký
+        # trước nên màn này là đường đăng nhập. Khớp email thì
+        # bấm Continue, rồi mới tới xác minh / ảnh / thẻ.
         link = _handle_meta_account_link(
             page, email, allow_create_new, body_text=body
         )
+        if link == "continue":
+            link_clicked = True
         if link in ("continue", "create-new"):
             page.wait_for_timeout(1000)
             continue
         if link == "stop":
             return "chooser"
+        if _email_login_form_visible(page):
+            _status(
+                "Đang ở form nhập email — không bấm Continue nữa."
+            )
+            return "email-form"
+        # Sau Continue: "Confirm you're human" hoặc trang ảnh
+        # phải xử lý trước bước thẻ.
+        try:
+            if _meta_checkpoint_visible(page) or _meta_selfie_page_visible(page):
+                return "checkpoint"
+        except Exception:
+            pass
+        if _profile_form_present(page):
+            return "profile"
         if any(marker in body for marker in card_markers):
             return "card"
+        # Đã vào thẳng giao diện chat thì không còn form thẻ.
+        # Chỉ kết luận vậy khi không còn màn liên kết, xác minh
+        # hay form thẻ.
+        if _is_muse_chat_ui(page):
+            return "logged-in"
         if _account_chooser_visible(body):
             # Màn chọn tài khoản: chỉ bấm khi thấy đúng email
             # cần đăng nhập; không thấy thì dừng ngay, không bấm
@@ -2761,6 +3251,7 @@ def _handle_login_checkpoint(page, timeout_seconds=240):
     while time.monotonic() < deadline:
         if page.is_closed():
             return False
+        _reject_facebook_proxy(page)
         checkpoint = _meta_checkpoint_visible(page)
         selfie = _meta_selfie_page_visible(page)
         if not checkpoint and not selfie:
@@ -2926,7 +3417,75 @@ def _try_fill_profile_form(page, timeout_ms=20000):
         return None
 
 
-def _open_signup_and_submit_email(page, email):
+def _on_facebook(page):
+    """Trang hiện tại có phải facebook.com không."""
+    try:
+        host = (urllib.parse.urlparse(page.url).hostname or "").lower()
+    except Exception:
+        return False
+    return host == "facebook.com" or host.endswith(".facebook.com")
+
+
+def _reject_facebook_proxy(page):
+    """Proxy nào đẩy sang facebook.com thì bỏ proxy đó luôn.
+
+    Không điền form "Log into Facebook", không mở lại Muse
+    trên cùng proxy. In PROXY_FACEBOOK để app chính đưa proxy
+    vào kho lỗi và không dùng lại. Rồi dừng lượt này.
+    """
+    if not _on_facebook(page):
+        return
+    _status(
+        "PROXY_FACEBOOK: proxy này đẩy sang Facebook "
+        "(facebook.com) — bỏ proxy, không dùng lại."
+    )
+    raise RuntimeError(
+        "Proxy này đẩy sang Facebook. Đã bỏ proxy, "
+        "không đăng nhập trên facebook.com."
+    )
+
+
+def _muse_waitlist_visible(page):
+    """Trang "Join the waitlist" (muse.ai/access): Muse không
+    mở ở khu vực của IP này."""
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        url = ""
+    if "muse.ai" in url:
+        path = url.split("muse.ai", 1)[-1]
+        path = path.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        # Đúng trang waitlist (muse.ai/access). Không tính
+        # /access/disclosure — đó là cổng "Get started".
+        if path == "/access":
+            return True
+    try:
+        text = page.locator("body").inner_text(timeout=2000).lower()
+    except Exception:
+        return False
+    return (
+        "join the waitlist" in text
+        or "join waitlist" in text
+        or "isn't available in your country" in text
+        or "isn’t available in your country" in text
+        or "available in your country" in text
+    )
+
+
+def _raise_if_muse_waitlist(page):
+    """Gặp waitlist thì dừng mail này ngay. Không bấm Join waitlist."""
+    if not _muse_waitlist_visible(page):
+        return
+    _status(
+        "Muse hiện Join the waitlist — khu vực này không đăng nhập "
+        "được, bỏ tài khoản này, không bấm Join waitlist."
+    )
+    raise RuntimeError(
+        "Join the waitlist — bỏ tài khoản này."
+    )
+
+
+def _open_signup_and_submit_email(page, email, abort_on_waitlist=False):
     """Mở trang đăng ký, chờ form HIỆN HẲN rồi mới điền email.
 
     Không điền ngay khi DOM vừa có ô nhập: trang qua proxy nạp
@@ -2964,7 +3523,10 @@ def _open_signup_and_submit_email(page, email):
         raise RuntimeError(
             f"{detail} ({_short_error(error)})"
         ) from error
-    _status("Đã mở trang Muse.ai — chờ form hiển thị đầy đủ...")
+    _reject_facebook_proxy(page)
+    if abort_on_waitlist:
+        _raise_if_muse_waitlist(page)
+    _status("Đã mở trang https://muse.ai/ — chờ form hiển thị đầy đủ...")
     email_field = page.get_by_role(
         "textbox", name="Mobile number or email"
     )
@@ -2978,6 +3540,8 @@ def _open_signup_and_submit_email(page, email):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi form hiện."
             )
+        if abort_on_waitlist:
+            _raise_if_muse_waitlist(page)
         if _locator_visible(login_button):
             _click_when_ready(page, login_button, "Log in")
             break
@@ -3381,11 +3945,20 @@ def _meta_wait_visible(page, locator, label):
 def _meta_click_button(page, names):
     """Bấm nút đầu tiên trong danh sách đang hiện và bấm được.
 
+    Không bấm khi đang ở form nhập email đầu tiên. Nút Continue
+    của form đó, bấm thêm một lần, kéo Muse về màn
+    "Log in or create an account".
+
     Trả về tên nút đã bấm, None khi không có nút nào. Dùng cho
     các bước sau CAPTCHA/selfie — nhãn nút tiếp theo chưa biết
     chắc nên thử lần lượt. Không chờ lâu từng tên: tên nào không
     có nút hiện thì bỏ qua ngay. Ưu tiên nút trong khung hình.
     """
+    if (
+        _email_login_form_visible(page)
+        and not _meta_checkpoint_visible(page)
+    ):
+        return None
     for name in names:
         button = page.get_by_role("button", name=name, exact=True)
         target = _first_in_viewport(page, button) or _first_visible(
@@ -4333,6 +4906,83 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
     _status("Meta: đã đăng ký xong tài khoản Meta.")
 
 
+def _run_muse_relogin(page, email, mailbox, existing_ids):
+    """Đăng nhập lại một mail Muse đã có: OTP rồi lấy cookie.
+
+    Không nộp thẻ, không quy đổi mã mời, không tạo tài khoản
+    mới. Bấm Continue một lần trên form email, chờ OTP từ đúng
+    hộp thư của mail đó, rồi lấy cookie phiên. Không có cookie
+    thì lỗi — tài khoản không được ghi ra file xuất. Gặp
+    "Join the waitlist" thì bỏ mail này ngay, không bấm nút.
+    """
+    continue_button = _open_signup_and_submit_email(
+        page, email, abort_on_waitlist=True
+    )
+    _click_when_ready(page, continue_button, "Continue")
+    try:
+        existing_ids = _get_message_ids(mailbox)
+    except Exception:
+        pass
+    _status(
+        "Đã gửi email, đang chờ mã OTP từ "
+        f"{mailbox['provider']}..."
+    )
+    code = _wait_for_verification_code(page, mailbox, existing_ids)
+    _status("Đã nhận mã OTP, đang điền...")
+    _fill_verification_code(page, code)
+    page.wait_for_timeout(UI_SETTLE_MS)
+    _submit_meta_login_code(page)
+    link_clicked = False
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError(
+                "Cửa sổ Chromium đã đóng trước khi lấy được cookie."
+            )
+        _reject_facebook_proxy(page)
+        _raise_if_muse_waitlist(page)
+        if link_clicked and _meta_account_link_screen(page) is not None:
+            page.wait_for_timeout(1000)
+            continue
+        link = _handle_meta_account_link(
+            page, email, allow_create_new=False
+        )
+        if link == "stop":
+            raise RuntimeError(
+                "Màn liên kết Meta không khớp mail cần đăng nhập "
+                "— không bấm Continue, không lấy cookie."
+            )
+        if link == "continue":
+            link_clicked = True
+        cookie = _session_cookie_header(page)
+        if cookie and (
+            _in_muse_interface(page) or _app_shell_visible(page)
+        ):
+            break
+        if _card_form_visible(page):
+            if cookie:
+                break
+            raise RuntimeError(
+                "Đăng nhập xong Muse đòi nhập thẻ — tab đăng nhập "
+                "lại không nộp thẻ."
+            )
+        page.wait_for_timeout(1000)
+    else:
+        cookie = _session_cookie_header(page)
+        if not cookie:
+            raise RuntimeError(
+                "Đăng nhập xong nhưng không lấy được cookie phiên."
+            )
+    _verify_muse_account(page, email)
+    cookie = _session_cookie_header(page)
+    if not cookie:
+        raise RuntimeError(
+            "Không còn cookie phiên sau khi kiểm tra đúng mail."
+        )
+    _status(f"SESSION_COOKIE: {cookie}")
+    _status("Đã đăng nhập lại và lấy cookie phiên.")
+
+
 def main():
     global LANE_SUFFIX, DIRECT_MODE
     if len(sys.argv) < 2:
@@ -4348,6 +4998,9 @@ def main():
     # thay vì tạo tài khoản Muse mới. OTP vẫn gửi về hộp thư của
     # mail đó; từ bước nhập thẻ trở đi giữ nguyên như đăng ký.
     muse_login = "--muse-login" in flags
+    # --relogin: đăng nhập lại mail Muse đã có, chỉ lấy OTP và
+    # cookie. Không nộp thẻ, không mã mời.
+    relogin = "--relogin" in flags
     # --card <id>: id kho của thẻ đã giữ chỗ cho tài khoản này
     # (coordinator truyền khi chạy nhiều luồng; id dạng
     # card-<hex>, không phải số thẻ, không trùng với số luồng).
@@ -4442,6 +5095,13 @@ def main():
                 "dùng tập rỗng làm mốc."
             )
             existing_ids = set()
+        if relogin:
+            _run_muse_relogin(page, email, mailbox, existing_ids)
+            if auto:
+                _status("RESULT: SUCCESS")
+            else:
+                page.wait_for_event("close")
+            return
         if meta:
             # Chế độ đăng ký Meta: chạy xong luồng Meta thì dừng —
             # không qua Muse. Lỗi ở bước nào thì khối except bên
@@ -4581,10 +5241,44 @@ def main():
                 # live 2026-11-13 15:51). Xử lý các màn xác minh
                 # trước (bấm Continue + giải CAPTCHA qua CapSolver
                 # + up selfie), rồi mới xem lại màn nào hiện.
-                where = _wait_for_profile_or_card(page, email)
-                if where is None:
+                where = _wait_for_profile_or_card(
+                    page, email, timeout_ms=45000, allow_create_new=False
+                )
+                # Bấm Continue ở màn liên kết xong: nếu Meta bắt
+                # xác minh người thật thì giải bằng CapSolver,
+                # rồi gửi ảnh selfie. Xong mới tới bước thẻ.
+                if where == "checkpoint":
+                    _status(
+                        "Meta bắt xác minh người thật — giải bằng "
+                        "CapSolver, rồi tới bước thẻ."
+                    )
                     _handle_login_checkpoint(page)
-                    where = _wait_for_profile_or_card(page, email)
+                    where = _wait_for_profile_or_card(
+                        page, email, timeout_ms=45000,
+                        allow_create_new=False,
+                    )
+                elif where is None:
+                    # Chưa thấy thẻ. Chỉ xử lý xác minh khi màn
+                    # đó thật sự hiện; không có thì chờ bước thẻ.
+                    if (
+                        _meta_checkpoint_visible(page)
+                        or _meta_selfie_page_visible(page)
+                    ):
+                        _status(
+                            "Meta bắt xác minh người thật — giải "
+                            "bằng CapSolver, rồi tới bước thẻ."
+                        )
+                        _handle_login_checkpoint(page)
+                    where = _wait_for_profile_or_card(
+                        page, email, timeout_ms=20000,
+                        allow_create_new=False,
+                    )
+                if where == "email-form":
+                    raise RuntimeError(
+                        "Trình duyệt quay về màn đăng nhập "
+                        "(Mobile number or email) sau màn liên kết "
+                        "Meta. Dừng lại, không bấm Continue thêm."
+                    )
                 if where == "chooser":
                     # Meta hiện màn chọn tài khoản mà không có
                     # email cần đăng nhập — dừng lại thay vì bấm
@@ -4799,9 +5493,10 @@ def main():
             # đây, không lưu cookie/mã mời của tài khoản sai.
             _verify_muse_account(page, email)
             redeem_code = _load_redeem_code()
-            # Chế độ đăng nhập không quy đổi mã mời (file redeem có
-            # thể là mã cũ sót lại từ lượt đăng ký trước).
-            if redeem_code and not muse_login:
+            # Cả đăng ký lẫn đăng nhập Muse bằng Meta: nhập mã mời
+            # của tài khoản trước (nếu có), rồi mới lấy mã của
+            # chính tài khoản này cho tài khoản sau.
+            if redeem_code:
                 if _redeem_invite_code(page, redeem_code):
                     _status(
                         f"Đã quy đổi mã mời {redeem_code} của tài "
@@ -5053,6 +5748,38 @@ def _birthday_value_matches(control, option_value, value, label=None):
 def _wait_for_browser_close(page):
     if page and not page.is_closed():
         page.wait_for_event("close")
+
+
+def _click_card_submit(page):
+    """Bấm nút gửi form thẻ sau khi điền xong. Ưu tiên Confirm,
+    rồi Continue / Add card / Save / Next. Không bấm Learn more."""
+    names = ("Confirm", "Continue", "Add card", "Save", "Next")
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        for name in names:
+            try:
+                button = page.get_by_role("button", name=name, exact=True)
+            except Exception:
+                continue
+            target = _first_visible(button)
+            if target is None:
+                continue
+            try:
+                if not target.is_enabled():
+                    continue
+            except Exception:
+                continue
+            try:
+                target.click(timeout=5000)
+            except Exception:
+                continue
+            _status(f"Đã điền thẻ — bấm {name} để đi tiếp.")
+            return True
+        try:
+            page.wait_for_timeout(300)
+        except Exception:
+            break
+    return False
 
 
 def _click_when_ready(page, locator, label):

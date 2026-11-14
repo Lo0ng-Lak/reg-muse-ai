@@ -92,6 +92,18 @@ class CardRunState:
             and (self.used + self.in_flight) >= self.limit
         )
 
+    def mark_full(self):
+        """Meta từ chối thẻ này (quá nhiều tài khoản quảng cáo).
+
+        used >= limit > 0 để exhausted() đúng và lượt sau không
+        giữ chỗ thẻ này nữa. Giới hạn 0 được kéo lên ít nhất 1.
+        """
+        cap = self.limit if self.limit > 0 else max(self.used, 1)
+        cap = max(1, min(int(cap), 100))
+        self.limit = cap
+        if self.used < cap:
+            self.used = cap
+
 
 class _CardVaultRun:
     """Kho thẻ của một lượt chạy, theo thứ tự dùng.
@@ -120,6 +132,7 @@ class _CardVaultRun:
         """
         if not self.cards:
             return None, None, False
+        self.refresh_full_from_disk()
         candidates = self.cards[:1] if self.manual else self.cards
         for card in candidates:
             if not card.exhausted():
@@ -136,6 +149,100 @@ class _CardVaultRun:
     def release(self, card):
         if card is not None:
             card.in_flight = max(0, card.in_flight - 1)
+
+    def refresh_full_from_disk(self):
+        """Luồng khác vừa đánh dấu thẻ full thì kho trên đĩa
+        đã đổi. Kéo used/limit vào bộ nhớ trước khi giữ chỗ,
+        để luồng này không phát lại đúng thẻ đó."""
+        try:
+            entries = storage._load_vault()
+        except Exception:
+            return
+        by_id = {entry["id"]: entry for entry in entries}
+        for item in self.cards:
+            entry = by_id.get(item.card_id)
+            if not entry:
+                continue
+            try:
+                limit = int(entry.get("limit") or 0)
+                used = int(entry.get("used") or 0)
+            except (TypeError, ValueError):
+                continue
+            if limit > 0 and used >= limit:
+                item.limit = limit
+                if item.used < used:
+                    item.used = used
+
+    def mark_card_full(self, card_id):
+        """Đánh dấu thẻ full trong bộ nhớ của lượt chạy.
+
+        Chế độ chọn tay chỉ nạp một thẻ: thẻ đó full thì nạp
+        phần còn lại của kho và xoay tiếp, để tài khoản sau
+        không dừng khi vẫn còn thẻ khác.
+        """
+        found = False
+        for item in self.cards:
+            if item.card_id == card_id:
+                item.mark_full()
+                found = True
+                break
+        if not found or not self.manual:
+            return
+        known = {item.card_id for item in self.cards}
+        try:
+            extras = storage._load_vault()
+        except Exception:
+            extras = []
+        for entry in extras:
+            if entry["id"] in known:
+                continue
+            self.cards.append(
+                CardRunState(
+                    card_id=entry["id"],
+                    label=entry["label"],
+                    limit=int(entry.get("limit") or 0),
+                    used=int(entry.get("used") or 0),
+                )
+            )
+        self.manual = False
+
+    def take_over_card(self, holder, card_id):
+        """Chuyển chỗ đang giữ từ thẻ cũ sang thẻ vừa được nhập.
+
+        Thẻ bị từ chối không được tính một lần dùng. Lượt thành
+        công sau đó ghi vào thẻ mới.
+        """
+        if holder is None or not card_id:
+            return
+        new = None
+        for item in self.cards:
+            if item.card_id == card_id:
+                new = item
+                break
+        if new is None:
+            try:
+                extras = storage._load_vault()
+            except Exception:
+                extras = []
+            for entry in extras:
+                if entry["id"] != card_id:
+                    continue
+                new = CardRunState(
+                    card_id=entry["id"],
+                    label=entry["label"],
+                    limit=int(entry.get("limit") or 0),
+                    used=int(entry.get("used") or 0),
+                )
+                self.cards.append(new)
+                break
+        if new is None:
+            return
+        old = holder.get("card")
+        if old is not new:
+            if old is not None:
+                old.in_flight = max(0, old.in_flight - 1)
+            new.in_flight += 1
+        holder["card"] = new
 
     def record_success(self, card):
         """Một tài khoản vừa thành công bằng thẻ này: tăng bộ đếm
@@ -183,6 +290,12 @@ class RunSettings:
     # Excel người dùng chọn ở tab Meta, không tạo hộp thư mới).
     meta_login: bool = False
     meta_excel_path: str = ""
+    # Đăng nhập lại mail Muse đã có (file Excel cột Email
+    # Muse.ai): không proxy, không thẻ, chỉ OTP + cookie ra file
+    # xuất gồm hai cột Email và Cookie đăng nhập.
+    relogin: bool = False
+    relogin_excel_path: str = ""
+    relogin_output_path: str = ""
     invite: str = ""
     single_invite: bool = False
     # Kho thẻ của lượt chạy: list[CardRunState] theo thứ tự kho.
@@ -324,7 +437,9 @@ class Coordinator:
         """
         success = fail = 0
         try:
-            if settings.meta_login:
+            if settings.relogin:
+                success, fail = self._run_relogin_loop(settings)
+            elif settings.meta_login:
                 success, fail = self._run_login_loop(settings)
             else:
                 success, fail = self._run_registration_loop(settings)
@@ -563,6 +678,7 @@ class Coordinator:
                     )
                 )
             try:
+                card_holder = {"card": card}
                 index += 1
                 display = f"L{lane_no} · {index}" if multi else index
                 proxy_index, line = rotation.current()
@@ -655,14 +771,18 @@ class Coordinator:
                         ).unlink()
                     except OSError:
                         pass
-                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped = self._run_helper(
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped, facebook = self._run_helper(
                     helper,
                     address,
                     display,
                     label_total,
                     settings.meta,
                     card_id=card.card_id if card is not None else "",
+                    card_holder=card_holder,
+                    vault=shared["vault"],
+                    vault_lock=shared_lock,
                 )
+                card = card_holder["card"]
                 if settings.meta and not load_failed:
                     # Mở được meta.ai (dù tài khoản này thành hay
                     # bại ở bước sau): proxy đã chứng minh còn tải
@@ -684,7 +804,8 @@ class Coordinator:
                             if settings.meta:
                                 username = storage._read_meta_username(suffix)
                                 otp_link = mail_providers.inbox_url(
-                                    settings.provider_id, address
+                                    settings.provider_id, address,
+                                    proxy=line,
                                 )
                                 storage._append_meta_row(
                                     address,
@@ -791,7 +912,15 @@ class Coordinator:
                             "khoản này chỉ lưu vào sheet).",
                         )
                     )
-                if burned and not settings.direct:
+                if facebook and not settings.direct:
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1} đẩy sang "
+                            "Facebook — bỏ proxy này, đổi sang proxy kế.",
+                        )
+                    )
+                elif burned and not settings.direct:
                     self.events.put(
                         (
                             "log",
@@ -823,22 +952,25 @@ class Coordinator:
                             f"{strike_note}",
                         )
                     )
-                drop_proxy = burned or waitlisted or (
+                drop_proxy = facebook or burned or waitlisted or (
                     load_failed and load_fail_strikes >= 2
                 )
                 hold_proxy = (
                     load_failed
                     and not settings.direct
                     and load_fail_strikes < 2
+                    and not facebook
                 )
-                if drop_proxy or (settings.direct and load_failed):
+                if drop_proxy or (settings.direct and (load_failed or facebook)):
                     if settings.direct:
                         # IP máy là IP duy nhất của cả lượt chạy:
                         # không có proxy khác để đổi, chạy tiếp
                         # chỉ thất bại nối nhau — dừng ngay để
                         # người dùng đổi server VPN.
                         reason = (
-                            "bị Meta chặn tạo tài khoản"
+                            "đẩy sang Facebook"
+                            if facebook
+                            else "bị Meta chặn tạo tài khoản"
                             if burned
                             else "rơi vào 'Join the waitlist' "
                             "(khu vực không hỗ trợ)"
@@ -864,7 +996,9 @@ class Coordinator:
                         # mọi đợt chạy sau, và loại ngay trong đợt
                         # này (kể cả khi xoay vòng quay lại).
                         reason = (
-                            "bị Meta chặn tạo tài khoản"
+                            "đẩy sang Facebook"
+                            if facebook
+                            else "bị Meta chặn tạo tài khoản"
                             if burned
                             else "bị 'Join the waitlist' (khu vực "
                             "không hỗ trợ)"
@@ -889,7 +1023,7 @@ class Coordinator:
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
             finally:
                 with shared_lock:
-                    shared["vault"].release(card)
+                    shared["vault"].release(card_holder["card"])
 
     def _run_login_loop(self, settings):
         """Lượt đăng nhập Muse bằng tài khoản Meta đã đăng ký.
@@ -949,6 +1083,7 @@ class Coordinator:
                 subset,
                 shared,
                 shared_lock,
+                settings.invite,
             )
             if lanes == 1:
                 self._run_login_lane(*lane_args)
@@ -969,14 +1104,16 @@ class Coordinator:
         return shared["success"], shared["fail"]
 
     def _run_login_lane(
-        self, settings, lane_no, lanes, rows, subset, shared, shared_lock
+        self, settings, lane_no, lanes, rows, subset, shared, shared_lock,
+        seed="",
     ):
         """Một luồng đăng nhập: lần lượt các dòng Meta của luồng.
 
         Cùng nhịp xoay proxy / giữ chỗ thẻ / nghỉ giữa các tài
         khoản như _run_lane, nhưng hộp thư lấy từ dòng Excel
-        (không tạo mới), không quy đổi mã mời, và thành công thì
-        đánh dấu dòng đó đã đăng nhập trong file Excel.
+        (không tạo mới). Có mã mời của tài khoản trước thì nhập
+        mã đó, rồi lấy mã của tài khoản này cho tài khoản sau.
+        Thành công thì đánh dấu dòng đó đã đăng nhập trong file Excel.
         """
         helper = paths.SRC_DIR / "browser_helper.py"
         suffix = "" if lane_no == 1 else f"-{lane_no}"
@@ -986,6 +1123,11 @@ class Coordinator:
         rotation = proxy_pool._ProxyRotation(subset, settings.per_proxy)
         written_proxy_index = None
         label_total = len(rows)
+        # Chuỗi mã mời của luồng này, giống đăng ký: tài khoản
+        # sắp chạy nhập pending_code (mã tài khoản trước). Mã nó
+        # lấy được thành mã cho tài khoản sau. Chế độ 1 mã thì
+        # mọi tài khoản nhập đúng mã hạt giống.
+        pending_code = (seed or "").strip().upper()
         for index, row in enumerate(rows, start=1):
             if self.stop_event.is_set():
                 break
@@ -1027,6 +1169,7 @@ class Coordinator:
                     )
                 )
             try:
+                card_holder = {"card": card}
                 display = f"L{lane_no} · {index}" if multi else index
                 proxy_index, line = rotation.current()
                 if proxy_index != written_proxy_index:
@@ -1089,6 +1232,10 @@ class Coordinator:
                     storage._write_mailbox(mailbox, suffix)
                 except OSError:
                     pass
+                try:
+                    storage._write_redeem_code(pending_code, suffix)
+                except OSError:
+                    pass
                 # Đánh dấu ĐANG đăng nhập TRƯỚC khi chạy helper, dưới
                 # khóa chung — luồng khác (hay lượt chạy sau) không
                 # lấy trùng mail này. Ghi không được thì vẫn chạy
@@ -1102,13 +1249,17 @@ class Coordinator:
                         self.events.put(
                             ("log", f"[{display}/{label_total}] {error}")
                         )
-                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped = (
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped, facebook = (
                     self._run_helper(
                         helper, address, display, label_total,
                         muse_login=True,
                         card_id=card.card_id if card is not None else "",
+                        card_holder=card_holder,
+                        vault=shared["vault"],
+                        vault_lock=shared_lock,
                     )
                 )
+                card = card_holder["card"]
                 if not load_failed:
                     # Đăng nhập Muse luôn mở meta.ai: mở được thì
                     # proxy còn tốt — xoá strike cũ, strike chỉ
@@ -1126,7 +1277,7 @@ class Coordinator:
                                 cookie=cookie,
                                 invite=own_invite,
                                 otp_link=mail_providers.inbox_url(
-                                    row["provider"], address
+                                    row["provider"], address, proxy=line
                                 ),
                             )
                             saved = True
@@ -1185,6 +1336,32 @@ class Coordinator:
                                 f"không ghi được sheet Excel: {save_error}",
                             )
                         )
+                    if own_invite and not settings.single_invite:
+                        pending_code = own_invite
+                        try:
+                            paths.data_file("invite.txt").write_text(
+                                own_invite + "\n", encoding="utf-8"
+                            )
+                        except OSError:
+                            pass
+                        self.events.put(("invite", own_invite))
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] Chuỗi mã mời: "
+                                f"tài khoản tiếp theo sẽ nhập mã "
+                                f"{own_invite}.",
+                            )
+                        )
+                    elif own_invite and settings.single_invite and pending_code:
+                        self.events.put(
+                            (
+                                "log",
+                                f"[{display}/{label_total}] Chế độ 1 mã "
+                                f"mời: tài khoản tiếp theo vẫn nhập "
+                                f"mã {pending_code}.",
+                            )
+                        )
                 else:
                     with shared_lock:
                         shared["fail"] += 1
@@ -1210,7 +1387,15 @@ class Coordinator:
                                 "— lý do ở dòng RESULT phía trên.",
                             )
                         )
-                if burned and not settings.direct:
+                if facebook and not settings.direct:
+                    self.events.put(
+                        (
+                            "log",
+                            f"{lane_tag}Proxy #{proxy_index + 1} đẩy sang "
+                            "Facebook — bỏ proxy này, đổi sang proxy kế.",
+                        )
+                    )
+                elif burned and not settings.direct:
                     self.events.put(
                         (
                             "log",
@@ -1242,18 +1427,21 @@ class Coordinator:
                             f"{strike_note}",
                         )
                     )
-                drop_proxy = burned or waitlisted or (
+                drop_proxy = facebook or burned or waitlisted or (
                     load_failed and load_fail_strikes >= 2
                 )
                 hold_proxy = (
                     load_failed
                     and not settings.direct
                     and load_fail_strikes < 2
+                    and not facebook
                 )
-                if drop_proxy or (settings.direct and load_failed):
+                if drop_proxy or (settings.direct and (load_failed or facebook)):
                     if settings.direct:
                         reason = (
-                            "bị Meta chặn đăng nhập"
+                            "đẩy sang Facebook"
+                            if facebook
+                            else "bị Meta chặn đăng nhập"
                             if burned
                             else "rơi vào 'Join the waitlist' "
                             "(khu vực không hỗ trợ)"
@@ -1272,7 +1460,9 @@ class Coordinator:
                         self.stop_event.set()
                     else:
                         reason = (
-                            "bị Meta chặn đăng nhập"
+                            "đẩy sang Facebook"
+                            if facebook
+                            else "bị Meta chặn đăng nhập"
                             if burned
                             else "bị 'Join the waitlist' (khu vực "
                             "không hỗ trợ)"
@@ -1297,16 +1487,124 @@ class Coordinator:
                     time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
             finally:
                 with shared_lock:
-                    shared["vault"].release(card)
+                    shared["vault"].release(card_holder["card"])
+
+    def _run_relogin_loop(self, settings):
+        """Đăng nhập lại từng mail trong file Excel, lấy cookie mới.
+
+        Không proxy (ghi DIRECT), không thẻ, không mã mời. Mỗi
+        mail chạy một trình duyệt sạch, OTP đọc từ hộp thư của
+        đúng mail đó. Có cookie thì ghi một dòng Email + Cookie
+        vào file xuất. Không cookie thì bỏ qua mail đó.
+        """
+        rows = storage._relogin_accounts(settings.relogin_excel_path)
+        if settings.total:
+            rows = rows[: max(0, int(settings.total))]
+        total = len(rows)
+        helper = paths.SRC_DIR / "browser_helper.py"
+        success = 0
+        fail = 0
+        self._lane_local.suffix = ""
+        for index, row in enumerate(rows, start=1):
+            if self.stop_event.is_set():
+                break
+            address = row["email"]
+            self.events.put(
+                (
+                    "progress",
+                    (1, index, total, success, fail, "", False),
+                )
+            )
+            self.events.put(
+                (
+                    "log",
+                    f"[{index}/{total}] Đăng nhập lại {address}.",
+                )
+            )
+            if row["provider"] == "mail.tm" and not row["secret"]:
+                fail += 1
+                self.events.put(
+                    (
+                        "log",
+                        f"[{index}/{total}] {address} thiếu mật khẩu "
+                        "hộp thư — không đọc được OTP, bỏ qua.",
+                    )
+                )
+                continue
+            try:
+                storage._write_mailbox(
+                    {
+                        "provider": row["provider"],
+                        "email": address,
+                        "secret": row["secret"],
+                    }
+                )
+                storage._write_active_proxy("DIRECT")
+            except OSError as error:
+                fail += 1
+                self.events.put(
+                    (
+                        "log",
+                        f"[{index}/{total}] Không ghi được hộp thư "
+                        f"cho {address}: {error}",
+                    )
+                )
+                continue
+            (
+                helper_ok,
+                _burned,
+                _waitlisted,
+                _load_failed,
+                cookie,
+                _invite,
+                _card_skipped,
+                _facebook,
+            ) = self._run_helper(
+                helper, address, index, total, relogin=True
+            )
+            if helper_ok and cookie:
+                try:
+                    storage._write_relogin_cookie(
+                        settings.relogin_output_path, address, cookie
+                    )
+                except RuntimeError as error:
+                    fail += 1
+                    self.events.put(
+                        ("log", f"[{index}/{total}] {error}")
+                    )
+                    continue
+                success += 1
+                self.events.put(
+                    (
+                        "log",
+                        f"[{index}/{total}] Đã lấy cookie của "
+                        f"{address} và ghi vào file xuất.",
+                    )
+                )
+            else:
+                fail += 1
+                self.events.put(
+                    (
+                        "log",
+                        f"[{index}/{total}] Bỏ {address}, chuyển "
+                        "sang mail kế.",
+                    )
+                )
+            if index < total and not self.stop_event.is_set():
+                time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
+        return success, fail
 
     def _run_helper(self, helper, address, index, total, meta=False,
-                      muse_login=False, card_id=""):
+                      muse_login=False, card_id="", card_holder=None,
+                      vault=None, vault_lock=None, relogin=False):
         suffix = getattr(self._lane_local, "suffix", "")
         command = [sys.executable, str(helper), address, "--auto"]
         if meta:
             command.append("--meta")
         if muse_login:
             command.append("--muse-login")
+        if relogin:
+            command.append("--relogin")
         if card_id:
             # Thẻ kho đã giữ chỗ cho tài khoản này: helper chỉ
             # đọc đúng thẻ đó (id kho, không phải số thẻ).
@@ -1327,7 +1625,7 @@ class Coordinator:
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False, False, False, "", "", False
+            return False, False, False, False, "", "", False, False
         self.helper_process = process
         with self._process_lock:
             self.helper_processes.add(process)
@@ -1335,6 +1633,7 @@ class Coordinator:
             "burn": False,
             "waitlist": False,
             "load_fail": False,
+            "facebook": False,
             "cookie": "",
             "invite": "",
             "card_skipped": False,
@@ -1350,6 +1649,8 @@ class Coordinator:
                         signals["waitlist"] = True
                     if proxy_pool._line_flags_load_fail(line):
                         signals["load_fail"] = True
+                    if proxy_pool._line_flags_facebook(line):
+                        signals["facebook"] = True
                     cookie = _session_cookie_from_line(line)
                     if cookie is not None:
                         # Cookie phiên chỉ đi vào sheet, không vào log.
@@ -1365,6 +1666,33 @@ class Coordinator:
                         # cho tài khoản này KHÔNG bị tính lượt
                         # dùng (xem hai chỗ gọi _run_helper).
                         signals["card_skipped"] = True
+                        continue
+                    if line.startswith("CARD_FULL:"):
+                        # Thẻ bị "too many ad accounts": helper đã
+                        # ghi full xuống kho. Cập nhật bộ nhớ ngay
+                        # để luồng khác không giữ chỗ thẻ này.
+                        full_id = line.split(":", 1)[1].strip()
+                        if (
+                            vault is not None
+                            and vault_lock is not None
+                            and full_id
+                        ):
+                            with vault_lock:
+                                vault.mark_card_full(full_id)
+                        continue
+                    if line.startswith("CARD_SWITCH:"):
+                        # Chỗ đang giữ chuyển sang thẻ vừa nhập,
+                        # để lần thành công tính cho thẻ đó.
+                        switch_id = line.split(":", 1)[1].strip()
+                        if (
+                            vault is not None
+                            and vault_lock is not None
+                            and switch_id
+                        ):
+                            with vault_lock:
+                                vault.take_over_card(
+                                    card_holder, switch_id
+                                )
                         continue
                     self.events.put(("log", f"[{index}/{total}] {line}"))
 
@@ -1397,4 +1725,4 @@ class Coordinator:
             self.helper_processes.discard(process)
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"], signals["card_skipped"]
+        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"], signals["card_skipped"], signals["facebook"]

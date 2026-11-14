@@ -32,6 +32,11 @@ def _line_flags_waitlist(line):
     """Dòng tín hiệu từ browser_helper: IP thoát bị Join the waitlist."""
     return line.startswith("WAITLIST:")
 
+def _line_flags_facebook(line):
+    """Dòng tín hiệu từ browser_helper: proxy này đẩy trình duyệt
+    sang facebook.com. Bỏ proxy ngay, không dùng lại."""
+    return line.startswith("PROXY_FACEBOOK")
+
 def _line_flags_load_fail(line):
     """Dòng tín hiệu từ browser_helper: một lượt chạy helper mở
     meta.ai lỗi tải trang hết 5 lần thử trên cùng một proxy

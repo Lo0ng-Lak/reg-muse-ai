@@ -236,6 +236,19 @@ def test_open_407_then_success():
     assert not _has_load_fail_signal(captured), captured
 
 
+def test_line_flags_facebook():
+    assert proxy_pool._line_flags_facebook(
+        "PROXY_FACEBOOK: proxy này đẩy sang Facebook "
+        "(facebook.com) — bỏ proxy, không dùng lại."
+    )
+    assert not proxy_pool._line_flags_facebook(
+        "PROXY_BURN: Meta chặn tạo tài khoản trên IP này"
+    )
+    assert not proxy_pool._line_flags_load_fail(
+        "PROXY_FACEBOOK: proxy này đẩy sang Facebook"
+    )
+
+
 def test_line_flags_load_fail():
     assert proxy_pool._line_flags_load_fail(
         "PROXY_LOAD_FAIL: mở meta.ai lỗi tải trang hết 5 lần thử"
@@ -335,6 +348,7 @@ TESTS = [
     test_open_timeout_counts_as_load_error,
     test_open_407_response_signals,
     test_open_407_then_success,
+    test_line_flags_facebook,
     test_line_flags_load_fail,
     test_rotation_strikes_count_per_proxy,
     test_rotation_strikes_clear_on_success,

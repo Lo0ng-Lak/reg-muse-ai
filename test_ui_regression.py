@@ -100,6 +100,76 @@ def test_lane_crash_resets_running():
     assert any("dừng đột ngột" in p for p in logs), f"thiếu log lỗi: {logs}"
 
 
+def test_relogin_sheet_reads_email_and_writes_cookie_file():
+    """File nguồn kiểu accounts.xlsx: chỉ lấy mail + mật khẩu hộp
+    thư. File xuất chỉ có Email và Cookie đăng nhập. Mail
+    @flubai.com là mail.tm. Mail trùng chỉ giữ một dòng."""
+    from openpyxl import Workbook, load_workbook
+
+    source = TMP / "relogin-source.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        [
+            "Thời gian tạo",
+            "Email Muse.ai",
+            "Mật khẩu hộp thư",
+            "Cookie phiên đăng nhập",
+            "Mã mời",
+            "Link lấy OTP",
+        ]
+    )
+    sheet.append(
+        [
+            "2026-11-14T10:00:00+07:00",
+            "muse111@flubai.com",
+            "secret-1",
+            "old-cookie",
+            "ABCDEF",
+            "",
+        ]
+    )
+    sheet.append(
+        [
+            "2026-11-14T10:01:00+07:00",
+            "muse111@flubai.com",
+            "secret-1",
+            "old-cookie",
+            "",
+            "",
+        ]
+    )
+    sheet.append(
+        [
+            "2026-11-14T10:02:00+07:00",
+            "muse222@mailto.plus",
+            "",
+            "",
+            "",
+            "",
+        ]
+    )
+    workbook.save(source)
+    rows = storage._relogin_accounts(source)
+    assert [row["email"] for row in rows] == [
+        "muse111@flubai.com",
+        "muse222@mailto.plus",
+    ], rows
+    assert rows[0]["provider"] == "mail.tm", rows[0]
+    assert rows[0]["secret"] == "secret-1"
+    assert rows[1]["provider"] == "tempmail.plus"
+    output = TMP / "muse_cookies.xlsx"
+    storage._write_relogin_cookie(output, rows[0]["email"], "cookie-a")
+    storage._write_relogin_cookie(output, rows[0]["email"], "cookie-b")
+    storage._write_relogin_cookie(output, rows[1]["email"], "cookie-c")
+    saved = load_workbook(output)
+    values = list(saved.active.iter_rows(values_only=True))
+    assert values[0] == ("Email", "Cookie đăng nhập"), values
+    assert values[1] == ("muse111@flubai.com", "cookie-b"), values
+    assert values[2] == ("muse222@mailto.plus", "cookie-c"), values
+    assert len(values) == 3
+
+
 def test_login_loop_crash_resets_running():
     """Vòng đăng nhập chết ngay từ đầu (đọc Excel lỗi): running phải
     về False và "finished" phải được phát."""
@@ -396,6 +466,8 @@ def test_first_launch_migration_opens_window():
 
 if __name__ == "__main__":
     _run("lane crash resets running + finished", test_lane_crash_resets_running)
+    _run("relogin sheet reads email and writes cookie file",
+         test_relogin_sheet_reads_email_and_writes_cookie_file)
     _run("login loop crash resets running + finished",
          test_login_loop_crash_resets_running)
     _run("set_running does not raise (vault Treeview)",

@@ -683,6 +683,61 @@ def test_manual_mode_only_uses_selected_card():
     assert vault.note_for(None) == ""
 
 
+def test_mark_vault_card_full_reaches_limit():
+    card_id = _add_test_card(CARD_A, "Thẻ A", limit=4, used=1)
+    assert storage._mark_vault_card_full(card_id) is True
+    entry = next(
+        item for item in storage._load_vault() if item["id"] == card_id
+    )
+    assert (entry["limit"], entry["used"]) == (4, 4)
+    state = CardRunState(
+        card_id=card_id, label="Thẻ A", limit=4, used=1
+    )
+    state.mark_full()
+    assert state.exhausted() is True
+    assert (state.limit, state.used) == (4, 4)
+
+
+def test_mark_unlimited_card_full():
+    card_id = _add_test_card(CARD_A, "Thẻ A", limit=0, used=0)
+    assert storage._mark_vault_card_full(card_id) is True
+    entry = next(
+        item for item in storage._load_vault() if item["id"] == card_id
+    )
+    assert entry["limit"] > 0 and entry["used"] >= entry["limit"]
+    state = CardRunState(
+        card_id=card_id, label="Thẻ A", limit=0, used=0
+    )
+    state.mark_full()
+    assert state.exhausted() is True
+
+
+def test_manual_full_card_opens_the_rest_of_the_vault():
+    # Chọn tay một thẻ: thẻ đó bị full thì lượt chạy lấy thẻ kế,
+    # không dừng khi kho vẫn còn thẻ.
+    id_a = _add_test_card(CARD_A, "Thẻ A", limit=3, used=0)
+    _add_test_card(CARD_B, "Thẻ B", limit=5, used=0)
+    vault = _CardVaultRun(_vault_states()[:1], manual=True)
+    card, _, stop = vault.reserve()
+    assert (card.label, stop) == ("Thẻ A", False)
+    storage._mark_vault_card_full(id_a)
+    vault.mark_card_full(id_a)
+    holder = {"card": card}
+    nxt_id = next(
+        item["id"]
+        for item in storage._load_vault()
+        if item["label"] == "Thẻ B"
+    )
+    vault.take_over_card(holder, nxt_id)
+    assert holder["card"].label == "Thẻ B"
+    assert card.in_flight == 0
+    assert holder["card"].in_flight == 1
+    vault.release(holder["card"])
+    nxt, _, stop = vault.reserve()
+    assert stop is False
+    assert nxt.label == "Thẻ B"
+
+
 def test_limit_zero_is_unlimited():
     state = CardRunState(card_id="card-x", label="Thẻ X", limit=0, used=100)
     assert state.exhausted() is False
@@ -782,6 +837,9 @@ TESTS = [
     test_rotation_across_limits,
     test_rotation_all_exhausted_stops,
     test_manual_mode_only_uses_selected_card,
+    test_mark_vault_card_full_reaches_limit,
+    test_mark_unlimited_card_full,
+    test_manual_full_card_opens_the_rest_of_the_vault,
     test_limit_zero_is_unlimited,
     test_empty_vault_means_manual_entry,
     test_run_settings_defaults,

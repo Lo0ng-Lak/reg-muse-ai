@@ -769,6 +769,18 @@ class MuseTab(ttk.Frame):
                 return
         if not self._check_cards_before_run(cards, manual_card):
             return
+        invite = self._sync_invite_code()
+        if not invite:
+            seed = storage._last_invite_from_sheet()
+            if seed:
+                self.invite_entry.delete(0, "end")
+                self.invite_entry.insert(0, seed)
+                invite = self._sync_invite_code()
+                self.app.append_log(
+                    f"Ô Mã mời trống — tự lấy mã {seed} từ dòng "
+                    "cuối trong sheet làm đầu chuỗi."
+                )
+        single_invite = bool(self.single_invite_var.get())
         settings = RunSettings(
             total=setup["total"],
             pool=setup["pool"],
@@ -778,6 +790,8 @@ class MuseTab(ttk.Frame):
             direct=setup["direct"],
             meta_login=True,
             meta_excel_path=excel_text,
+            invite=invite,
+            single_invite=single_invite,
             cards=cards,
             manual_card=manual_card,
             bad_file=self.panel.bad_file,
@@ -810,6 +824,21 @@ class MuseTab(ttk.Frame):
                     f"{setup['per_proxy']} tài khoản."
                 )
             self._log_run_cards(cards, manual_card)
+            if invite:
+                if single_invite:
+                    self.app.append_log(
+                        f"Mã mời: mọi tài khoản đều nhập mã {invite}."
+                    )
+                else:
+                    self.app.append_log(
+                        f"Mã mời: tài khoản đầu nhập mã {invite}, "
+                        "tài khoản sau nhập mã của tài khoản trước."
+                    )
+            else:
+                self.app.append_log(
+                    "Chưa có mã mời đầu chuỗi — tài khoản đầu không "
+                    "nhập mã, tài khoản sau nhập mã của tài khoản trước."
+                )
             if not self.coordinator.start(settings):
                 self.app.set_running(False)
                 self.app.append_log(

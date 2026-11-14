@@ -15,6 +15,7 @@ import storage
 from coordinator import Coordinator
 from ui.meta_tab import MetaTab
 from ui.muse_tab import MuseTab
+from ui.relogin_tab import ReloginTab
 
 
 class _ScrollableFrame(ttk.Frame):
@@ -91,9 +92,9 @@ class MainWindow(tk.Tk):
         self.after(100, self._process_events)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.append_log(
-            "Sẵn sàng. Chọn tab Muse.ai hoặc Meta, nhập setup rồi bấm "
-            "Bắt đầu. Chỉ tài khoản đăng ký thành công mới được lưu "
-            "vào sheet Excel."
+            "Sẵn sàng. Chọn tab Muse.ai, Meta, hoặc Đăng nhập lại, "
+            "nhập setup rồi bấm Bắt đầu. Chỉ tài khoản đăng ký thành "
+            "công mới được lưu vào sheet Excel."
         )
         vault = storage._load_vault()
         if vault:
@@ -166,6 +167,10 @@ class MainWindow(tk.Tk):
         self.meta_tab.pack(fill="both", expand=True)
         notebook.add(muse_scroll, text="Muse.ai")
         notebook.add(meta_scroll, text="Meta (meta.ai)")
+        relogin_scroll = _ScrollableFrame(notebook)
+        self.relogin_tab = ReloginTab(relogin_scroll.inner, self)
+        self.relogin_tab.pack(fill="both", expand=True)
+        notebook.add(relogin_scroll, text="Đăng nhập lại")
 
         bottom = ttk.Frame(root)
         bottom.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -209,6 +214,7 @@ class MainWindow(tk.Tk):
     def set_running(self, running):
         self.muse_tab.set_running(running)
         self.meta_tab.set_running(running)
+        self.relogin_tab.set_running(running)
         self.stop_button.configure(state="normal" if running else "disabled")
 
     def _stop_registration(self):

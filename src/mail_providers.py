@@ -66,21 +66,55 @@ MAILTM_BASE = "https://api.mail.tm"
 GUERRILLA_BASE = "https://api.guerrillamail.com/ajax.php"
 
 
-def inbox_url(provider_id, email):
-    """Link mở hộp thư để lấy mã OTP của một địa chỉ.
+def _proxy_epin(proxy_line):
+    """Giá trị epin của tempmail.plus: '|' + host:port:user:pass.
 
-    tempmail.plus: link thẳng vào hộp thư — trang họ là SPA
-    hashbang, địa chỉ nằm sau "#!" (kiểm chứng từ index.js
-    của họ, 2026-11-13: fex.hash đặt location.hash = "#!" +
-    địa chỉ). Các dịch vụ còn lại không có link thẳng vào
-    từng hộp thư nên trả trang hộp thư của họ (mở ra rồi
-    nhập địa chỉ): maildrop.cc/inbox/ (đã kiểm chứng
-    /inbox/<tên> trả 404), mail.tm/en (đăng nhập mới xem
-    được hộp thư), guerrillamail.com (hộp thư gắn phiên
-    trình duyệt, không có link riêng).
+    Kho proxy lưu host:port:user:pass hoặc
+    http://user:pass@host:port. Chế độ IP máy (DIRECT) và dòng
+    trống không có proxy — trả về "" để epin để trống.
+    """
+    line = (proxy_line or "").strip()
+    if not line or line.upper() == "DIRECT":
+        return ""
+    if "://" in line:
+        parsed = urllib.parse.urlparse(line)
+        host = parsed.hostname or ""
+        port = parsed.port
+        if not host or not port:
+            return ""
+        user = urllib.parse.unquote(parsed.username or "")
+        password = urllib.parse.unquote(parsed.password or "")
+        if user or password:
+            return f"|{host}:{port}:{user}:{password}"
+        return f"|{host}:{port}"
+    return "|" + line
+
+
+def inbox_url(provider_id, email, proxy=""):
+    """Link lấy mã OTP của một địa chỉ.
+
+    tempmail.plus: API đọc thư, không phải trang hộp thư.
+    email mã hóa (@ thành %40), limit=20, epin là proxy của
+    lượt đăng ký đặt sau dấu '|' rồi mã hóa (dấu '|' thành
+    %7C, dấu ':' giữ nguyên):
+    https://tempmail.plus/api/mails?email=...&limit=20&epin=%7Cip:port:user:pass
+    Các dịch vụ còn lại không có link thẳng vào từng hộp thư
+    nên trả trang hộp thư của họ (mở ra rồi nhập địa chỉ):
+    maildrop.cc/inbox/ (đã kiểm chứng /inbox/<tên> trả 404),
+    mail.tm/en (đăng nhập mới xem được hộp thư),
+    guerrillamail.com (hộp thư gắn phiên trình duyệt, không
+    có link riêng).
     """
     if provider_id == "tempmail.plus":
-        return "https://tempmail.plus/en/#!" + email
+        email_q = urllib.parse.quote(email or "", safe="")
+        epin_q = urllib.parse.quote(_proxy_epin(proxy), safe=":")
+        return (
+            TEMPMAIL_PLUS_BASE
+            + "/api/mails?email="
+            + email_q
+            + "&limit=20&epin="
+            + epin_q
+        )
     if provider_id == "maildrop.cc":
         return "https://maildrop.cc/inbox/"
     if provider_id == "mail.tm":
