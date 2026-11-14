@@ -576,6 +576,128 @@ def _wait_for_app_shell(page, timeout_seconds=20):
         page.wait_for_timeout(800)
 
 
+_ACCOUNT_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+
+
+def _logged_in_account_email(page):
+    """Email tài khoản đang đăng nhập, đọc từ menu tài khoản trên
+    giao diện Muse (bấm nút avatar ở cuối thanh trái rồi đọc
+    email trong menu hiện ra). Trả None khi không đọc được —
+    không bao giờ ném lỗi, vì giao diện có thể không hiện email.
+    Chỉ đọc trong menu (không quét toàn trang — nội dung chat
+    có thể chứa email lạ, không phải email tài khoản)."""
+    try:
+        clicked = False
+        try:
+            menu_button = page.get_by_role(
+                "button",
+                name=re.compile("account|profile|tài khoản|hồ sơ", re.I),
+            )
+            if menu_button.count() and menu_button.first.is_visible():
+                menu_button.first.click(timeout=5000)
+                clicked = True
+        except Exception:
+            clicked = False
+        if not clicked:
+            # Nút avatar ở góc dưới trái của thanh bên (hình học
+            # như _app_shell_visible): bấm trực tiếp bằng JS.
+            try:
+                clicked = bool(
+                    page.evaluate(
+                        """() => {
+                            const btns = [...document.querySelectorAll('button')];
+                            const el = btns.find((b) => {
+                                const r = b.getBoundingClientRect();
+                                return r.width > 0 && r.width <= 90
+                                    && r.left < 90
+                                    && r.bottom > window.innerHeight - 100;
+                            });
+                            if (el) { el.click(); return true; }
+                            return false;
+                        }"""
+                    )
+                )
+            except Exception:
+                clicked = False
+        if not clicked:
+            return None
+        page.wait_for_timeout(1500)
+        try:
+            menu_text = ""
+            for selector in (
+                '[role="menu"]',
+                '[role="dialog"]',
+                '[class*="menu"]',
+                '[class*="popover"]',
+                '[class*="dropdown"]',
+            ):
+                try:
+                    elements = page.locator(selector)
+                    for index in range(elements.count()):
+                        try:
+                            text = elements.nth(index).inner_text(
+                                timeout=1000
+                            )
+                        except Exception:
+                            continue
+                        if text:
+                            menu_text += "\n" + text
+                except Exception:
+                    continue
+            found = _ACCOUNT_EMAIL_RE.findall(menu_text or "")
+            return found[0] if found else None
+        finally:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            # Menu có thể đã điều hướng khỏi giao diện (bấm nhầm):
+            # về lại trang chính của Muse khi phiên đã có sẵn.
+            try:
+                if not _in_muse_interface(page):
+                    page.goto(
+                        SIGNUP_URL,
+                        wait_until="domcontentloaded",
+                        timeout=PAGE_TIMEOUT_MS,
+                    )
+                    _wait_for_app_shell(page)
+            except Exception:
+                pass
+    except Exception:
+        return None
+
+
+def _verify_muse_account(page, email):
+    """Kiểm tra tài khoản đang đăng nhập có đúng email cần đăng
+    nhập không — trước khi lấy mã mời + cookie và báo thành công.
+    Tìm thấy email khác → đăng xuất + xoá phiên rồi lỗi rõ (tài
+    khoản không được lưu, lượt sau chạy lại với phiên sạch).
+    Không đọc được email nào → chỉ cảnh báo, vẫn tiếp tục (không
+    chặn lượt chạy chỉ vì giao diện không hiện email). Không bao
+    giờ in email tìm thấy ra log."""
+    found = _logged_in_account_email(page)
+    if found is None:
+        _status(
+            "Không đọc được email tài khoản đang đăng nhập trên "
+            "giao diện — tiếp tục mà không xác minh."
+        )
+        return
+    if found.strip().lower() == (email or "").strip().lower():
+        _status(
+            "Đã xác minh tài khoản đang đăng nhập khớp email cần "
+            "đăng nhập."
+        )
+        return
+    _logout_and_clear_session(page)
+    raise RuntimeError(
+        "Tài khoản đang đăng nhập không khớp với email cần đăng "
+        "nhập — đã đăng xuất và xoá phiên; tài khoản không được "
+        "lưu, lượt sau sẽ đăng nhập lại với phiên sạch."
+    )
+
+
 def _photo_after_card_decision(page):
     """Quyết định bước up ảnh sau bước thẻ:
     - "skip": đã vào được giao diện Muse (URL + khung giao diện)
@@ -682,6 +804,83 @@ def _handle_photo_after_card(page, timeout_seconds=180, settle_seconds=10):
         "— đi tiếp tới các bước sau, không kẹt ở đây."
     )
     return "timeout"
+
+
+def _ensure_clean_login_session(page):
+    """Bắt đầu mỗi tài khoản từ phiên sạch: xoá cookie + bộ nhớ
+    trang (localStorage/sessionStorage) để phiên của tài khoản
+    trước không lọt vào lượt đăng nhập này. Không bao giờ ném
+    lỗi — dọn được bao nhiêu thì dọn, context vốn đã mới. Ghi
+    log số cookie còn lại sau khi dọn (phải là 0) để thấy rõ
+    trình duyệt đã sạch."""
+    try:
+        page.context.clear_cookies()
+    except Exception:
+        pass
+    try:
+        page.evaluate(
+            "() => { try { localStorage.clear(); } catch (e) {} "
+            "try { sessionStorage.clear(); } catch (e) {} }"
+        )
+    except Exception:
+        pass
+    try:
+        remaining = page.context.cookies()
+    except Exception:
+        remaining = None
+    if remaining is not None:
+        _status(
+            "Đã làm sạch phiên đăng nhập — trình duyệt sạch "
+            f"({len(remaining)} cookie còn lại)."
+        )
+    else:
+        _status("Đã làm sạch phiên đăng nhập (cookie + bộ nhớ trang).")
+
+
+def _open_clean_page(browser):
+    """Mở một trang trong context trình duyệt SẠCH hoàn toàn.
+
+    Sư huynh dặn 2026-11-14: mỗi lần mở trình duyệt phải là
+    trình duyệt sạch mặc dù cùng proxy, xoá hết cookie. Proxy
+    chỉ đổi IP thoát — còn trình duyệt thì luôn mới: tạo context
+    mới tường minh (không cookie, không localStorage /
+    sessionStorage, không phiên đăng nhập nào từ tài khoản
+    trước), rồi xoá cookie một lần nữa và ghi log rõ. Mọi luồng
+    (đăng ký, đăng nhập Muse, đăng ký Meta) đều mở trình duyệt
+    qua hàm này — không có đường nào bỏ qua bước dọn sạch.
+    Trả về (context, page)."""
+    context = browser.new_context()
+    page = context.new_page()
+    _ensure_clean_login_session(page)
+    return context, page
+
+
+def _logout_and_clear_session(page):
+    """Đăng xuất + xoá phiên khi phát hiện đăng nhập nhầm tài
+    khoản. Thử bấm Log out nếu thấy nút, rồi xoá cookie + bộ
+    nhớ trang. Không bao giờ ném lỗi."""
+    try:
+        button = page.get_by_role(
+            "button",
+            name=re.compile("log ?out|sign ?out|đăng xuất", re.I),
+        )
+        if button.count() and button.first.is_visible():
+            button.first.click(timeout=5000)
+            page.wait_for_timeout(2000)
+    except Exception:
+        pass
+    try:
+        page.context.clear_cookies()
+    except Exception:
+        pass
+    try:
+        page.evaluate(
+            "() => { try { localStorage.clear(); } catch (e) {} "
+            "try { sessionStorage.clear(); } catch (e) {} }"
+        )
+    except Exception:
+        pass
+    _status("Đã đăng xuất và xoá phiên của tài khoản đăng nhập nhầm.")
 
 
 def _session_cookie_header(page):
@@ -2087,12 +2286,53 @@ def _bootstrap_from_completion(page, completion, done_label):
         )
 
 
-def _wait_for_profile_or_card(page, timeout_ms=15000):
+_ACCOUNT_CHOOSER_MARKERS = (
+    "continue as",
+    "switch account",
+    "switch accounts",
+    "not you",
+    "chọn tài khoản",
+    "tiếp tục với tư cách",
+    "đổi tài khoản",
+)
+
+
+def _account_chooser_visible(body_text):
+    """Trang có đang hiện màn chọn tài khoản không (Meta đưa ra
+    khi có nhiều tài khoản để chọn — bấm nhầm là đăng nhập vào
+    tài khoản cũ)."""
+    return any(
+        marker in body_text for marker in _ACCOUNT_CHOOSER_MARKERS
+    )
+
+
+def _click_account_chooser_entry(page, email):
+    """Bấm vào mục tài khoản khớp email cần đăng nhập trên màn
+    chọn tài khoản. Trả True khi bấm được, False khi không thấy
+    mục đó (không bấm nhầm tài khoản khác)."""
+    try:
+        entry = page.get_by_text(email, exact=False)
+        if entry.count() and entry.first.is_visible():
+            entry.first.click(timeout=5000)
+            _status(
+                "Màn chọn tài khoản: đã chọn đúng email cần "
+                "đăng nhập."
+            )
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_profile_or_card(page, email=None, timeout_ms=15000):
     """Chờ một trong hai màn hình sau khi mã OTP đã xác nhận ở
     chế độ đăng nhập: form hồ sơ ("profile" — tài khoản Meta
     chưa hoàn tất hồ sơ Muse, cần điền) hoặc bước nhập thẻ
     ("card" — tài khoản đã đăng ký xong, đi thẳng tới thẻ).
-    Trả về None khi hết giờ mà không thấy màn hình nào.
+    Trả về None khi hết giờ mà không thấy màn hình nào, và
+    "chooser" khi Meta hiện màn chọn tài khoản mà không có
+    email cần đăng nhập trong đó (dừng lại thay vì bấm nhầm
+    tài khoản cũ).
     """
     card_markers = (
         "card number",
@@ -2113,6 +2353,15 @@ def _wait_for_profile_or_card(page, timeout_ms=15000):
             body = ""
         if any(marker in body for marker in card_markers):
             return "card"
+        if _account_chooser_visible(body):
+            # Màn chọn tài khoản: chỉ bấm khi thấy đúng email
+            # cần đăng nhập; không thấy thì dừng ngay, không bấm
+            # nhầm sang tài khoản cũ đang hiện trên màn hình.
+            if email and email.lower() in body:
+                if _click_account_chooser_entry(page, email):
+                    page.wait_for_timeout(1000)
+                    continue
+            return "chooser"
         page.wait_for_timeout(500)
     return None
 
@@ -3731,22 +3980,49 @@ def main():
 
     playwright = sync_playwright().start()
     browser = None
+    context = None
     page = None
     try:
         browser = playwright.chromium.launch(
             headless=False, proxy=None if DIRECT_MODE else proxy
         )
-        page = browser.new_page()
+        # Mỗi lần mở trình duyệt là context SẠCH hoàn toàn (kể cả
+        # khi dùng cùng một proxy — proxy chỉ đổi IP thoát):
+        # _open_clean_page tạo context mới + xoá hết cookie rồi
+        # mới cho điều hướng tới trang đăng nhập. Mọi luồng đều
+        # qua đây, không có đường nào bỏ qua bước dọn sạch.
+        context, page = _open_clean_page(browser)
         page.set_default_timeout(PAGE_TIMEOUT_MS)
         # Không kiểm tra IP thoát nữa: kho proxy do người dùng đảm
         # bảo toàn bộ là proxy US. Nếu một proxy nào đó thoát sai
         # khu vực, màn hình waitlist sau bước hồ sơ vẫn chặn lại.
         mailbox = _load_mailbox(email)
-        try:
-            existing_ids = _get_message_ids(mailbox)
-        except Exception:
-            # Hộp thư mới luôn trống; không lấy được danh sách thư cũ
-            # thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng ký.
+        if auto and not _mailbox_file_matches(email):
+            # App chính luôn ghi mailbox.txt trước khi mở helper —
+            # file thiếu/lệch email nghĩa là helper sắp đọc mã OTP
+            # từ hộp thư SAI (của tài khoản khác). Dừng ngay thay
+            # vì đăng nhập nhầm tài khoản cũ.
+            raise RuntimeError(
+                "Hộp thư của tài khoản này chưa được app chính ghi "
+                "đúng (mailbox.txt thiếu hoặc lệch email) — dừng "
+                "lại thay vì đọc mã OTP từ hộp thư sai."
+            )
+        existing_ids = None
+        for _attempt in range(3):
+            try:
+                existing_ids = _get_message_ids(mailbox)
+                break
+            except Exception:
+                time.sleep(2)
+        if existing_ids is None:
+            # Hộp thư mới luôn trống; không lấy được danh sách thư
+            # cũ thì dùng tập rỗng làm mốc, đừng chặn cả lượt đăng
+            # ký — nhưng hộp thư đã khớp email ở trên nên mã cũ
+            # (nếu có) cũng chỉ là của đúng tài khoản này.
+            _status(
+                "Không lấy được danh sách thư cũ sau 3 lần thử — "
+                "dùng tập rỗng làm mốc."
+            )
             existing_ids = set()
         if meta:
             # Chế độ đăng ký Meta: chạy xong luồng Meta thì dừng —
@@ -3882,10 +4158,20 @@ def main():
                 # live 2026-11-13 15:51). Xử lý các màn xác minh
                 # trước (bấm Continue + giải CAPTCHA qua CapSolver
                 # + up selfie), rồi mới xem lại màn nào hiện.
-                where = _wait_for_profile_or_card(page)
+                where = _wait_for_profile_or_card(page, email)
                 if where is None:
                     _handle_login_checkpoint(page)
-                    where = _wait_for_profile_or_card(page)
+                    where = _wait_for_profile_or_card(page, email)
+                if where == "chooser":
+                    # Meta hiện màn chọn tài khoản mà không có
+                    # email cần đăng nhập — dừng lại thay vì bấm
+                    # nhầm vào tài khoản cũ đang hiện trên màn
+                    # hình. Lượt sau chạy lại với phiên sạch.
+                    raise RuntimeError(
+                        "Meta hiện màn hình chọn tài khoản mà không "
+                        "có email cần đăng nhập — dừng lại thay vì "
+                        "đăng nhập nhầm tài khoản cũ."
+                    )
                 if where == "profile":
                     _status("Mã đã xác nhận, đang điền hồ sơ...")
                     _fill_profile(page)
@@ -4072,6 +4358,11 @@ def main():
             _handle_photo_after_card(page)
             _wait_for_muse_interface(page)
             _wait_for_app_shell(page)
+            # Xác minh tài khoản đang đăng nhập đúng email cần
+            # đăng nhập TRƯỚC khi lấy mã mời + cookie và báo
+            # thành công — đăng nhập nhầm tài khoản cũ thì dừng ở
+            # đây, không lưu cookie/mã mời của tài khoản sai.
+            _verify_muse_account(page, email)
             redeem_code = _load_redeem_code()
             # Chế độ đăng nhập không quy đổi mã mời (file redeem có
             # thể là mã cũ sót lại từ lượt đăng ký trước).
@@ -4146,6 +4437,11 @@ def main():
         )
         _wait_for_browser_close(page)
     finally:
+        try:
+            if context is not None:
+                context.close()
+        except Exception:
+            pass
         if browser and browser.is_connected():
             browser.close()
         playwright.stop()
@@ -4336,6 +4632,27 @@ def _click_when_ready(page, locator, label):
         page.wait_for_timeout(250)
     page.wait_for_timeout(UI_SETTLE_MS)
     locator.click(timeout=BUTTON_TIMEOUT_MS)
+
+
+def _mailbox_file_matches(email):
+    """File mailbox{LANE_SUFFIX}.txt có đúng email cần chạy không.
+
+    App chính luôn ghi file này trước khi mở helper (cả đăng ký,
+    đăng ký Meta và đăng nhập Muse). File thiếu/hỏng/lệch email
+    nghĩa là helper sắp đọc mã OTP từ hộp thư của tài khoản khác
+    — phải dừng lại thay vì đăng nhập nhầm."""
+    try:
+        raw = paths.data_file(
+            f"mailbox{LANE_SUFFIX}.txt"
+        ).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("email") == email
+        and bool(data.get("provider"))
+    )
 
 
 def _load_mailbox(email):

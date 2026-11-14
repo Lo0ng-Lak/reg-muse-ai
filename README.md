@@ -408,6 +408,30 @@ file from the Meta tab is uploaded as before — or the run waits for a
 manual upload when no selfie file is saved. The photo step is never
 removed entirely, only skipped when it is not needed.
 
+**Clean browser every time (trình duyệt sạch mỗi lần mở):** every
+browser open starts from a completely fresh browser context — no
+cookies, no localStorage/sessionStorage, no login session from the
+previous account — even when the run uses the same proxy (the proxy
+only changes the exit IP; the browser itself is always new). The
+cleanup runs before any navigation to the login page, in all three
+flows (registration, Muse login, Meta registration), and the log
+shows "trình duyệt sạch (0 cookie còn lại)" for each account.
+
+**Login goes to the right account (đăng nhập đúng tài khoản):**
+before the OTP step the tool checks that the mailbox file matches
+the account it is about to log into (a mismatched mailbox file
+stops the run instead of reading an OTP from the wrong inbox). If
+Meta shows an account chooser after the OTP, the tool only clicks
+the entry matching the intended email — if that email is not on
+the chooser, it stops instead of logging into the old account
+shown there. After reaching the Muse interface, the tool verifies
+the logged-in account matches the intended email (read from the
+account menu) before harvesting the invite code and saving the
+session cookie; on a mismatch it logs out, clears the session and
+fails the account clearly, so the next run retries it with a clean
+browser. If the interface does not show any email, the run
+continues with a warning instead of blocking on an unreadable UI.
+
 Passwords (CapSolver key and the like) are stored by Python `keyring`
 in the Windows Credential Manager — cards are not stored there anymore;
 they live in `cards.json` (see above). The Excel sheet contains mailbox
