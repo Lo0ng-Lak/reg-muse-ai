@@ -1492,42 +1492,107 @@ class Coordinator:
     def _run_relogin_loop(self, settings):
         """Đăng nhập lại từng mail trong file Excel, lấy cookie mới.
 
-        Không proxy (ghi DIRECT), không thẻ, không mã mời. Mỗi
-        mail chạy một trình duyệt sạch, OTP đọc từ hộp thư của
+        Không proxy (ghi DIRECT), không thẻ, không mã mời. Tối đa
+        10 luồng: mỗi luồng một file hộp thư riêng, OTP đọc từ
         đúng mail đó. Có cookie thì ghi một dòng Email + Cookie
         vào file xuất. Không cookie thì bỏ qua mail đó.
         """
         rows = storage._relogin_accounts(settings.relogin_excel_path)
         if settings.total:
             rows = rows[: max(0, int(settings.total))]
-        total = len(rows)
+        if not rows:
+            self.events.put(
+                ("log", "Không có mail nào để đăng nhập lại.")
+            )
+            return 0, 0
+        requested = max(1, min(int(settings.lanes or 1), 10))
+        lanes = max(1, min(requested, len(rows)))
+        shared = {"success": 0, "fail": 0}
+        shared_lock = threading.Lock()
+        self.events.put(
+            (
+                "log",
+                f"Đăng nhập lại {len(rows)} mail ({lanes} luồng).",
+            )
+        )
+        threads = []
+        for lane_no in range(1, lanes + 1):
+            lane_rows = rows[lane_no - 1::lanes]
+            lane_args = (
+                settings, lane_no, lanes, lane_rows, shared, shared_lock
+            )
+            if lanes == 1:
+                self._run_relogin_lane(*lane_args)
+            else:
+                thread = threading.Thread(
+                    target=self._run_relogin_lane,
+                    args=lane_args,
+                    name=f"relogin-lane-{lane_no}",
+                    daemon=True,
+                )
+                thread.start()
+                threads.append(thread)
+        for thread in threads:
+            thread.join()
+        return shared["success"], shared["fail"]
+
+    def _run_relogin_lane(
+        self, settings, lane_no, lanes, rows, shared, shared_lock
+    ):
+        """Một luồng đăng nhập lại: lần lượt các mail được chia cho luồng."""
         helper = paths.SRC_DIR / "browser_helper.py"
-        success = 0
-        fail = 0
-        self._lane_local.suffix = ""
+        suffix = "" if lane_no == 1 else f"-{lane_no}"
+        self._lane_local.suffix = suffix
+        multi = lanes > 1
+        lane_tag = f"[Luồng {lane_no}] " if multi else ""
+        label_total = len(rows)
+        try:
+            storage._write_active_proxy("DIRECT", suffix)
+        except OSError as error:
+            self.events.put(
+                (
+                    "log",
+                    f"{lane_tag}Không ghi được proxy{suffix}.txt: {error}",
+                )
+            )
         for index, row in enumerate(rows, start=1):
             if self.stop_event.is_set():
                 break
             address = row["email"]
+            display = f"L{lane_no} · {index}" if multi else index
+            with shared_lock:
+                s_now = shared["success"]
+                f_now = shared["fail"]
             self.events.put(
                 (
                     "progress",
-                    (1, index, total, success, fail, "", False),
+                    (
+                        lane_no,
+                        index,
+                        label_total,
+                        s_now,
+                        f_now,
+                        "",
+                        multi,
+                    ),
                 )
             )
             self.events.put(
                 (
                     "log",
-                    f"[{index}/{total}] Đăng nhập lại {address}.",
+                    f"{lane_tag}[{display}/{label_total}] "
+                    f"Đăng nhập lại {address}.",
                 )
             )
             if row["provider"] == "mail.tm" and not row["secret"]:
-                fail += 1
+                with shared_lock:
+                    shared["fail"] += 1
                 self.events.put(
                     (
                         "log",
-                        f"[{index}/{total}] {address} thiếu mật khẩu "
-                        "hộp thư — không đọc được OTP, bỏ qua.",
+                        f"{lane_tag}[{display}/{label_total}] {address} "
+                        "thiếu mật khẩu hộp thư — không đọc được OTP, "
+                        "bỏ qua.",
                     )
                 )
                 continue
@@ -1537,16 +1602,17 @@ class Coordinator:
                         "provider": row["provider"],
                         "email": address,
                         "secret": row["secret"],
-                    }
+                    },
+                    suffix,
                 )
-                storage._write_active_proxy("DIRECT")
             except OSError as error:
-                fail += 1
+                with shared_lock:
+                    shared["fail"] += 1
                 self.events.put(
                     (
                         "log",
-                        f"[{index}/{total}] Không ghi được hộp thư "
-                        f"cho {address}: {error}",
+                        f"{lane_tag}[{display}/{label_total}] Không ghi "
+                        f"được hộp thư cho {address}: {error}",
                     )
                 )
                 continue
@@ -1560,39 +1626,44 @@ class Coordinator:
                 _card_skipped,
                 _facebook,
             ) = self._run_helper(
-                helper, address, index, total, relogin=True
+                helper, address, index, label_total, relogin=True
             )
             if helper_ok and cookie:
                 try:
-                    storage._write_relogin_cookie(
-                        settings.relogin_output_path, address, cookie
-                    )
+                    with shared_lock:
+                        storage._write_relogin_cookie(
+                            settings.relogin_output_path, address, cookie
+                        )
+                        shared["success"] += 1
                 except RuntimeError as error:
-                    fail += 1
+                    with shared_lock:
+                        shared["fail"] += 1
                     self.events.put(
-                        ("log", f"[{index}/{total}] {error}")
+                        (
+                            "log",
+                            f"{lane_tag}[{display}/{label_total}] {error}",
+                        )
                     )
                     continue
-                success += 1
                 self.events.put(
                     (
                         "log",
-                        f"[{index}/{total}] Đã lấy cookie của "
-                        f"{address} và ghi vào file xuất.",
+                        f"{lane_tag}[{display}/{label_total}] Đã lấy "
+                        f"cookie của {address} và ghi vào file xuất.",
                     )
                 )
             else:
-                fail += 1
+                with shared_lock:
+                    shared["fail"] += 1
                 self.events.put(
                     (
                         "log",
-                        f"[{index}/{total}] Bỏ {address}, chuyển "
-                        "sang mail kế.",
+                        f"{lane_tag}[{display}/{label_total}] Bỏ "
+                        f"{address}, chuyển sang mail kế.",
                     )
                 )
-            if index < total and not self.stop_event.is_set():
+            if index < label_total and not self.stop_event.is_set():
                 time.sleep(PAUSE_BETWEEN_ACCOUNTS_SECONDS)
-        return success, fail
 
     def _run_helper(self, helper, address, index, total, meta=False,
                       muse_login=False, card_id="", card_holder=None,

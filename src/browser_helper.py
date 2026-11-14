@@ -804,8 +804,13 @@ def _disclosure_gate(page):
     return "a few things to know" in text
 
 
-def _click_get_started(page):
-    """Bấm Get started trên cổng disclosure. Không bấm nút khác."""
+def _get_started_button(page):
+    """Nút Get started còn hiện trên cổng disclosure.
+
+    Nút này màu xanh khi trang chưa chuyển. Còn thấy nút là
+    còn phải bấm — bấm một lần mà trang đứng yên thì nút xanh
+    lại như cũ.
+    """
     for name in ("Get started", "Bắt đầu"):
         target = None
         try:
@@ -821,14 +826,24 @@ def _click_get_started(page):
                 )
             except Exception:
                 target = None
-        if target is None:
-            continue
+        if target is not None:
+            return target
+    return None
+
+
+def _click_get_started(page):
+    """Bấm Get started trên cổng disclosure. Không bấm nút khác."""
+    target = _get_started_button(page)
+    if target is not None:
+        try:
+            target.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
         try:
             target.click(timeout=5000)
+            return True
         except Exception:
-            continue
-        _status(f"Đã bấm '{name}' để vào Muse.")
-        return True
+            pass
     try:
         clicked = bool(
             page.evaluate(
@@ -848,8 +863,6 @@ def _click_get_started(page):
         )
     except Exception:
         clicked = False
-    if clicked:
-        _status("Đã bấm 'Get started' để vào Muse.")
     return clicked
 
 
@@ -870,6 +883,7 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
     """
     deadline = time.monotonic() + timeout_seconds
     clicks = 0
+    disclosure_clicks = 0
     last_click = None
     interface_since = None
     link_clicked = False
@@ -878,13 +892,24 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
             return
         _reject_facebook_proxy(page)
         if _disclosure_gate(page):
-            if clicks >= 3:
-                return
-            if _click_get_started(page):
-                clicks += 1
+            # Trang "A few things to know": bấm Get started một
+            # lần thường không chuyển, nút xanh lại đúng chỗ.
+            # Còn nút xanh trên đúng trang này thì bấm lại, không
+            # dừng sau 3 lần rồi đứng đó.
+            if _get_started_button(page) is not None:
+                if _click_get_started(page):
+                    disclosure_clicks += 1
+                    if disclosure_clicks == 1:
+                        _status("Đã bấm 'Get started' để vào Muse.")
+                    else:
+                        _status(
+                            "Nút Get started vẫn xanh trên trang "
+                            "này — bấm lại lần "
+                            f"{disclosure_clicks}."
+                        )
                 page.wait_for_timeout(1500)
             else:
-                page.wait_for_timeout(1000)
+                page.wait_for_timeout(800)
             continue
         if link_clicked and _meta_account_link_screen(page) is not None:
             page.wait_for_timeout(1000)
@@ -4919,10 +4944,9 @@ def _run_muse_relogin(page, email, mailbox, existing_ids):
         page, email, abort_on_waitlist=True
     )
     _click_when_ready(page, continue_button, "Continue")
-    try:
-        existing_ids = _get_message_ids(mailbox)
-    except Exception:
-        pass
+    # Giữ mốc thư đã chụp TRƯỚC khi gửi email. Chụp lại sau khi
+    # bấm Continue sẽ tính luôn thư OTP vừa tới là thư cũ, rồi
+    # chờ mã mới mãi không thấy.
     _status(
         "Đã gửi email, đang chờ mã OTP từ "
         f"{mailbox['provider']}..."

@@ -69,6 +69,12 @@ class ReloginTab(ttk.Frame):
         self.count_entry = ttk.Entry(run, width=8)
         self.count_entry.pack(side="left", padx=(6, 12))
         self.count_entry.insert(0, "0")
+        ttk.Label(run, text="Số luồng:").pack(side="left")
+        self.lanes_var = tk.IntVar(value=1)
+        self.lanes_spin = ttk.Spinbox(
+            run, from_=1, to=10, width=5, textvariable=self.lanes_var
+        )
+        self.lanes_spin.pack(side="left", padx=(6, 12))
         self.start_button = ttk.Button(
             run, text="Đăng nhập lại", command=self._start
         )
@@ -164,6 +170,11 @@ class ReloginTab(ttk.Frame):
                 "Nhập 0 để chạy tất cả, hoặc một số nguyên dương.",
             )
             return
+        try:
+            lanes = int(self.lanes_var.get())
+        except (tk.TclError, ValueError):
+            lanes = 1
+        lanes = max(1, min(lanes, 10))
         rows = storage._relogin_accounts(source)
         if not rows:
             messagebox.showwarning(
@@ -180,6 +191,7 @@ class ReloginTab(ttk.Frame):
         settings = RunSettings(
             total=count,
             direct=True,
+            lanes=lanes,
             relogin=True,
             relogin_excel_path=source,
             relogin_output_path=output,
@@ -192,8 +204,8 @@ class ReloginTab(ttk.Frame):
                 f"{planned} mail trong {Path(source).name} ---"
             )
             self.app.append_log(
-                "Không dùng proxy. OTP lấy từ hộp thư của đúng "
-                "mail đó. Cookie ghi vào "
+                f"Chạy {lanes} luồng. Không dùng proxy. OTP lấy từ "
+                "hộp thư của đúng mail đó. Cookie ghi vào "
                 f"{Path(output).name} (cột Email và Cookie đăng nhập)."
             )
             if not self.coordinator.start(settings):
@@ -235,6 +247,7 @@ class ReloginTab(ttk.Frame):
             self.output_entry,
             self.browse_output_button,
             self.count_entry,
+            self.lanes_spin,
             self.start_button,
         ):
             widget.configure(state=state)

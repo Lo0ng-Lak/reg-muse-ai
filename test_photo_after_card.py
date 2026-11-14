@@ -65,8 +65,14 @@ class _FakeElement:
     def bounding_box(self):
         return {"x": 10, "y": 10, "width": 50, "height": 20}
 
-    def click(self, timeout=None):
+    def click(self, timeout=None, **_kwargs):
         self.page.clicked.append(self.name or self.kind)
+        # Lần bấm đầu nút vẫn xanh, trang không chuyển. Lần sau
+        # mới vào Muse — đúng lúc Get started bị bấm mà xanh lại.
+        sticks = getattr(self.page, "get_started_sticks", 0)
+        if self.name == "Get started" and sticks > 0:
+            self.page.get_started_sticks = sticks - 1
+            return
         # Bấm Continue ở trang ảnh / Get started ở cổng → vào Muse
         # (URL đổi sang giao diện như trình duyệt thật).
         if self.kind == "button" and self.name in (
@@ -341,6 +347,18 @@ def test_disclosure_page_clicks_get_started():
     assert page.url == "https://muse.ai/", page.url
 
 
+def test_disclosure_clicks_again_while_button_stays_blue():
+    # Bấm Get started một lần mà nút vẫn xanh, trang không chuyển.
+    # Phải bấm lại trên đúng trang đó cho tới khi qua.
+    page = _FakePage(
+        "https://muse.ai/access/disclosure", state="gate"
+    )
+    page.get_started_sticks = 1
+    browser_helper._confirm_final_step(page, timeout_seconds=8)
+    assert page.clicked.count("Get started") >= 2, page.clicked
+    assert page.url == "https://muse.ai/", page.url
+
+
 def test_handle_skips_photo_in_muse_chat():
     page = _muse_chat_page()
     captured, orig = _capture_status()
@@ -368,6 +386,7 @@ TESTS = [
     test_upload_refuses_chat_ui,
     test_handle_skips_photo_in_muse_chat,
     test_disclosure_page_clicks_get_started,
+    test_disclosure_clicks_again_while_button_stays_blue,
 ]
 
 
