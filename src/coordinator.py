@@ -69,6 +69,11 @@ def _invite_from_line(line):
     return None
 
 
+# Cùng một thẻ chưa thêm được lần nào, mà lỗi sau bước thẻ
+# lặp trên từng này trình duyệt, thì thẻ đó lỗi — không dùng nữa.
+CARD_TROUBLE_BROWSERS = 3
+
+
 @dataclass
 class CardRunState:
     """Một thẻ trong kho, với giới hạn + số lần dùng của lượt chạy.
@@ -85,6 +90,9 @@ class CardRunState:
     limit: int = 0
     used: int = 0
     in_flight: int = 0
+    # Số trình duyệt liên tiếp gặp "Something went wrong" sau
+    # bước thẻ, khi thẻ này chưa từng thêm được lần nào.
+    trouble: int = 0
 
     def exhausted(self):
         return (
@@ -206,6 +214,38 @@ class _CardVaultRun:
             )
         self.manual = False
 
+    def note_card_trouble(self, card_id):
+        """Lỗi 'Something went wrong' sau khi điền thẻ.
+
+        Thẻ đã từng thêm được thì lỗi này chỉ do proxy. Thẻ chưa
+        dùng lần nào mà lỗi lặp đủ CARD_TROUBLE_BROWSERS trình
+        duyệt thì đánh dấu full để mọi luồng bỏ thẻ đó.
+        Trả về (đã loại thẻ, số trình duyệt đã gặp, nhãn).
+        """
+        card = None
+        for item in self.cards:
+            if item.card_id == card_id:
+                card = item
+                break
+        if card is None:
+            return False, 0, ""
+        try:
+            disk_used = storage._load_vault_card_success_count(card_id)
+        except Exception:
+            disk_used = 0
+        if card.used > 0 or disk_used > 0:
+            card.trouble = 0
+            return False, 0, card.label
+        card.trouble += 1
+        if card.trouble < CARD_TROUBLE_BROWSERS:
+            return False, card.trouble, card.label
+        try:
+            storage._mark_vault_card_full(card_id)
+        except Exception:
+            pass
+        self.mark_card_full(card_id)
+        return True, card.trouble, card.label
+
     def take_over_card(self, holder, card_id):
         """Chuyển chỗ đang giữ từ thẻ cũ sang thẻ vừa được nhập.
 
@@ -250,6 +290,7 @@ class _CardVaultRun:
         if card is None:
             return
         card.used += 1
+        card.trouble = 0
         storage._save_vault_card_success_count(card.card_id, card.used)
 
     def note_for(self, card):
@@ -650,20 +691,26 @@ class Coordinator:
                 )
                 break
             card = None
-            with shared_lock:
-                vault = shared["vault"]
-                # Giữ chỗ ngay trong cùng một khóa với phép kiểm
-                # tra: hai luồng không thể cùng thấy "còn chỗ"
-                # rồi cùng chạy vượt giới hạn thẻ. Khi thẻ đang
-                # dùng đủ giới hạn, reserve() tự xoay sang thẻ
-                # kế còn giới hạn; hết kho thì trả stop=True.
-                # Chỗ được trả lại ở finally cuối vòng lặp.
-                card, switched_from, card_hit = vault.reserve()
-                log_card_stop = (
-                    card_hit and not shared["card_stop_logged"]
-                )
-                if log_card_stop:
-                    shared["card_stop_logged"] = True
+            switched_from = None
+            card_hit = False
+            log_card_stop = False
+            # Đăng ký Meta không nộp thẻ. Không giữ chỗ thẻ:
+            # năm luồng không dừng lệch nhau vì hạn mức thẻ Muse.
+            if not settings.meta:
+                with shared_lock:
+                    vault = shared["vault"]
+                    # Giữ chỗ ngay trong cùng một khóa với phép kiểm
+                    # tra: hai luồng không thể cùng thấy "còn chỗ"
+                    # rồi cùng chạy vượt giới hạn thẻ. Khi thẻ đang
+                    # dùng đủ giới hạn, reserve() tự xoay sang thẻ
+                    # kế còn giới hạn; hết kho thì trả stop=True.
+                    # Chỗ được trả lại ở finally cuối vòng lặp.
+                    card, switched_from, card_hit = vault.reserve()
+                    log_card_stop = (
+                        card_hit and not shared["card_stop_logged"]
+                    )
+                    if log_card_stop:
+                        shared["card_stop_logged"] = True
             if card_hit:
                 if log_card_stop:
                     self.events.put(("log", vault.stop_message()))
@@ -823,15 +870,11 @@ class Coordinator:
                                 )
                             saved = True
                             shared["success"] += 1
-                            # Tài khoản chỉ được lưu sau khi qua bước
-                            # thẻ, nên đây đúng là 1 lượt dùng thẻ
-                            # đang giữ chỗ. Không có thẻ trong kho
-                            # (nhập tay ở bước thẻ) thì không đếm.
-                            # Ngoại lệ: tài khoản đã đăng nhập sẵn
-                            # qua màn liên kết nên bỏ qua bước thẻ
-                            # (CARD_SKIPPED) — thẻ chưa hề dùng,
-                            # không được tính lượt.
-                            if not card_skipped:
+                            # Tài khoản Muse chỉ được lưu sau khi qua
+                            # bước thẻ, nên đó là 1 lượt dùng thẻ.
+                            # Đăng ký Meta không nộp thẻ — không đếm.
+                            # CARD_SKIPPED: đã vào sẵn, thẻ chưa dùng.
+                            if not settings.meta and not card_skipped:
                                 shared["vault"].record_success(card)
                         except RuntimeError as error:
                             shared["fail"] += 1
@@ -1756,6 +1799,43 @@ class Coordinator:
                         # cho tài khoản này KHÔNG bị tính lượt
                         # dùng (xem hai chỗ gọi _run_helper).
                         signals["card_skipped"] = True
+                        continue
+                    if line.startswith("CARD_TROUBLE:"):
+                        # Sau bước thẻ: lỗi lặp trên nhiều trình duyệt
+                        # và thẻ chưa từng thêm được thì thẻ đó lỗi.
+                        trouble_id = line.split(":", 1)[1].strip()
+                        marked = False
+                        count = 0
+                        label = ""
+                        if (
+                            vault is not None
+                            and vault_lock is not None
+                            and trouble_id
+                        ):
+                            with vault_lock:
+                                marked, count, label = vault.note_card_trouble(
+                                    trouble_id
+                                )
+                        if marked:
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{index}/{total}] Thẻ {label} chưa thêm "
+                                    f"được lần nào mà lỗi sau bước thẻ lặp trên "
+                                    f"{count} trình duyệt — đánh dấu thẻ lỗi, "
+                                    "không dùng nữa.",
+                                )
+                            )
+                        elif count:
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{index}/{total}] Thẻ {label} chưa thêm "
+                                    "được lần nào, lỗi sau bước thẻ lần "
+                                    f"{count}/{CARD_TROUBLE_BROWSERS} — "
+                                    "vẫn đổi proxy.",
+                                )
+                            )
                         continue
                     if line.startswith("CARD_FULL:"):
                         # Thẻ bị "too many ad accounts": helper đã

@@ -45,6 +45,10 @@ CAPSOLVER_KEY_FIELD = "api_key"
 # Thời gian chờ tối đa cho chặng sau OTP trong luồng Meta
 # (CAPTCHA + selfie + vào tài khoản): 7 phút.
 META_POST_OTP_TIMEOUT_SECONDS = 420
+# Trang đăng ký Meta không đổi URL lẫn chữ trong từng này giây
+# thì coi là đứng im: bỏ proxy để luồng đó đi tiếp, không để
+# một luồng ngồi lì trong khi các luồng khác vẫn chạy.
+_META_STALL_SECONDS = 25
 # Tải lại trang khi Meta lỗi (chủ trương 2026-11-13 16:17): chưa
 # gửi mặt thì tối đa 5 lần (cả lúc mới mở trang lẫn khi đang làm
 # dở trước bước selfie); gửi mặt xong thì tối đa 20 lần.
@@ -304,8 +308,11 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
     thẻ vẫn nằm phía sau nên không được tính là xong.
     "Too many attempts" trả về "retry": tải lại trang rồi điền
     lại chính thẻ đó, không đánh dấu full.
-    Trả về "done", "retry", "rejected", "waitlist", "closed"
-    hoặc "timeout".
+    "Something went wrong / We're having trouble completing
+    your request" sau khi bấm Confirm trả về "proxy": bỏ proxy,
+    không đánh dấu thẻ full.
+    Trả về "done", "retry", "rejected", "proxy", "waitlist",
+    "closed" hoặc "timeout".
     """
     waitlist_markers = ("join the waitlist", "available in your country")
     card_markers = (
@@ -324,6 +331,8 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
             text = page.locator("body").inner_text(timeout=3000).lower()
         except Exception:
             text = ""
+        if "having trouble completing your request" in text:
+            return "proxy"
         if (
             "too many attempts" in text
             or "too many failed attempts" in text
@@ -408,6 +417,20 @@ def _do_card_step(page, card_id):
                 "thẻ được chấp nhận thì mới lưu tài khoản."
             )
             card_outcome = _wait_for_card_step_done(page)
+        if card_outcome == "proxy":
+            _dismiss_card_blocked_dialog(page)
+            if current:
+                _status(f"CARD_TROUBLE: {current}")
+            _status(
+                "PROXY_BURN: Sau bước điền thẻ, Muse báo "
+                "'Something went wrong — We're having trouble "
+                "completing your request.' — bỏ proxy này, "
+                "đổi sang proxy khác."
+            )
+            raise RuntimeError(
+                "Sau khi điền thẻ, Muse báo không hoàn tất được "
+                "yêu cầu. Đã bỏ proxy, đổi sang proxy khác."
+            )
         if card_outcome == "retry":
             if reloads >= 2:
                 raise RuntimeError(
@@ -2693,15 +2716,21 @@ def _api_response_has_challenge(data, text):
     )
 
 
-def _wait_for_code_from_mail(page, mailbox, existing_ids):
+def _wait_for_code_from_mail(page, mailbox, existing_ids,
+                             watch_block=False):
     """Chờ mã OTP trong hộp thư, không cần form mã trên trang
     (dùng cho luồng API — trang vẫn đang ở bước email). Nhịp và
-    thời gian chờ giống hệt _wait_for_verification_code."""
+    thời gian chờ giống hệt _wait_for_verification_code.
+    watch_block: đăng ký Meta — trang báo từ chối thì bỏ proxy
+    ngay, không chờ hết giờ hộp thư.
+    """
     deadline = time.monotonic() + CODE_TIMEOUT_SECONDS
     warned = False
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError("Cửa sổ Chromium đã đóng trước khi xác minh.")
+        if watch_block:
+            _meta_raise_if_blocked(page)
         try:
             code = _verification_code_from_new_messages(mailbox, existing_ids)
         except Exception:
@@ -3954,6 +3983,53 @@ def _first_in_viewport(page, locator):
     return found[0] if found else None
 
 
+def _meta_saved_profile_button(page):
+    """Nút Use another profile, kể cả khi không phải role=button."""
+    name = re.compile(r"use another profile", re.I)
+    locators = []
+    try:
+        locators.append(page.get_by_role("button", name=name))
+    except Exception:
+        pass
+    try:
+        locators.append(page.get_by_text(name))
+    except Exception:
+        pass
+    for locator in locators:
+        target = _first_in_viewport(page, locator) or _first_visible(locator)
+        if target is not None:
+            return target
+        try:
+            count = locator.count()
+        except Exception:
+            continue
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
+                continue
+    return None
+
+
+def _meta_pass_saved_profile(page):
+    """Màn hồ sơ có sẵn thì bấm Use another profile, không bấm Continue.
+
+    Meta hiện avatar + username + Continue xanh khi còn nhớ một
+    hồ sơ. Bấm Continue là vào hồ sơ đó. Bấm Use another profile
+    để về form đăng ký. Trả về True khi đã bấm.
+    """
+    target = _meta_saved_profile_button(page)
+    if target is None:
+        return False
+    _status(
+        "Meta: đang nhớ một hồ sơ sẵn — bấm Use another profile."
+    )
+    target.click(timeout=BUTTON_TIMEOUT_MS)
+    return True
+
+
 def _meta_click(page, locator, label):
     """Bấm một nút của luồng Meta, chịu được nút trùng.
 
@@ -3966,12 +4042,23 @@ def _meta_click(page, locator, label):
     (Continue, Confirm...), nơi nút PHẢI xuất hiện.
     """
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    started = time.monotonic()
+    announced = False
+    stall = {}
     while True:
         if _page_closed(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi bấm được "
                 f"nút {label}."
             )
+        if _meta_pass_saved_profile(page):
+            stall.clear()
+            page.wait_for_timeout(1000)
+            continue
+        _meta_raise_if_blocked(page, stall)
+        if not announced and time.monotonic() - started >= 5:
+            announced = True
+            _status(f"Meta: vẫn đang chờ nút {label}...")
         target = _first_in_viewport(page, locator) or _first_visible(
             locator
         )
@@ -4061,6 +4148,7 @@ def _meta_click_login(page):
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
     attempts = 0
     error_reloads = 0
+    stall = {}
     while time.monotonic() < deadline:
         if _page_closed(page):
             raise RuntimeError(
@@ -4088,7 +4176,13 @@ def _meta_click_login(page):
             except Exception:
                 pass
             page.wait_for_timeout(2000)
+            stall.clear()
             continue
+        if _meta_pass_saved_profile(page):
+            stall.clear()
+            page.wait_for_timeout(1000)
+            continue
+        _meta_raise_if_blocked(page, stall)
         attempts += 1
         if _meta_testid_login(page):
             break
@@ -4118,12 +4212,23 @@ def _meta_wait_visible(page, locator, label):
     luồng Meta.
     """
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    announced = False
+    started = time.monotonic()
+    stall = {}
     while True:
         if _page_closed(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trong lúc chờ "
                 f"{label} hiện ra."
             )
+        passed = _meta_pass_saved_profile(page)
+        if passed:
+            stall.clear()
+            continue
+        _meta_raise_if_blocked(page, stall)
+        if not announced and time.monotonic() - started >= 5:
+            announced = True
+            _status(f"Meta: vẫn đang chờ '{label}'...")
         try:
             count = locator.count()
         except Exception:
@@ -4202,6 +4307,71 @@ def _meta_fill_code(page, code):
             field.fill(code)
             return
     _fill_verification_code(page, code)
+
+
+def _meta_page_stamp(page):
+    """Dấu trang để biết bước đăng ký Meta còn chuyển không."""
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    try:
+        text = page.locator("body").inner_text(timeout=2000)
+    except Exception:
+        text = ""
+    text = " ".join(str(text).split()).lower()[:180]
+    text = text.replace("\u2019", "'").replace("\u2018", "'")
+    return (url, text)
+
+
+def _meta_raise_if_blocked(page, stall=None, stall_seconds=_META_STALL_SECONDS):
+    """Trang đăng ký Meta từ chối hoặc đứng im thì bỏ proxy ngay.
+
+    Không chờ hết giờ của bước đang đứng. Khác lỗi Application
+    Error (lỗi đó vẫn tải lại trang). Không dùng cho bước thẻ
+    của Muse. stall là dict {'stamp', 'since'} của vòng chờ:
+    trang không đổi quá stall_seconds thì cũng bỏ proxy, để
+    luồng này không ngồi lì trong khi luồng khác vẫn chạy.
+    """
+    _reject_facebook_proxy(page)
+    stamp = _meta_page_stamp(page)
+    text = stamp[1]
+    blocked = (
+        "having trouble completing your request" in text
+        or "couldn't complete that request" in text
+        or "too many attempts" in text
+        or "something went wrong" in text
+    )
+    if blocked:
+        _status(
+            "PROXY_BURN: Meta báo không hoàn tất được yêu cầu "
+            "trên IP này — bỏ proxy, đổi sang proxy khác."
+        )
+        raise RuntimeError(
+            "Meta từ chối yêu cầu trên IP này. "
+            "Đã bỏ proxy, đổi sang proxy khác."
+        )
+    if stall is None:
+        return
+    now = time.monotonic()
+    if stall.get("stamp") != stamp:
+        stall["stamp"] = stamp
+        stall["since"] = now
+        return
+    since = stall.get("since")
+    if since is None:
+        stall["since"] = now
+        return
+    if now - since < stall_seconds:
+        return
+    _status(
+        "PROXY_BURN: Meta đứng im không chuyển bước — "
+        "bỏ proxy này, đổi sang proxy khác."
+    )
+    raise RuntimeError(
+        "Meta đứng im ở một bước. "
+        "Đã bỏ proxy, đổi sang proxy khác."
+    )
 
 
 def _meta_app_error_visible(page):
@@ -4501,6 +4671,9 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
     checkpoint_clicks = 0
     checkpoint_seen_at = None
     captcha_dump_done = False
+    selfie_waits = 0
+    unknown_since = None
+    unknown_logged = 0.0
     while time.monotonic() < deadline:
         if page.is_closed():
             raise RuntimeError(
@@ -4536,7 +4709,13 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
             except Exception:
                 pass
             page.wait_for_timeout(2000)
+            unknown_since = None
             continue
+        if _meta_pass_saved_profile(page):
+            unknown_since = None
+            page.wait_for_timeout(1000)
+            continue
+        _meta_raise_if_blocked(page)
         if _meta_logged_in(page):
             # Xác nhận lần hai sau 2 giây để loại lần đọc lúc
             # trang đang chuyển (nút Log in chưa kịp hiện lại).
@@ -4547,6 +4726,8 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
         # CAPTCHA trước checkpoint (xem docstring): ở màn
         # checkpoint, ô captcha đã hiện cùng nút Continue.
         detected = capsolver.detect_captcha(page)
+        if detected is not None:
+            unknown_since = None
         if detected is not None and detected["kind"] not in captcha_solved:
             # Báo TRƯỚC khi giải: bước này chờ CapSolver 10–60 giây
             # (tối đa 180 giây) mà trong lúc chờ log im lặng — nhìn
@@ -4605,6 +4786,7 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                     "chụp màn hình gửi lại để bổ sung cách xử lý."
                 )
         if _meta_checkpoint_visible(page):
+            unknown_since = None
             # Không có CAPTCHA (đã kiểm tra ở trên) mà vẫn ở
             # checkpoint: bấm Continue để hiện CAPTCHA. Bấm quá
             # 3 lần mà trang không chuyển thì lỗi rõ thay vì
@@ -4668,6 +4850,7 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
         else:
             checkpoint_seen_at = None
         if not selfie_done and _meta_selfie_page_visible(page):
+            unknown_since = None
             # Đang ở trang up selfie. Up file (nếu chưa up) rồi
             # bấm nút xác nhận — nút có thể hiện muộn sau khi
             # ảnh tải lên (live 2026-11-13: ảnh preview + nút
@@ -4700,9 +4883,17 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
             )
             if clicked:
                 selfie_done = True
+                selfie_waits = 0
+                unknown_since = None
                 _status(f"Meta: đã bấm {clicked} sau khi up selfie.")
                 page.wait_for_timeout(2000)
             else:
+                selfie_waits += 1
+                if selfie_waits >= 8:
+                    raise RuntimeError(
+                        "Đang ở bước up ảnh selfie nhưng không bấm "
+                        "được Continue — không đứng chờ hết giờ."
+                    )
                 page.wait_for_timeout(2000)
             continue
         if not relogin_tried:
@@ -4732,7 +4923,22 @@ def _meta_finish_after_otp(page, api_key, selfie_path):
                         "thử lại ở vòng sau."
                     )
                 page.wait_for_timeout(2000)
+                unknown_since = None
                 continue
+        now = time.monotonic()
+        if unknown_since is None:
+            unknown_since = now
+        elif now - unknown_since >= 45:
+            raise RuntimeError(
+                "Meta đứng ở màn hình không thuộc các bước đăng ký "
+                f"(URL hiện tại: {page.url[:120]})."
+            )
+        if now - unknown_logged >= 15:
+            unknown_logged = now
+            _status(
+                "Meta: chưa nhận ra bước hiện tại — "
+                f"URL {page.url[:80]}"
+            )
         page.wait_for_timeout(3000)
     raise RuntimeError(
         "Hết "
@@ -4767,11 +4973,22 @@ def _meta_find_email_field(page):
 def _meta_wait_email_field(page):
     """Chờ ô nhập email ở auth.meta.com hiện ra rồi trả về nó."""
     deadline = time.monotonic() + BUTTON_TIMEOUT_MS / 1000
+    started = time.monotonic()
+    announced = False
+    stall = {}
     while True:
         if _page_closed(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trong lúc chờ ô email."
             )
+        if _meta_pass_saved_profile(page):
+            stall.clear()
+            page.wait_for_timeout(1000)
+            continue
+        _meta_raise_if_blocked(page, stall)
+        if not announced and time.monotonic() - started >= 5:
+            announced = True
+            _status("Meta: vẫn đang chờ ô email...")
         found = _meta_find_email_field(page)
         if found is not None:
             return found
@@ -4796,11 +5013,17 @@ def _meta_pick_email_signup(page):
     """
     chooser = page.get_by_text("Use mobile number or email", exact=True)
     deadline = time.monotonic() + 30
+    stall = {}
     while True:
         if _page_closed(page):
             raise RuntimeError(
                 "Cửa sổ Chromium đã đóng trước khi vào form email."
             )
+        if _meta_pass_saved_profile(page):
+            stall.clear()
+            page.wait_for_timeout(1000)
+            continue
+        _meta_raise_if_blocked(page, stall)
         if _meta_find_email_field(page) is not None:
             return
         if _first_visible(chooser) is not None:
@@ -4824,7 +5047,16 @@ def _meta_click_birthday_continue(page, birth_date, meta_password):
     chọn lại ngày sinh + mật khẩu một lần, vẫn tắt thì lỗi rõ kèm
     trạng thái thay vì đứng im.
     """
+    for _ in range(4):
+        if not _meta_pass_saved_profile(page):
+            break
+        page.wait_for_timeout(1000)
+    if _meta_saved_profile_button(page) is not None:
+        raise RuntimeError(
+            "Meta vẫn hiện hồ sơ có sẵn sau khi bấm Use another profile."
+        )
     for attempt in range(2):
+        _meta_raise_if_blocked(page)
         button = page.get_by_role("button", name="Continue", exact=True)
         target = _first_in_viewport(page, button) or _first_visible(
             button
@@ -5094,7 +5326,9 @@ def _run_meta_registration(page, email, mailbox, existing_ids):
         page.get_by_text("Confirm your account", exact=True),
         "Confirm your account",
     )
-    code = _wait_for_code_from_mail(page, mailbox, existing_ids)
+    code = _wait_for_code_from_mail(
+        page, mailbox, existing_ids, watch_block=True
+    )
     _status("Meta: đã nhận mã xác minh, đang điền mã...")
     _meta_fill_code(page, code)
     _meta_click(

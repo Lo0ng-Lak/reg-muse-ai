@@ -147,6 +147,21 @@ class _FakeElement:
                 )
                 return
             if (
+                getattr(self.page, "trouble_on_confirm", False)
+                and self.page.state == "card"
+            ):
+                self.page.body_text = (
+                    "Confirm your age\n"
+                    "Something went wrong\n"
+                    "We're having trouble completing your request. "
+                    "Please try again.\n"
+                    "OK"
+                )
+                self.page.buttons.append(
+                    _FakeElement(self.page, "button", name="OK")
+                )
+                return
+            if (
                 getattr(self.page, "too_many_attempts_once", False)
                 and self.page.state == "card"
             ):
@@ -726,6 +741,73 @@ def test_email_too_many_attempts_drops_proxy():
     browser_helper._reject_blocked_request_proxy(card)
 
 
+def test_meta_block_dialog_drops_proxy():
+    """Đăng ký Meta gặp hộp từ chối thì bỏ proxy, không chờ hết bước."""
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://auth.meta.com/")
+    page.body_text = (
+        "Something went wrong\n"
+        "We're having trouble completing your request. Please try again.\n"
+        "OK"
+    )
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._meta_raise_if_blocked(page)
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải bỏ proxy khi Meta từ chối yêu cầu")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("PROXY_BURN") for line in captured), captured
+    assert "proxy" in message.lower()
+    clean = _FakePage(_FakeContext(_FakeBrowser()), "https://auth.meta.com/")
+    clean.body_text = "Get started on Meta AI\nContinue"
+    browser_helper._meta_raise_if_blocked(clean)
+    stamp = browser_helper._meta_page_stamp(clean)
+    stalled = {"stamp": stamp, "since": __import__("time").monotonic() - 40}
+    captured = []
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._meta_raise_if_blocked(clean, stalled)
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("trang đứng im phải bỏ proxy")
+    finally:
+        browser_helper._status = orig
+    assert any("đứng im" in line for line in captured), captured
+    assert "proxy" in message.lower()
+
+
+def test_meta_saved_profile_clicks_use_another():
+    """Hồ sơ Meta nhớ sẵn thì bấm Use another profile, không bấm Continue."""
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://auth.meta.com/")
+    page.body_text = (
+        "alligator_tiger_6574\nContinue\nUse another profile"
+    )
+    page.buttons.append(_FakeElement(page, "button", name="Continue"))
+    page.buttons.append(
+        _FakeElement(page, "button", name="Use another profile")
+    )
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        assert browser_helper._meta_pass_saved_profile(page) is True
+    finally:
+        browser_helper._status = orig
+    assert page.clicked == ["Use another profile"], page.clicked
+    plain = _FakePage(_FakeContext(_FakeBrowser()), "https://auth.meta.com/")
+    plain.body_text = "What's your mobile number or email?\nContinue"
+    plain.buttons.append(_FakeElement(plain, "button", name="Continue"))
+    assert browser_helper._meta_pass_saved_profile(plain) is False
+    assert plain.clicked == []
+
+
 def test_facebook_page_signals_drop_proxy():
     """Proxy đẩy sang facebook.com thì báo bỏ proxy và dừng,
     không bấm form Log into Facebook."""
@@ -1026,6 +1108,47 @@ def test_already_full_card_is_not_typed_again():
     assert "Confirm" in page.clicked, page.clicked
 
 
+def test_card_trouble_dialog_drops_proxy():
+    """Sau khi điền thẻ, hộp 'Something went wrong' thì bỏ proxy.
+
+    Không đánh dấu thẻ full và không điền thẻ khác.
+    """
+    storage._import_bulk_cards(
+        "4111111111111111|12/28|123|10001|Thẻ A\n"
+        "4222222222222222|11/29|456|10001|Thẻ B"
+    )
+    first = next(
+        entry for entry in storage._load_vault() if entry["label"] == "Thẻ A"
+    )
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "card"
+    page.body_text = "Enter your card number to continue with Muse."
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    page.trouble_on_confirm = True
+    page.filled = []
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._do_card_step(page, first["id"])
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải bỏ proxy khi Muse lỗi sau bước thẻ")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("CARD_TROUBLE:") for line in captured), captured
+    assert any(line.startswith("PROXY_BURN") for line in captured), captured
+    assert "proxy" in message.lower()
+    assert page.clicked.count("OK") == 1, page.clicked
+    assert "4222222222222222" not in page.filled
+    saved = next(
+        entry for entry in storage._load_vault() if entry["id"] == first["id"]
+    )
+    assert saved["used"] == 0 and saved["limit"] == 0, saved
+
+
 def test_card_blocked_dialog_marks_full_and_fills_next():
     # "Unable to Add Card" / too many ad accounts: bấm OK, đánh
     # dấu thẻ đó full, điền thẻ kế. Không bấm Learn more.
@@ -1073,6 +1196,7 @@ TESTS = [
     test_blocked_request_relogin_asks_for_new_browser,
     test_blocked_request_drops_proxy_on_muse_login,
     test_email_too_many_attempts_drops_proxy,
+    test_meta_block_dialog_drops_proxy,
     test_facebook_page_signals_drop_proxy,
     test_link_screen_clicks_card_button_not_login_continue,
     test_link_screen_continue_is_clicked_only_once,
@@ -1091,6 +1215,7 @@ TESTS = [
     test_do_card_step_if_present_card_form_fills_saved_card,
     test_relogin_waitlist_drops_account_without_clicking,
     test_too_many_attempts_reloads_and_fills_same_card,
+    test_card_trouble_dialog_drops_proxy,
     test_already_full_card_is_not_typed_again,
     test_card_blocked_dialog_marks_full_and_fills_next,
 ]

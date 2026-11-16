@@ -712,6 +712,38 @@ def test_mark_unlimited_card_full():
     assert state.exhausted() is True
 
 
+def test_unused_card_dies_after_repeated_trouble():
+    """Thẻ chưa thêm được lần nào, lỗi sau bước thẻ trên 3
+    trình duyệt thì thành thẻ lỗi. Một hai lần đầu chỉ đổi proxy.
+    Thẻ đã từng thêm được thì không bị loại vì lỗi này."""
+    from coordinator import CARD_TROUBLE_BROWSERS
+
+    id_a = _add_test_card(CARD_A, "Thẻ A", limit=0, used=0)
+    id_b = _add_test_card(CARD_B, "Thẻ B", limit=0, used=1)
+    vault = _CardVaultRun(_vault_states(), manual=False)
+    for _ in range(CARD_TROUBLE_BROWSERS - 1):
+        marked, count, label = vault.note_card_trouble(id_a)
+        assert marked is False
+        assert label == "Thẻ A"
+        assert 0 < count < CARD_TROUBLE_BROWSERS
+    fresh, _, stop = vault.reserve()
+    assert fresh.card_id == id_a and stop is False
+    vault.release(fresh)
+    marked, count, label = vault.note_card_trouble(id_a)
+    assert marked is True and count == CARD_TROUBLE_BROWSERS
+    assert label == "Thẻ A"
+    entry = next(item for item in storage._load_vault() if item["id"] == id_a)
+    assert entry["limit"] > 0 and entry["used"] >= entry["limit"]
+    vault.release(vault.reserve()[0])
+    nxt, _, stop = vault.reserve()
+    assert stop is False and nxt.card_id == id_b
+    for _ in range(CARD_TROUBLE_BROWSERS):
+        marked, count, _label = vault.note_card_trouble(id_b)
+        assert marked is False and count == 0
+    kept = next(item for item in storage._load_vault() if item["id"] == id_b)
+    assert kept["used"] == 1 and kept["limit"] == 0
+
+
 def test_manual_full_card_opens_the_rest_of_the_vault():
     # Chọn tay một thẻ: thẻ đó bị full thì lượt chạy lấy thẻ kế,
     # không dừng khi kho vẫn còn thẻ.
@@ -839,6 +871,7 @@ TESTS = [
     test_manual_mode_only_uses_selected_card,
     test_mark_vault_card_full_reaches_limit,
     test_mark_unlimited_card_full,
+    test_unused_card_dies_after_repeated_trouble,
     test_manual_full_card_opens_the_rest_of_the_vault,
     test_limit_zero_is_unlimited,
     test_empty_vault_means_manual_entry,
