@@ -139,6 +139,7 @@ class CookieWeb:
                 for job in self.jobs.values()
                 if job["status"] in ("queued", "running")
             ),
+            "migrating": storage._accounts_migration_running(),
         }
 
     # --- Jobs ----------------------------------------------------
@@ -659,6 +660,7 @@ tr:last-child td { border-bottom:0; }
   overflow:auto; font-size:12.5px; white-space:pre-wrap; margin:10px 0 0; }
 .empty { color:var(--dim); }
 .errorbox { background:var(--red-bg); color:var(--red); border:1px solid #fecdca; border-radius:12px; padding:12px 14px; margin-bottom:14px; font-weight:600; }
+.infobox { background:#eef4ff; color:#175cd3; border:1px solid #b2ccff; border-radius:12px; padding:12px 14px; margin-bottom:14px; font-weight:600; }
 .pager { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap; }
 .pager .info { color:var(--dim); font-size:13px; margin-right:auto; }
 .note { color:var(--dim); font-size:13px; }
@@ -674,6 +676,7 @@ tr:last-child td { border-bottom:0; }
   </header>
   <div class="stats" id="stats"></div>
   <div class="errorbox" id="errorBox" style="display:none"></div>
+  <div class="infobox" id="migrateBox" style="display:none"></div>
   <div class="toolbar">
     <input type="text" id="q" placeholder="Tìm email…" oninput="PAGE=1;render()">
     <select id="f" onchange="PAGE=1;render()">
@@ -736,36 +739,59 @@ async function checkJson(r){
   if (!r.ok || d.error) throw new Error(d.error || ("lỗi HTTP " + r.status));
   return d;
 }
+async function fetchJson(url, timeoutMs){
+  // Mỗi API có hạn riêng (15 giây): một đầu chậm/kẹt không
+  // được kéo cả trang kẹt theo (lỗi 2026-11-17).
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), timeoutMs || 15000);
+  try {
+    const r = await fetch(url, {signal: ctrl.signal});
+    return await checkJson(r);
+  } finally { clearTimeout(timer); }
+}
 async function loadAll(){
   const box = document.getElementById("errorBox");
-  try {
-    const [c, h, s] = await Promise.all([
-      fetch("/api/cookies").then(checkJson),
-      fetch("/api/history").then(checkJson),
-      fetch("/api/status").then(checkJson),
-    ]);
-    box.style.display = "none"; box.textContent = "";
-    COOKIES = c.cookies || [];
-    document.getElementById("stats").innerHTML =
-      stat(COOKIES.length,"Tổng tài khoản","") +
-      stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
-      stat(c.stats["het-han"],"Hết hạn","bad") + stat(c.stats.chet,"Die","bad") +
-      stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
+  const mbox = document.getElementById("migrateBox");
+  // Tải từng phần độc lập: phần nào lỗi thì phần đó hiện
+  // "Chưa tải được", các phần còn lại vẫn hiện bình thường.
+  const [c, h, s] = await Promise.all([
+    fetchJson("/api/cookies").catch(()=>null),
+    fetchJson("/api/history").catch(()=>null),
+    fetchJson("/api/status").catch(()=>null),
+  ]);
+  if (!c) {
+    box.style.display = "block";
+    box.textContent = "Không tải được danh sách cookie (quá 15 giây hoặc lỗi mạng) — thử tải lại trang, hoặc kiểm tra cửa sổ đang chạy server.";
+    document.getElementById("tableWrap").innerHTML = "<p class='empty'>Chưa tải được dữ liệu.</p>";
+    document.getElementById("history").innerHTML = "<p class='empty'>Chưa tải được dữ liệu.</p>";
+    return;
+  }
+  box.style.display = "none"; box.textContent = "";
+  COOKIES = c.cookies || [];
+  document.getElementById("stats").innerHTML =
+    stat(COOKIES.length,"Tổng tài khoản","") +
+    stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
+    stat(c.stats["het-han"],"Hết hạn","bad") + stat(c.stats.chet,"Die","bad") +
+    stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
+  if (s) {
     document.getElementById("metaLine").textContent =
       "Kho: " + s.db_path + " (" + s.total + " tài khoản) · File nhập Excel: " + s.source_path + " · File xuất tab Đăng nhập lại: " + (s.output_path || "chưa đặt") + " · Đang có cookie: " + s.vault_count + ".";
+    if (s.migrating) {
+      mbox.style.display = "block";
+      mbox.textContent = "Đang nhập tài khoản từ Excel vào kho lần đầu — bảng sẽ tự đầy khi xong (trang tự tải lại mỗi 30 giây).";
+    } else {
+      mbox.style.display = "none"; mbox.textContent = "";
+    }
+  }
+  if (h) {
     document.getElementById("history").innerHTML = (h.history||[]).length
       ? "<table><tr><th>Thời gian</th><th>Việc</th><th>Email</th><th>Chi tiết</th></tr>" +
         h.history.map(e=>"<tr><td>"+fmtTime(e.at)+"</td><td>"+(ACTION[e.action]||e.action)+"</td><td>"+esc(e.email)+"</td><td>"+esc(e.detail||"")+"</td></tr>").join("") + "</table>"
       : "<p class='empty'>Chưa có lịch sử.</p>";
-    render();
-  } catch(e) {
-    // Lỗi phải hiện ra, không được để trang kẹt ở "Đang tải…"
-    // mãi như bản trước.
-    box.style.display = "block";
-    box.textContent = "Không tải được kho: " + e.message + " — thử tải lại trang, hoặc kiểm tra cửa sổ đang chạy server.";
-    document.getElementById("tableWrap").innerHTML = "<p class='empty'>Chưa tải được dữ liệu.</p>";
-    document.getElementById("history").innerHTML = "<p class='empty'>Chưa tải được dữ liệu.</p>";
+  } else {
+    document.getElementById("history").innerHTML = "<p class='empty'>Chưa tải được lịch sử.</p>";
   }
+  render();
 }
 function stat(n,label,cls){ return "<div class='stat "+cls+"'><b>"+n+"</b><span>"+label+"</span></div>"; }
 function esc(s){ return String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
@@ -791,13 +817,13 @@ function render(){
   document.getElementById("tableWrap").innerHTML =
     "<table><tr><th>Email</th><th>Cookie</th><th>Lấy lúc</th><th>Hết hạn</th><th>Còn lại</th><th>Hoạt động</th><th>Hạn</th><th></th></tr>" +
     pageRows.map(c=>"<tr><td>"+esc(c.email)+"</td>" +
-      "<td class='mono'>"+esc(c.cookie_masked||"(trống)")+" <button class='ghost small' onclick='copyCookie(\""+esc(c.email)+"\",this)'>Sao chép</button></td>" +
+      "<td class='mono'>"+esc(c.cookie_masked||"(trống)")+" <button class='ghost small' onclick='copyCookie(&quot;"+esc(c.email)+"&quot;,this)'>Sao chép</button></td>" +
       "<td>"+fmtTime(c.cookie_taken_at)+"</td><td>"+fmtTime(c.expires_at)+"</td>" +
       "<td class='count' data-remain='"+(c.remaining_seconds??"")+"'>"+fmtRemain(c.remaining_seconds)+"</td>" +
-      "<td><span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span><br><span class='small-dim'>"+(c.health_checked_at? fmtTime(c.health_checked_at):"")+"</span><br><button class='ghost small' onclick='checkOne(\""+esc(c.email)+"\",this)'>Kiểm tra</button></td>" +
+      "<td><span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span><br><span class='small-dim'>"+(c.health_checked_at? fmtTime(c.health_checked_at):"")+"</span><br><button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></td>" +
       "<td><span class='badge "+c.status+"'>"+LABEL[c.status]+"</span></td>" +
-      "<td class='actions'><button onclick='refreshOne(\""+esc(c.email)+"\",this)'>Đăng nhập lại</button> " +
-      "<button class='ghost' onclick='deleteCookie(\""+esc(c.email)+"\",this)'>Xoá</button></td></tr>").join("") + "</table>";
+      "<td class='actions'><button onclick='refreshOne(&quot;"+esc(c.email)+"&quot;,this)'>Đăng nhập lại</button> " +
+      "<button class='ghost' onclick='deleteCookie(&quot;"+esc(c.email)+"&quot;,this)'>Xoá</button></td></tr>").join("") + "</table>";
 }
 setInterval(()=>{
   document.querySelectorAll("[data-remain]").forEach(el=>{
@@ -903,6 +929,14 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
     Trả về (httpd, url). Thử port từ port trở đi tới khi bind được.
     """
     web = CookieWeb(desktop_coordinator=desktop_coordinator)
+    # Nhập kho lần đầu chạy nền: lần đầu mở kho, chuyển 2k dòng
+    # từ Excel sang SQLite có thể mất một lúc — trang không được
+    # chờ nhập xong mới hiện (lỗi 2026-11-17: trang kẹt ở
+    # "Đang tải…" trong lúc nhập).
+    threading.Thread(
+        target=storage._ensure_accounts_migrated,
+        name="cookie-migrate", daemon=True,
+    ).start()
     last_error = None
     for candidate in range(port, port + 10):
         try:
