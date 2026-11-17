@@ -563,7 +563,11 @@ cột **Hoạt động** — kiểm tra thật cookie còn vào được Muse ha
 lại kèm giờ kiểm tra). Kiểm tra chạy bằng trình duyệt Chromium
 headless (không mở cửa sổ, không cần bấm gì): mỗi cookie một
 context sạch, gắn cookie rồi mở meta.ai — thấy ô chat "Ask Meta AI"
-là sống, bị đẩy về màn đăng nhập là die. Kiểm tra bằng urllib
+là sống, bị đẩy về màn đăng nhập là die. Kiểm tra chờ trang
+ổn định rồi mới đọc (meta.ai là SPA, load xong vẫn còn điều
+hướng/challenge/render — đọc ngay thì gặp 'page is navigating'
+hoặc trang chưa nhận diện được); trang chặn bot thì báo rõ là
+challenge chứ không đoán mò. Kiểm tra bằng urllib
 không dùng được nữa (meta.ai trả 403 "Client challenge" cho
 client không phải trình duyệt). Kiểm tra chạy 5 luồng song song,
 mỗi luồng một trình duyệt headless riêng; mỗi cookie tốn vài
@@ -633,7 +637,7 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (49 test: hạn 7 ngày, kho SQLite,
+Kiểm tra: `py test_cookie_web.py` (52 test: hạn 7 ngày, kho SQLite,
 API, dashboard, kiểm tra sống/chết bằng trình duyệt headless
 5 luồng song song, đọc 300 dòng, nhập/xuất Excel,
 cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,

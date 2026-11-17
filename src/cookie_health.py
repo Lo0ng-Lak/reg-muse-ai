@@ -21,6 +21,7 @@ dashboard không phải gọi lại mỗi lần mở.
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -181,6 +182,21 @@ def _is_valid_cookie_value(value):
     )
 
 
+def _is_challenge_page(body):
+    """Trang chặn bot (Cloudflare và tương tự): chưa phải giao
+    diện thật, chờ thêm cũng chỉ thấy màn này."""
+    return any(
+        marker in (body or "").lower()
+        for marker in (
+            "checking your browser",
+            "verify you are human",
+            "attention required",
+            "just a moment",
+            "cloudflare",
+        )
+    )
+
+
 def clean_cookie_pairs(pairs):
     """Lọc các cặp cookie trước khi gắn vào trình duyệt: bỏ tên
     rỗng, giá trị chứa ký tự cấm, trùng tên thì giữ cái sau.
@@ -222,9 +238,15 @@ class BrowserChecker:
     cookie) nhưng mới có kết quả thật.
     """
 
-    def __init__(self, launcher=None):
+    def __init__(self, launcher=None, timeout_ms=None):
         # launcher: hàm () -> browser (để test đưa browser giả).
+        # timeout_ms: tối đa chờ một cookie (mặc định 20 giây).
         self._launcher = launcher
+        self._timeout_ms = (
+            BROWSER_CHECK_TIMEOUT_MS
+            if timeout_ms is None
+            else timeout_ms
+        )
         self._playwright = None
         self._browser = None
 
@@ -318,26 +340,57 @@ class BrowserChecker:
                 )
             page = context.new_page()
             try:
-                page.goto(
-                    MUSE_HOME_URL,
-                    timeout=BROWSER_CHECK_TIMEOUT_MS,
+                try:
+                    page.goto(
+                        MUSE_HOME_URL,
+                        timeout=self._timeout_ms,
+                    )
+                except Exception as error:
+                    return (
+                        STATUS_UNKNOWN,
+                        f"không mở được meta.ai ({error})",
+                    )
+                # Chờ trang ổn định rồi mới đọc: meta.ai là SPA,
+                # load xong vẫn còn điều hướng/challenge/render —
+                # đọc ngay thì gặp 'page is navigating' hoặc
+                # trang rỗng/chưa nhận diện được (lỗi 2026-11-17).
+                deadline = (
+                    time.monotonic() + self._timeout_ms / 1000
                 )
-                page.wait_for_timeout(1500)
-                url = (page.url or "").lower()
-                body = (page.content() or "").lower()
-                if "login" in url or "auth.meta.com" in url:
-                    return STATUS_DEAD, "bị đẩy về màn đăng nhập"
-                if any(
-                    marker.lower() in body
-                    for marker in ALIVE_MARKERS
-                ):
-                    return STATUS_ALIVE, "vào được giao diện chat"
-                if "log in" in body:
-                    return STATUS_DEAD, "trang hiện màn đăng nhập"
-                return (
-                    STATUS_UNKNOWN,
-                    "trang trả về không nhận diện được",
-                )
+                while True:
+                    url = (page.url or "").lower()
+                    if "login" in url or "auth.meta.com" in url:
+                        return STATUS_DEAD, "bị đẩy về màn đăng nhập"
+                    try:
+                        body = (page.content() or "").lower()
+                    except Exception:
+                        # Trang đang điều hướng: chưa đọc được,
+                        # chờ tiếp thay vì kết luận.
+                        body = ""
+                    if any(
+                        marker.lower() in body
+                        for marker in ALIVE_MARKERS
+                    ):
+                        return STATUS_ALIVE, "vào được giao diện chat"
+                    if "log in" in body or "sign in" in body:
+                        return STATUS_DEAD, "trang hiện màn đăng nhập"
+                    if time.monotonic() >= deadline:
+                        if _is_challenge_page(body):
+                            return (
+                                STATUS_UNKNOWN,
+                                "trang đang kiểm tra bot "
+                                "(challenge)",
+                            )
+                        if not body.strip():
+                            return (
+                                STATUS_UNKNOWN,
+                                "trang tải chưa xong nội dung",
+                            )
+                        return (
+                            STATUS_UNKNOWN,
+                            "trang trả về không nhận diện được",
+                        )
+                    page.wait_for_timeout(500)
             except Exception as error:
                 return (
                     STATUS_UNKNOWN,
