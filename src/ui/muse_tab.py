@@ -198,11 +198,6 @@ class MuseTab(ttk.Frame):
             run_row,
             text="Mở sheet Excel",
             command=self._open_spreadsheet,
-            state=(
-                "normal"
-                if storage.SPREADSHEET_FILE.exists()
-                else "disabled"
-            ),
         )
         self.open_sheet_button.pack(side="left", padx=(8, 0))
         saved_excel = storage._load_meta_excel_path_text()
@@ -891,8 +886,16 @@ class MuseTab(ttk.Frame):
             )
 
     def _open_spreadsheet(self):
-        if not storage.SPREADSHEET_FILE.exists():
-            messagebox.showwarning("Chưa có sheet", "Chưa tạo được file Excel.")
+        # Kho sống là SQLite: xuất ra Excel rồi mở file đó.
+        try:
+            total = storage.export_accounts_excel()
+        except Exception as error:
+            messagebox.showerror("Không xuất được Excel", str(error))
+            return
+        if total == 0:
+            messagebox.showwarning(
+                "Kho trống", "Kho chưa có tài khoản nào."
+            )
             return
         try:
             import os
@@ -933,13 +936,5 @@ class MuseTab(ttk.Frame):
         ):
             widget.configure(state="disabled" if running else "normal")
         self.open_sheet_button.configure(
-            state=(
-                "disabled"
-                if running
-                else (
-                    "normal"
-                    if storage.SPREADSHEET_FILE.exists()
-                    else "disabled"
-                )
-            )
+            state="disabled" if running else "normal"
         )

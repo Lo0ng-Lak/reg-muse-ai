@@ -19,6 +19,7 @@ from openpyxl import Workbook, load_workbook
 
 import mail_providers
 import paths
+import account_store
 
 
 SPREADSHEET_FILE = (
@@ -26,6 +27,11 @@ SPREADSHEET_FILE = (
 )
 
 PENDING_SPREADSHEET_FILE = SPREADSHEET_FILE.with_name("accounts.pending.xlsx")
+
+# Kho tài khoản duy nhất (SQLite, 2026-11-17): accounts.db là nơi
+# sống của tài khoản Muse. accounts.xlsx chỉ còn là đường vào
+# (nhập một lần từ file cũ) và đường ra (xuất ra Excel để xem).
+ACCOUNTS_DB_FILE = paths.APP_DATA / "accounts.db"
 
 META_SPREADSHEET_FILE = (
     paths.APP_DATA / "meta_accounts.xlsx"
@@ -99,326 +105,130 @@ META_SPREADSHEET_HEADERS = [
     "Link lấy OTP",
 ]
 
-def _migrate_legacy_sheet(sheet):
-    """Bỏ cột "Mật khẩu Muse.ai" khỏi sheet cũ.
+def _ensure_accounts_migrated():
+    """Nhập một lần từ accounts.xlsx sang kho SQLite.
 
-    Cột đó là mật khẩu bịa từ thiết kế đầu — đăng ký bằng mail
-    tạm + OTP nên không tồn tại mật khẩu Muse. Nếu hàng tiêu
-    đề còn cột này ở vị trí 3, xoá nó khỏi cả tiêu đề lẫn mọi
-    dòng dữ liệu (các cột sau dịch trái một ô).
+    Chỉ chạy khi file DB chưa có mà file Excel còn đó (lần đầu
+    dùng kho mới) — sau đó kho SQLite là nơi duy nhất giữ tài
+    khoản, không bao giờ nhập lại tự động (để xoá tài khoản
+    trong DB không bị file Excel cũ hồi sinh). File chờ
+    accounts.pending.xlsx nhập sau file chính để dòng mới hơn
+    trong file chờ thắng. Nhập tay lại thì dùng
+    import_accounts_from_excel().
     """
-    if sheet.cell(row=1, column=3).value != "Mật khẩu Muse.ai":
+    if account_store.db_file_exists(ACCOUNTS_DB_FILE):
         return
-    for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row):
-        values = [cell.value for cell in row]
-        migrated = values[:2] + values[3:]
-        for index, cell in enumerate(row):
-            cell.value = migrated[index] if index < len(migrated) else None
+    account_store.import_from_excel(SPREADSHEET_FILE, ACCOUNTS_DB_FILE)
+    account_store.import_from_excel(
+        PENDING_SPREADSHEET_FILE, ACCOUNTS_DB_FILE
+    )
+
 
 def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", otp_link="", cookie_taken_at=""):
-    """Ghi một tài khoản vào accounts.xlsx.
+    """Ghi một tài khoản vào kho SQLite (một dòng một email).
 
+    Tên hàm giữ như cũ để coordinator không đổi: đăng ký/đăng
+    nhập thành công gọi hàm này. Khác Excel cũ: cùng một email
+    thì cập nhật đúng dòng đó thay vì thêm dòng mới.
     cookie_taken_at: thời điểm lấy cookie (ISO, có múi giờ). Có
     cookie mà không đưa mốc này thì tự lấy giờ hiện tại — mốc
     này là gốc tính hạn 7 ngày của web quản lý cookie. Không có
-    cookie thì cột để trống.
+    cookie thì để trống.
     """
-    temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
-    try:
-        SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # File chờ (từ lần ghi bị khóa trước) là bản đầy đủ nhất:
-        # lấy nó làm nền để không mất dòng nào đã giữ ở đó.
-        base_file = (
-            PENDING_SPREADSHEET_FILE
-            if PENDING_SPREADSHEET_FILE.exists()
-            else SPREADSHEET_FILE
+    _ensure_accounts_migrated()
+    if cookie and not cookie_taken_at:
+        cookie_taken_at = datetime.now().astimezone().isoformat(
+            timespec="seconds"
         )
-        if base_file.exists():
-            workbook = load_workbook(base_file)
-            sheet = workbook.active
-            _migrate_legacy_sheet(sheet)
-            # Sheet đời mail.tm còn tiêu đề cột 3 là "Mật khẩu
-            # mail.tm" — cột này giờ giữ mật khẩu hộp thư của
-            # bất kỳ dịch vụ nào nên đổi tên cho khớp tiêu đề
-            # hiện tại (chỉ đổi tên ô tiêu đề, dữ liệu giữ
-            # nguyên).
-            if sheet.cell(row=1, column=3).value == "Mật khẩu mail.tm":
-                sheet.cell(row=1, column=3).value = "Mật khẩu hộp thư"
-            # Bổ sung tiêu đề cho các cột còn thiếu (sheet đời đầu
-            # ít cột hơn) — chỉ ghi vào ô đang trống.
-            for column, header in enumerate(SPREADSHEET_HEADERS, start=1):
-                cell = sheet.cell(row=1, column=column)
-                if not cell.value:
-                    cell.value = header
-        else:
-            workbook = Workbook()
-            sheet = workbook.active
-            sheet.title = "Muse.ai"
-            sheet.append(SPREADSHEET_HEADERS)
-
-        sheet.append(
-            [
-                datetime.now().astimezone().isoformat(timespec="seconds"),
-                email,
-                mail_password,
-                cookie,
-                invite,
-                otp_link,
-                (
-                    cookie_taken_at
-                    or (
-                        datetime.now().astimezone().isoformat(timespec="seconds")
-                        if cookie
-                        else ""
-                    )
-                ),
-            ]
-        )
-        # accounts.xlsx đang mở trong Excel là khóa cứng trên
-        # Windows (WinError 5 khi thay file): thử lại vài nhịp,
-        # vẫn khóa thì giữ toàn bộ sheet vào accounts.pending.xlsx
-        # — dòng không mất, lần ghi sau tự gộp vào sheet chính.
-        written = False
-        last_error = None
-        for _ in range(3):
-            try:
-                workbook.save(temporary_file)
-                temporary_file.replace(SPREADSHEET_FILE)
-                written = True
-                break
-            except PermissionError as error:
-                last_error = error
-                time.sleep(1)
-        if written:
-            if PENDING_SPREADSHEET_FILE.exists():
-                try:
-                    PENDING_SPREADSHEET_FILE.unlink()
-                except OSError:
-                    pass
-        else:
-            pending_tmp = SPREADSHEET_FILE.with_name(
-                "accounts.pending.tmp.xlsx"
-            )
-            try:
-                workbook.save(pending_tmp)
-                pending_tmp.replace(PENDING_SPREADSHEET_FILE)
-            except Exception:
-                pass
-            raise RuntimeError(
-                "File accounts.xlsx đang bị khóa (thường do đang "
-                "mở trong Excel) nên chưa ghi được. Dòng này KHÔNG "
-                "mất — đã giữ ở accounts.pending.xlsx và sẽ tự gộp "
-                "vào sheet chính ở lần ghi thành công sau; bạn chỉ "
-                "cần đóng file Excel đang mở."
-            ) from last_error
-    except RuntimeError:
-        raise
-    except Exception as error:
-        raise RuntimeError(f"Không ghi được file Excel: {error}") from error
-    finally:
-        if temporary_file.exists():
-            temporary_file.unlink()
+    account_store.upsert_account(
+        email,
+        mail_password=mail_password,
+        cookie=cookie,
+        invite=invite,
+        otp_link=otp_link,
+        created_at=datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        ),
+        cookie_taken_at=cookie_taken_at,
+        db_path=ACCOUNTS_DB_FILE,
+    )
 
 def _last_invite_from_sheet():
-    """Mã mời gần nhất trong accounts.xlsx (dòng cuối cùng có mã).
+    """Mã mời gần nhất trong kho (tài khoản thêm vào sau cùng có mã).
 
     Dùng làm mã đầu chuỗi khi ô Mã mời đang trống: tài khoản đầu
     tiên của lượt chạy sẽ quy đổi mã này thay vì bỏ qua bước quy
-    đổi. Tìm cột theo tên tiêu đề "Mã mời" nên sheet đời nào
-    cũng đọc được.
+    đổi.
     """
-    for path in (PENDING_SPREADSHEET_FILE, SPREADSHEET_FILE):
-        try:
-            if not path.exists():
-                continue
-            workbook = load_workbook(path, read_only=True)
-            sheet = workbook.active
-            column = None
-            for cell in sheet[1]:
-                if cell.value == "Mã mời":
-                    column = cell.column
-                    break
-            if column is None:
-                continue
-            # Đọc một lượt xuôi bằng iter_rows: ở chế độ
-            # read_only, sheet.cell(row, column) phải quét lại từ
-            # đầu sheet mỗi lần gọi nên với 2k dòng sẽ thành
-            # O(n^2) và mất hàng phút (đo 2026-11-17).
-            code = ""
-            for values in sheet.iter_rows(min_row=2, values_only=True):
-                if not values or column > len(values):
-                    continue
-                value = values[column - 1]
-                if value:
-                    candidate = str(value).strip().upper()
-                    if re.fullmatch(r"[A-Z0-9]{6}", candidate):
-                        code = candidate
-            if code:
-                return code
-        except Exception:
-            continue
-    return ""
+    _ensure_accounts_migrated()
+    return account_store.last_invite(ACCOUNTS_DB_FILE)
 
 # --- Kho cookie (web quản lý cookie, 2026-11-17) -------------------
 #
-# Cookie phiên nằm trong accounts.xlsx, một dòng một tài khoản
-# (dòng mới được append mỗi lần đăng nhập/đăng ký thành công).
-# Các hàm dưới đây đọc/ghi theo TÊN tiêu đề nên sheet đời nào
-# cũng đọc được; cột "Thời gian lấy cookie" (cột 7) là mốc tính
-# hạn 7 ngày — dòng cũ chưa có cột này thì web quản lý tự lấy
-# "Thời gian tạo" làm mốc dự phòng (xem cookie_vault.py).
+# Kho tài khoản sống trong SQLite (accounts.db) — một dòng một
+# tài khoản, email là khoá duy nhất. Cột "Thời gian lấy cookie"
+# là mốc tính hạn 7 ngày — dòng cũ nhập từ Excel chưa có mốc
+# này thì web quản lý tự lấy "Thời gian tạo" làm mốc dự phòng
+# (xem cookie_vault.py).
 
 COOKIE_HISTORY_FILE = "cookie_history.json"
 
 
-def _cookie_sheet_columns(sheet):
-    """Vị trí các cột của sheet accounts.xlsx (theo tên tiêu đề)."""
-    columns = {}
-    for cell in sheet[1]:
-        if isinstance(cell.value, str):
-            columns[cell.value.strip()] = cell.column
-    return columns
-
-
 def _read_cookie_rows():
-    """Mọi dòng trong accounts.xlsx -> list dict.
+    """Mọi tài khoản trong kho SQLite -> list dict.
 
-    Mỗi dict: row (số dòng), email, mail_password, cookie,
-    invite, otp_link, created_at, cookie_taken_at (chuỗi ISO
-    hoặc "" khi trống). Đọc file chờ trước nếu file chính chưa
-    có (cùng nhịp như _last_invite_from_sheet). File không có /
-    không đọc được -> [].
+    Mỗi dict: row (số thứ tự trong kho), email, mail_password,
+    cookie, invite, otp_link, created_at, cookie_taken_at (chuỗi
+    ISO hoặc "" khi trống). Kho chưa có mà file Excel cũ còn đó
+    thì nhập một lần từ Excel trước (xem _ensure_accounts_migrated).
     """
-    for path in (SPREADSHEET_FILE, PENDING_SPREADSHEET_FILE):
-        try:
-            if not path.exists():
-                continue
-            workbook = load_workbook(path, read_only=True)
-            try:
-                sheet = workbook.active
-                columns = _cookie_sheet_columns(sheet)
-                email_col = columns.get("Email Muse.ai")
-                if not email_col:
-                    continue
-                rows = []
-                # Đọc một lượt xuôi bằng iter_rows: ở chế độ
-                # read_only, sheet.cell(row, column) phải quét lại
-                # từ đầu sheet mỗi lần gọi nên với 2k dòng sẽ
-                # thành O(n^2) và mất hàng phút (đo 2026-11-17:
-                # _read_cookie_rows quá 60 giây với 2000 dòng).
-                for row_index, values in enumerate(
-                    sheet.iter_rows(min_row=2, values_only=True),
-                    start=2,
-                ):
-                    values = values or ()
-
-                    def _get(header):
-                        column = columns.get(header)
-                        if not column or column > len(values):
-                            return ""
-                        value = values[column - 1]
-                        return "" if value is None else value
-
-                    email = str(_get("Email Muse.ai") or "").strip()
-                    if not email:
-                        continue
-                    rows.append(
-                        {
-                            "row": row_index,
-                            "email": email,
-                            "mail_password": str(
-                                _get("Mật khẩu hộp thư") or ""
-                            ),
-                            "cookie": str(
-                                _get("Cookie phiên đăng nhập") or ""
-                            ),
-                            "invite": str(_get("Mã mời") or ""),
-                            "otp_link": str(_get("Link lấy OTP") or ""),
-                            "created_at": str(_get("Thời gian tạo") or ""),
-                            "cookie_taken_at": str(
-                                _get("Thời gian lấy cookie") or ""
-                            ),
-                        }
-                    )
-                return rows
-            finally:
-                workbook.close()
-        except Exception:
-            continue
-    return []
+    _ensure_accounts_migrated()
+    return account_store.list_accounts(ACCOUNTS_DB_FILE)
 
 
 def _update_cookie_row(email, cookie, taken_at):
-    """Cập nhật cookie + thời điểm lấy của dòng MỚI NHẤT của email.
+    """Cập nhật cookie + thời điểm lấy của dòng duy nhất của email.
 
     Dùng khi đăng nhập lại lấy cookie mới: ghi đè vào dòng hiện
-    có thay vì append dòng mới, để kho cookie mỗi tài khoản chỉ
-    có một dòng sống. Trả về True nếu cập nhật được, False khi
-    không tìm thấy dòng. File đang bị khóa (mở trong Excel) thì
-    raise RuntimeError sau 3 lần thử.
+    có thay vì thêm dòng mới, để kho mỗi tài khoản chỉ có một
+    dòng. Trả về True nếu cập nhật được, False khi không tìm
+    thấy dòng.
     """
-    if not SPREADSHEET_FILE.exists():
-        return False
-    workbook = load_workbook(SPREADSHEET_FILE)
-    try:
-        sheet = workbook.active
-        columns = _cookie_sheet_columns(sheet)
-        email_col = columns.get("Email Muse.ai")
-        cookie_col = columns.get("Cookie phiên đăng nhập")
-        taken_col = columns.get("Thời gian lấy cookie")
-        if not email_col or not cookie_col:
-            return False
-        if not taken_col:
-            taken_col = sheet.max_column + 1
-            sheet.cell(row=1, column=taken_col, value="Thời gian lấy cookie")
-        target = (email or "").strip().lower()
-        found = None
-        for row_index in range(2, sheet.max_row + 1):
-            value = sheet.cell(row=row_index, column=email_col).value
-            if isinstance(value, str) and value.strip().lower() == target:
-                found = row_index
-        if found is None:
-            return False
-        sheet.cell(row=found, column=cookie_col, value=cookie)
-        sheet.cell(row=found, column=taken_col, value=taken_at)
-        _save_workbook_retry(workbook, SPREADSHEET_FILE)
-        return True
-    finally:
-        workbook.close()
+    _ensure_accounts_migrated()
+    return account_store.update_cookie(
+        email, cookie, taken_at, ACCOUNTS_DB_FILE
+    )
 
 
 def _clear_cookie_row(email):
-    """Xoá cookie + thời điểm lấy của dòng MỚI NHẤT của email.
+    """Xoá cookie + thời điểm lấy của dòng duy nhất của email.
 
     Dòng vẫn giữ lại (email, mã mời...) — chỉ cookie bị xoá,
     đăng nhập lại là lấy cookie mới. Trả về True nếu xoá được.
     """
-    if not SPREADSHEET_FILE.exists():
-        return False
-    workbook = load_workbook(SPREADSHEET_FILE)
-    try:
-        sheet = workbook.active
-        columns = _cookie_sheet_columns(sheet)
-        email_col = columns.get("Email Muse.ai")
-        cookie_col = columns.get("Cookie phiên đăng nhập")
-        taken_col = columns.get("Thời gian lấy cookie")
-        if not email_col or not cookie_col:
-            return False
-        target = (email or "").strip().lower()
-        found = None
-        for row_index in range(2, sheet.max_row + 1):
-            value = sheet.cell(row=row_index, column=email_col).value
-            if isinstance(value, str) and value.strip().lower() == target:
-                found = row_index
-        if found is None:
-            return False
-        sheet.cell(row=found, column=cookie_col).value = None
-        if taken_col:
-            sheet.cell(row=found, column=taken_col).value = None
-        _save_workbook_retry(workbook, SPREADSHEET_FILE)
-        return True
-    finally:
-        workbook.close()
+    _ensure_accounts_migrated()
+    return account_store.clear_cookie(email, ACCOUNTS_DB_FILE)
+
+
+def import_accounts_from_excel(excel_path=None):
+    """Nhập tài khoản từ file Excel vào kho SQLite.
+
+    Mặc định nhập từ đường nguồn đã lưu (tab Đăng nhập lại), hoặc
+    accounts.xlsx trong AppData. Trả về dict {imported, updated,
+    skipped, total} — xem account_store.import_from_excel.
+    """
+    path = excel_path or _load_relogin_source_path() or str(SPREADSHEET_FILE)
+    return account_store.import_from_excel(path, ACCOUNTS_DB_FILE)
+
+
+def export_accounts_excel(excel_path=None):
+    """Xuất toàn bộ kho ra file Excel (để xem bằng Excel).
+
+    Mặc định ghi đè accounts.xlsx trong AppData. Trả về số tài
+    khoản đã xuất.
+    """
+    path = excel_path or str(SPREADSHEET_FILE)
+    return account_store.export_to_excel(path, ACCOUNTS_DB_FILE)
 
 
 def _cookie_history_path():
@@ -625,53 +435,25 @@ for _domain in (
 RELOGIN_HEADERS = ["Email", "Cookie đăng nhập"]
 
 
-def _relogin_accounts(excel_path):
-    """Các mail cần đăng nhập lại, đọc từ file Excel người dùng chọn.
+def _relogin_accounts(excel_path=None):
+    """Các mail cần đăng nhập lại, đọc từ kho SQLite.
 
-    Chỉ lấy cột email (Email Muse.ai, hoặc Email nếu file đặt tên
-    vậy) và mật khẩu hộp thư — mật khẩu chỉ để đọc OTP, không ghi
-    ra file xuất. Mail trùng thì giữ dòng đầu. File không có cột
-    email hoặc không đọc được thì trả về [].
+    Chỉ lấy email và mật khẩu hộp thư — mật khẩu chỉ để đọc OTP,
+    không ghi ra file xuất. excel_path giữ lại cho tương thích
+    với lời gọi cũ nhưng không còn dùng: kho duy nhất là SQLite;
+    muốn đưa thêm mail từ file Excel vào kho thì dùng nút "Nhập
+    từ Excel" (web/tab) trước.
     """
-    try:
-        workbook = load_workbook(excel_path, read_only=True, data_only=True)
-    except Exception:
-        return []
-    try:
-        sheet = workbook.active
-        columns = {}
-        for cell in sheet[1]:
-            if isinstance(cell.value, str):
-                columns[cell.value.strip()] = cell.column
-        email_col = columns.get("Email Muse.ai") or columns.get("Email")
-        if not email_col:
-            return []
-        secret_col = columns.get("Mật khẩu hộp thư")
-        seen = set()
-        rows = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            email = ""
-            if row and len(row) >= email_col and row[email_col - 1]:
-                email = str(row[email_col - 1]).strip()
-            if "@" not in email:
-                continue
-            key = email.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            secret = ""
-            if secret_col and len(row) >= secret_col and row[secret_col - 1]:
-                secret = str(row[secret_col - 1]).strip()
-            rows.append(
-                {
-                    "email": email,
-                    "secret": secret,
-                    "provider": _provider_for_email(email),
-                }
-            )
-        return rows
-    finally:
-        workbook.close()
+    _ensure_accounts_migrated()
+    rows = account_store.relogin_accounts(ACCOUNTS_DB_FILE)
+    return [
+        {
+            "email": row["email"],
+            "secret": row["secret"],
+            "provider": _provider_for_email(row["email"]),
+        }
+        for row in rows
+    ]
 
 
 def _relogin_done_emails(output_path):

@@ -2,9 +2,10 @@
 
 Chạy:  python test_cookie_web.py
 Không cần Windows hay trình duyệt thật: keyring được thay bằng
-bản giả trong bộ nhớ; accounts.xlsx và lịch sử cookie trỏ sang
-thư mục tạm. Luồng đăng nhập lại thật (Playwright) KHÔNG được
-kiểm tra ở đây — cần chạy trên máy Windows của Long.
+bản giả trong bộ nhớ; kho SQLite (accounts.db), accounts.xlsx và
+lịch sử cookie trỏ sang thư mục tạm. Luồng đăng nhập lại thật
+(Playwright) KHÔNG được kiểm tra ở đây — cần chạy trên máy
+Windows của Long.
 """
 
 import json
@@ -50,6 +51,7 @@ import cookie_health
 
 storage.SPREADSHEET_FILE = TMP / "accounts.xlsx"
 storage.PENDING_SPREADSHEET_FILE = TMP / "accounts.pending.xlsx"
+storage.ACCOUNTS_DB_FILE = TMP / "accounts.db"
 
 COOKIE_A = "sessionid=aaa111; c_user=1001; sb=bbb222"
 COOKIE_B = "sessionid=ccc333; c_user=1002; sb=ddd444"
@@ -73,6 +75,9 @@ def reset():
         "accounts.tmp.xlsx",
         "accounts.pending.xlsx",
         "accounts.pending.tmp.xlsx",
+        "accounts.db",
+        "accounts.db-wal",
+        "accounts.db-shm",
         "cookie_history.json",
         "cookie_health.json",
         "meta_accounts.xlsx",
@@ -197,16 +202,21 @@ def test_update_cookie_row_in_place():
     storage._append_spreadsheet_row(
         "a@fexpost.com", "s", cookie=COOKIE_A, invite="ABC123"
     )
+    # Ghi lại cùng email: kho SQLite chỉ giữ một dòng, lần ghi
+    # sau gộp vào dòng cũ thay vì thêm dòng mới (khác Excel cũ:
+    # append là thêm dòng).
     storage._append_spreadsheet_row(
         "a@fexpost.com", "s", cookie=COOKIE_A, invite="ABC123"
     )
+    rows = storage._read_cookie_rows()
+    assert len(rows) == 1, rows
     new_taken = _iso(_now())
     assert storage._update_cookie_row("a@fexpost.com", COOKIE_B, new_taken)
     rows = storage._read_cookie_rows()
-    assert len(rows) == 2, rows
-    assert rows[0]["cookie"] == COOKIE_A  # dòng cũ giữ nguyên
-    assert rows[1]["cookie"] == COOKIE_B
-    assert rows[1]["cookie_taken_at"] == new_taken
+    assert len(rows) == 1, rows
+    assert rows[0]["cookie"] == COOKIE_B
+    assert rows[0]["cookie_taken_at"] == new_taken
+    assert rows[0]["invite"] == "ABC123"  # mã mời giữ nguyên
     assert not storage._update_cookie_row("nope@fexpost.com", "x", new_taken)
 
 
@@ -620,6 +630,48 @@ def test_http_check_all_expiring_scope():
         httpd.server_close()
 
 
+def test_http_import_export_excel():
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(list(storage.SPREADSHEET_HEADERS))
+    ws.append(
+        [
+            _iso(_now()),
+            "imp@fexpost.com",
+            "s",
+            COOKIE_A,
+            "ABC123",
+            "",
+            _iso(_now()),
+        ]
+    )
+    wb.save(storage.SPREADSHEET_FILE)
+    httpd, url = cookie_web.start_server(port=0)
+    try:
+        status, body = _http("POST", url + "/api/import-excel", {})
+        assert status == 200, (status, body)
+        data = json.loads(body)
+        assert data["imported"] == 1 and data["total"] == 1, data
+        status, body = _http("GET", url + "/api/cookies")
+        assert json.loads(body)["stats"]["total"] == 1, body
+        status, body = _http("GET", url + "/api/export-excel")
+        assert status == 200, status
+        assert body[:2] == b"PK"  # xlsx là file zip
+        import io as _io
+        from openpyxl import load_workbook as _load
+
+        values = list(
+            _load(_io.BytesIO(body)).active.iter_rows(values_only=True)
+        )
+        assert values[1][1] == "imp@fexpost.com", values
+        assert values[1][3] == COOKIE_A, values
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -648,6 +700,7 @@ TESTS = [
     test_read_many_rows_complete,
     test_last_invite_from_sheet_reads_last_code,
     test_http_check_all_expiring_scope,
+    test_http_import_export_excel,
 ]
 
 
