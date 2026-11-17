@@ -68,6 +68,39 @@ def _relogin_output_path():
     return storage._load_relogin_output_path()
 
 
+def select_refresh_emails(cookies, scope):
+    """Chọn mail đăng nhập lại theo diện (dùng cho /api/refresh-all).
+
+    - "expired": chỉ đã hết hạn theo mốc 7 ngày.
+    - "dead": chỉ cookie đã kiểm tra thật trên meta.ai là chết.
+    - "all": tất cả.
+    - "expiring" (mặc định): sắp hết + đã hết hạn.
+    """
+    if scope == "expired":
+        return [
+            item["email"]
+            for item in cookies
+            if item["status"] == cookie_vault.STATUS_EXPIRED
+        ]
+    if scope == "dead":
+        return [
+            item["email"]
+            for item in cookies
+            if item.get("health") == cookie_health.STATUS_DEAD
+        ]
+    if scope == "all":
+        return [item["email"] for item in cookies]
+    return [
+        item["email"]
+        for item in cookies
+        if item["status"]
+        in (
+            cookie_vault.STATUS_EXPIRING,
+            cookie_vault.STATUS_EXPIRED,
+        )
+    ]
+
+
 class CookieWeb:
     """Trạng thái của web quản lý cookie: jobs + khoá chạy."""
 
@@ -140,6 +173,7 @@ class CookieWeb:
                 if job["status"] in ("queued", "running")
             ),
             "migrating": storage._accounts_migration_running(),
+            "last_import": storage._accounts_migration_result(),
         }
 
     # --- Jobs ----------------------------------------------------
@@ -489,32 +523,7 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                 data = self._read_json()
                 scope = (data.get("scope") or "expiring").strip()
                 cookies = cookie_vault.list_cookies()
-                if scope == "expired":
-                    emails = [
-                        item["email"]
-                        for item in cookies
-                        if item["status"]
-                        == cookie_vault.STATUS_EXPIRED
-                    ]
-                elif scope == "dead":
-                    emails = [
-                        item["email"]
-                        for item in cookies
-                        if item.get("health")
-                        == cookie_health.STATUS_DEAD
-                    ]
-                elif scope == "all":
-                    emails = [item["email"] for item in cookies]
-                else:  # expiring: sắp hết + hết hạn
-                    emails = [
-                        item["email"]
-                        for item in cookies
-                        if item["status"]
-                        in (
-                            cookie_vault.STATUS_EXPIRING,
-                            cookie_vault.STATUS_EXPIRED,
-                        )
-                    ]
+                emails = select_refresh_emails(cookies, scope)
                 if not emails:
                     self._send_json(
                         {"error": "không có tài khoản nào thuộc diện này"},
@@ -616,11 +625,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--text);
   font:15px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
-.wrap { max-width:1120px; margin:0 auto; padding:28px 18px 56px; }
+.wrap { max-width:1400px; margin:0 auto; padding:28px 18px 56px; }
 header { margin-bottom:20px; }
 h1 { font-size:24px; margin:0 0 4px; letter-spacing:-.2px; }
 .sub { color:var(--dim); margin:0; }
-.stats { display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:18px; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
 .stat { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px;
   box-shadow:0 1px 2px rgba(16,24,40,.05); }
 .stat b { font-size:26px; display:block; line-height:1.1; }
@@ -633,20 +642,24 @@ input[type=text], select { background:var(--card); color:var(--text); border:1px
   border-radius:9px; padding:9px 12px; font:inherit; }
 input[type=text] { flex:1; min-width:200px; }
 button { background:var(--blue); color:#fff; border:0; border-radius:9px; padding:9px 14px;
-  font:inherit; cursor:pointer; font-weight:600; }
+  font:inherit; cursor:pointer; font-weight:600; white-space:nowrap; }
 button.ghost { background:var(--card); color:var(--text); border:1px solid var(--line); font-weight:500; }
 button.small { padding:5px 10px; font-size:13px; border-radius:7px; }
 button.warn { background:#b54708; }
 button:disabled { opacity:.5; cursor:default; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px;
-  margin-bottom:18px; box-shadow:0 1px 2px rgba(16,24,40,.05); }
+  margin-bottom:18px; box-shadow:0 1px 2px rgba(16,24,40,.05); overflow-x:auto; }
 .card h2 { font-size:16px; margin:0 0 4px; }
 .card .hint { color:var(--dim); font-size:13px; margin:0 0 12px; }
 table { width:100%; border-collapse:collapse; }
-th, td { text-align:left; padding:11px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
 th { color:var(--dim); font-size:12.5px; text-transform:uppercase; letter-spacing:.4px; }
 tr:last-child td { border-bottom:0; }
-.mono { font-family:Consolas,Menlo,monospace; font-size:13px; word-break:break-all; }
+.mono { font-family:Consolas,Menlo,monospace; font-size:13px; }
+.nowrap { white-space:nowrap; }
+.cell-flex { display:flex; align-items:center; gap:8px; }
+.truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cookie-masked { max-width:120px; }
 .badge { display:inline-block; padding:3px 11px; border-radius:999px; font-size:13px; font-weight:700; white-space:nowrap; }
 .badge.song { background:var(--green-bg); color:var(--green); }
 .badge.sap-het { background:var(--amber-bg); color:var(--amber); }
@@ -694,7 +707,8 @@ tr:last-child td { border-bottom:0; }
     </select>
     <button id="btnCheckAll" onclick="checkAll('all')">Kiểm tra tất cả</button>
     <button class="ghost" onclick="checkAll('expiring')">Kiểm tra cookie sắp hết</button>
-    <button id="btnAll" onclick="refreshAll()">Đăng nhập lại tất cả sắp hết</button>
+    <button id="btnAll" onclick="refreshScope('expiring','btnAll')">Đăng nhập lại sắp hết &amp; đã hết</button>
+    <button class="ghost" onclick="refreshScope('expired','btnExpired')" id="btnExpired">Đăng nhập lại đã hết</button>
     <button class="ghost" onclick="loadAll()">Làm mới</button>
     <button class="ghost" onclick="importExcel()">Nhập từ Excel</button>
     <button class="ghost" onclick="exportExcel()">Xuất ra Excel</button>
@@ -726,8 +740,13 @@ function fmtRemain(sec){
   if (sec === null || sec === undefined) return "—";
   const neg = sec < 0, a = Math.abs(sec);
   const d = Math.floor(a/86400), h = Math.floor(a%86400/3600), m = Math.floor(a%3600/60);
-  const s = (d? d+" ngày ":"") + (h? h+" giờ ":"") + m+" phút";
-  return neg ? "Hết hạn " + s + " trước" : s;
+  // Gọn để vừa một dòng trong cột: có ngày thì bỏ phút,
+  // dưới một ngày thì chỉ giờ + phút.
+  let s;
+  if (d) s = d+" ngày" + (h? " "+h+" giờ":"");
+  else if (h) s = h+" giờ" + (m? " "+m+" phút":"");
+  else s = m+" phút";
+  return neg ? "Hết hạn "+s : "Còn "+s;
 }
 function fmtTime(iso){
   if (!iso) return "—";
@@ -772,10 +791,12 @@ async function loadAll(){
     stat(COOKIES.length,"Tổng tài khoản","") +
     stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
     stat(c.stats["het-han"],"Hết hạn","bad") + stat(c.stats.chet,"Die","bad") +
+    stat(c.stats["chua-kiem-tra"],"Chưa kiểm tra","") +
     stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
   if (s) {
     document.getElementById("metaLine").textContent =
-      "Kho: " + s.db_path + " (" + s.total + " tài khoản) · File nhập Excel: " + s.source_path + " · File xuất tab Đăng nhập lại: " + (s.output_path || "chưa đặt") + " · Đang có cookie: " + s.vault_count + ".";
+      "Kho: " + s.db_path + " (" + s.total + " tài khoản) · File nhập Excel: " + s.source_path + " · File xuất tab Đăng nhập lại: " + (s.output_path || "chưa đặt") + " · Đang có cookie: " + s.vault_count + "." +
+      (s.last_import ? " Lần nhập đầu từ Excel: " + s.last_import.imported + " mới, " + s.last_import.updated + " gộp trùng, " + s.last_import.skipped + " dòng bỏ qua." : "");
     if (s.migrating) {
       mbox.style.display = "block";
       mbox.textContent = "Đang nhập tài khoản từ Excel vào kho lần đầu — bảng sẽ tự đầy khi xong (trang tự tải lại mỗi 30 giây).";
@@ -816,14 +837,15 @@ function render(){
   if (!rows.length){ document.getElementById("tableWrap").innerHTML = "<p class='empty'>Không có tài khoản nào khớp.</p>"; return; }
   document.getElementById("tableWrap").innerHTML =
     "<table><tr><th>Email</th><th>Cookie</th><th>Lấy lúc</th><th>Hết hạn</th><th>Còn lại</th><th>Hoạt động</th><th>Hạn</th><th></th></tr>" +
-    pageRows.map(c=>"<tr><td>"+esc(c.email)+"</td>" +
-      "<td class='mono'>"+esc(c.cookie_masked||"(trống)")+" <button class='ghost small' onclick='copyCookie(&quot;"+esc(c.email)+"&quot;,this)'>Sao chép</button></td>" +
-      "<td>"+fmtTime(c.cookie_taken_at)+"</td><td>"+fmtTime(c.expires_at)+"</td>" +
-      "<td class='count' data-remain='"+(c.remaining_seconds??"")+"'>"+fmtRemain(c.remaining_seconds)+"</td>" +
-      "<td><span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span><br><span class='small-dim'>"+(c.health_checked_at? fmtTime(c.health_checked_at):"")+"</span><br><button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></td>" +
+    pageRows.map(c=>"<tr><td class='nowrap'>"+esc(c.email)+"</td>" +
+      "<td><div class='cell-flex'><span class='mono truncate cookie-masked'>"+esc(c.cookie_masked||"(trống)")+"</span><button class='ghost small' onclick='copyCookie(&quot;"+esc(c.email)+"&quot;,this)'>Sao chép</button></div></td>" +
+      "<td class='nowrap'>"+fmtTime(c.cookie_taken_at)+"</td><td class='nowrap'>"+fmtTime(c.expires_at)+"</td>" +
+      "<td class='count nowrap' data-remain='"+(c.remaining_seconds??"")+"'>"+fmtRemain(c.remaining_seconds)+"</td>" +
+      "<td><div class='cell-flex'><span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span><button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></div>" +
+      (c.health_checked_at? "<div class='small-dim nowrap'>"+fmtTime(c.health_checked_at)+"</div>":"") + "</td>" +
       "<td><span class='badge "+c.status+"'>"+LABEL[c.status]+"</span></td>" +
-      "<td class='actions'><button onclick='refreshOne(&quot;"+esc(c.email)+"&quot;,this)'>Đăng nhập lại</button> " +
-      "<button class='ghost' onclick='deleteCookie(&quot;"+esc(c.email)+"&quot;,this)'>Xoá</button></td></tr>").join("") + "</table>";
+      "<td class='actions'><button class='small' onclick='refreshOne(&quot;"+esc(c.email)+"&quot;,this)'>Đăng nhập lại</button> " +
+      "<button class='ghost small' onclick='deleteCookie(&quot;"+esc(c.email)+"&quot;,this)'>Xoá</button></td></tr>").join("") + "</table>";
 }
 setInterval(()=>{
   document.querySelectorAll("[data-remain]").forEach(el=>{
@@ -868,10 +890,10 @@ async function refreshOne(email, btn){
   if (r.error){ alert(r.error); return; }
   loadJobs();
 }
-async function refreshAll(){
-  const btn = document.getElementById("btnAll"); btn.disabled = true;
+async function refreshScope(scope, btnId){
+  const btn = document.getElementById(btnId); btn.disabled = true;
   const r = await fetch("/api/refresh-all", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({scope:"expiring"})}).then(r=>r.json());
+    body: JSON.stringify({scope:scope})}).then(r=>r.json());
   btn.disabled = false;
   if (r.error){ alert(r.error); return; }
   alert("Đã xếp " + r.count + " tài khoản vào hàng đợi đăng nhập lại.");

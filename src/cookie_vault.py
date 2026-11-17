@@ -161,7 +161,17 @@ def list_cookies(now=None):
 
 
 def cookie_stats(cookies):
-    """Đếm theo trạng thái cho thẻ thống kê trên dashboard."""
+    """Đếm theo trạng thái cho thẻ thống kê trên dashboard.
+
+    Hai chiều riêng biệt, không được gộp:
+    - Hạn theo mốc 7 ngày: song / sap-het / het-han / khong-ro
+      (khong-ro = không có mốc lấy cookie).
+    - Sống/chết thật: chỉ biết sau khi kiểm tra trên meta.ai
+      (chet / hoat-dong). "chua-kiem-tra" đếm số chưa từng kiểm
+      tra — không có số này thì "Die: 0" dễ bị đọc nhầm là
+      "không có tài khoản nào chết" trong khi thật ra chưa kiểm
+      tra tài khoản nào.
+    """
     stats = {
         "total": len(cookies),
         "song": 0,
@@ -171,6 +181,7 @@ def cookie_stats(cookies):
         "khong-co-cookie": 0,
         "chet": 0,
         "hoat-dong": 0,
+        "chua-kiem-tra": 0,
     }
     for item in cookies:
         stats[item["status"]] = stats.get(item["status"], 0) + 1
@@ -180,4 +191,6 @@ def cookie_stats(cookies):
             stats["chet"] += 1
         elif item.get("health") == cookie_health.STATUS_ALIVE:
             stats["hoat-dong"] += 1
+        if not item.get("health_checked_at"):
+            stats["chua-kiem-tra"] += 1
     return stats

@@ -74,6 +74,7 @@ def reset():
     # Excel của mình (không thì test đầu tiên nhập xong sẽ làm
     # các test sau bỏ qua bước nhập).
     storage._ACCOUNTS_MIGRATION_STATE = "idle"
+    storage._ACCOUNTS_MIGRATION_RESULT = None
     for name in (
         "accounts.xlsx",
         "accounts.tmp.xlsx",
@@ -717,6 +718,68 @@ def test_dashboard_script_parses_and_handlers_escaped():
     assert result.returncode == 0, result.stderr
 
 
+def test_stats_counts_unchecked_separately_from_dead():
+    """Die: 0 chỉ đúng khi đã kiểm tra: số chưa từng kiểm tra
+    phải hiện riêng (chua-kiem-tra), không được lẫn vào Die."""
+    for email in ("a@fexpost.com", "b@fexpost.com", "c@fexpost.com"):
+        storage._append_spreadsheet_row(
+            email,
+            "s",
+            cookie=COOKIE_LIVE,
+            cookie_taken_at=_iso(_now()),
+        )
+    stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
+    assert stats["total"] == 3, stats
+    assert stats["chua-kiem-tra"] == 3, stats
+    assert stats["chet"] == 0 and stats["hoat-dong"] == 0, stats
+    cookie_health.check_and_cache(
+        "a@fexpost.com",
+        COOKIE_LIVE,
+        fetcher=_fake_fetch(
+            "https://www.meta.ai/",
+            '<html><body><textarea placeholder="Ask Meta AI">'
+            "</textarea></body></html>",
+        ),
+    )
+    cookie_health.check_and_cache(
+        "b@fexpost.com",
+        COOKIE_LIVE,
+        fetcher=_fake_fetch(
+            "https://www.meta.ai/login",
+            "<html><body><button>Log in</button></body></html>",
+        ),
+    )
+    stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
+    assert stats["chua-kiem-tra"] == 1, stats
+    assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
+
+
+def test_select_refresh_emails_scopes():
+    cookies = [
+        {"email": "song@x.com", "status": "song", "health": "song"},
+        {"email": "sap@x.com", "status": "sap-het", "health": "khong-ro"},
+        {"email": "het1@x.com", "status": "het-han", "health": "khong-ro"},
+        {"email": "het2@x.com", "status": "het-han", "health": "chet"},
+        {"email": "nocookie@x.com", "status": "khong-ro", "health": "khong-ro"},
+    ]
+    assert cookie_web.select_refresh_emails(
+        cookies, "expired"
+    ) == ["het1@x.com", "het2@x.com"]
+    assert cookie_web.select_refresh_emails(
+        cookies, "expiring"
+    ) == ["sap@x.com", "het1@x.com", "het2@x.com"]
+    assert cookie_web.select_refresh_emails(
+        cookies, "dead"
+    ) == ["het2@x.com"]
+    assert cookie_web.select_refresh_emails(cookies, "all") == [
+        item["email"] for item in cookies
+    ]
+    # Diện lạ rơi về mặc định expiring (sắp hết + đã hết).
+    assert cookie_web.select_refresh_emails(
+        cookies, "lạ"
+    ) == ["sap@x.com", "het1@x.com", "het2@x.com"]
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -747,6 +810,8 @@ TESTS = [
     test_http_check_all_expiring_scope,
     test_http_import_export_excel,
     test_dashboard_script_parses_and_handlers_escaped,
+    test_stats_counts_unchecked_separately_from_dead,
+    test_select_refresh_emails_scopes,
 ]
 
 

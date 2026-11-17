@@ -107,11 +107,17 @@ META_SPREADSHEET_HEADERS = [
 
 _ACCOUNTS_MIGRATION_LOCK = threading.Lock()
 _ACCOUNTS_MIGRATION_STATE = "idle"  # idle | running | done
+_ACCOUNTS_MIGRATION_RESULT = None  # {imported, updated, skipped, total}
 
 
 def _accounts_migration_running():
     """True khi bước nhập kho lần đầu đang chạy nền."""
     return _ACCOUNTS_MIGRATION_STATE == "running"
+
+
+def _accounts_migration_result():
+    """Kết quả lần nhập kho đầu tiên (để hiện lên trang)."""
+    return _ACCOUNTS_MIGRATION_RESULT
 
 
 def _ensure_accounts_migrated():
@@ -141,8 +147,10 @@ def _ensure_accounts_migrated():
             return
         _ACCOUNTS_MIGRATION_STATE = "running"
     try:
-        account_store.import_from_excel(SPREADSHEET_FILE, ACCOUNTS_DB_FILE)
-        account_store.import_from_excel(
+        main_result = account_store.import_from_excel(
+            SPREADSHEET_FILE, ACCOUNTS_DB_FILE
+        )
+        pending_result = account_store.import_from_excel(
             PENDING_SPREADSHEET_FILE, ACCOUNTS_DB_FILE
         )
     except Exception:
@@ -151,6 +159,13 @@ def _ensure_accounts_migrated():
         with _ACCOUNTS_MIGRATION_LOCK:
             _ACCOUNTS_MIGRATION_STATE = "idle"
         return
+    global _ACCOUNTS_MIGRATION_RESULT
+    _ACCOUNTS_MIGRATION_RESULT = {
+        "imported": main_result["imported"] + pending_result["imported"],
+        "updated": main_result["updated"] + pending_result["updated"],
+        "skipped": main_result["skipped"] + pending_result["skipped"],
+        "total": account_store.count(ACCOUNTS_DB_FILE),
+    }
     with _ACCOUNTS_MIGRATION_LOCK:
         _ACCOUNTS_MIGRATION_STATE = "done"
 
