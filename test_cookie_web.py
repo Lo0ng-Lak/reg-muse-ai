@@ -698,6 +698,13 @@ def test_dashboard_script_parses_and_handlers_escaped():
     script = match.group(1)
     # Mẫu vỡ (dấu nháy trần sau tên hàm) không được xuất hiện.
     assert '""+esc(c.email)' not in script, script
+    # Thẻ job không được liệt kê cả nghìn mail (lỗi 2026-11-17:
+    # tường email làm xấu giao diện) — chỉ hiện số lượng +
+    # tiến độ; trạng thái "Đang kiểm tra…" hiện ở từng dòng.
+    assert "j.emails.map(esc).join" not in script, script
+    assert "(j.emails||[]).length" in script, script
+    assert "Đang kiểm tra…" in script, script
+    assert "healthCell" in script, script
     for handler in ("copyCookie", "checkOne", "refreshOne", "deleteCookie"):
         assert (
             f"{handler}(&quot;\"+esc(c.email)+\"&quot;,this)"
@@ -813,6 +820,34 @@ def test_start_check_all_khong_xep_chong_job():
     assert len(web.jobs) == 1
 
 
+def test_check_job_reports_done_count():
+    for email in ("a@fexpost.com", "b@fexpost.com"):
+        storage._append_spreadsheet_row(
+            email,
+            "s",
+            cookie=COOKIE_LIVE,
+            cookie_taken_at=_iso(_now()),
+        )
+    orig = cookie_health._default_fetch
+    cookie_health._default_fetch = _fake_fetch(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+    )
+    try:
+        web = cookie_web.CookieWeb()
+        job = web._new_job(
+            ["a@fexpost.com", "b@fexpost.com"], "check"
+        )
+        assert job["done"] == 0, job
+        web._run_check_job(job)
+        assert job["done"] == 2, job
+        assert job["status"] == "done", job
+        assert "2 hoạt động" in job["result"], job
+    finally:
+        cookie_health._default_fetch = orig
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -847,6 +882,7 @@ TESTS = [
     test_select_refresh_emails_scopes,
     test_select_check_emails_scopes,
     test_start_check_all_khong_xep_chong_job,
+    test_check_job_reports_done_count,
 ]
 
 

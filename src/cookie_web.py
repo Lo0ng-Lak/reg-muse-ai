@@ -242,6 +242,7 @@ class CookieWeb:
                 "status": "queued",
                 "result": "",
                 "log": [],
+                "done": 0,
                 "created_at": _now_iso(),
             }
             self.jobs[job_id] = job
@@ -315,6 +316,7 @@ class CookieWeb:
                     failed += 1
                     job["log"].append(f"✘ {email}: {error}")
                     job["log"] = job["log"][-MAX_LOG_LINES:]
+                job["done"] = done + failed
             job["status"] = "done"
             job["result"] = (
                 f"Xong: {done} thành công, {failed} thất bại "
@@ -341,6 +343,7 @@ class CookieWeb:
                 dead += 1
             else:
                 unknown += 1
+            job["done"] = alive + dead + unknown
             job["log"].append(
                 f"{email}: {cookie_health.STATUS_LABELS[status]} "
                 f"({entry['detail']})"
@@ -710,6 +713,8 @@ tr:last-child td { border-bottom:0; }
 .badge.sap-het { background:var(--amber-bg); color:var(--amber); }
 .badge.het-han, .badge.chet { background:var(--red-bg); color:var(--red); }
 .badge.khong-ro { background:var(--gray-bg); color:var(--gray); }
+.badge.checking { background:#eef4ff; color:#175cd3; animation:pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
 .count { font-variant-numeric:tabular-nums; font-weight:700; }
 .small-dim { color:var(--dim); font-size:12.5px; }
 .job { border:1px solid var(--line); border-radius:10px; padding:11px 13px; margin-bottom:10px; background:#fbfcfd; }
@@ -777,6 +782,7 @@ tr:last-child td { border-bottom:0; }
 <script>
 let COOKIES = [];
 let PAGE = 1, PER_PAGE = 50;
+let CHECKING = {emails:new Set(), since:""};
 const LABEL = {song:"Còn sống","sap-het":"Sắp hết","het-han":"Hết hạn","khong-ro":"Không rõ"};
 const HEALTH = {song:"Hoạt động","chet":"Die","khong-ro":"Chưa kiểm tra"};
 const ACTION = {"lay":"Lấy cookie","lam-moi":"Đăng nhập lại","xoa":"Xoá cookie"};
@@ -861,6 +867,18 @@ async function loadAll(){
 }
 function stat(n,label,cls){ return "<div class='stat "+cls+"'><b>"+n+"</b><span>"+label+"</span></div>"; }
 function esc(s){ return String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function healthCell(c){
+  // Tài khoản đang được job kiểm tra mà chưa có kết quả mới
+  // thì hiện "Đang kiểm tra…" ở đúng dòng đó (mốc so sánh là
+  // lúc job bắt đầu: đã có kết quả mới hơn thì hiện kết quả).
+  const isChecking = CHECKING.emails.has(c.email) &&
+    (!c.health_checked_at || new Date(c.health_checked_at) < new Date(CHECKING.since));
+  const badge = isChecking
+    ? "<span class='badge checking'>Đang kiểm tra…</span>"
+    : "<span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span>";
+  return "<td><div class='cell-flex'>"+badge+"<button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></div>" +
+    (c.health_checked_at? "<div class='small-dim nowrap'>"+fmtTime(c.health_checked_at)+"</div>":"") + "</td>";
+}
 function render(){
   const q = document.getElementById("q").value.trim().toLowerCase();
   const f = document.getElementById("f").value;
@@ -886,8 +904,7 @@ function render(){
       "<td><div class='cell-flex'><span class='mono truncate cookie-masked'>"+esc(c.cookie_masked||"(trống)")+"</span><button class='ghost small' onclick='copyCookie(&quot;"+esc(c.email)+"&quot;,this)'>Sao chép</button></div></td>" +
       "<td class='nowrap'>"+fmtTime(c.cookie_taken_at)+"</td><td class='nowrap'>"+fmtTime(c.expires_at)+"</td>" +
       "<td class='count nowrap' data-remain='"+(c.remaining_seconds??"")+"'>"+fmtRemain(c.remaining_seconds)+"</td>" +
-      "<td><div class='cell-flex'><span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span><button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></div>" +
-      (c.health_checked_at? "<div class='small-dim nowrap'>"+fmtTime(c.health_checked_at)+"</div>":"") + "</td>" +
+      healthCell(c) +
       "<td><span class='badge "+c.status+"'>"+LABEL[c.status]+"</span></td>" +
       "<td class='actions'><button class='small' onclick='refreshOne(&quot;"+esc(c.email)+"&quot;,this)'>Đăng nhập lại</button> " +
       "<button class='ghost small' onclick='deleteCookie(&quot;"+esc(c.email)+"&quot;,this)'>Xoá</button></td></tr>").join("") + "</table>";
@@ -977,10 +994,23 @@ async function loadJobs(){
   const card = document.getElementById("jobsCard");
   if (!jobs.length){ card.style.display = "none"; return; }
   card.style.display = "block";
+  // Tài khoản nào đang được job kiểm tra thì bảng hiện
+  // "Đang kiểm tra…" ở đúng dòng đó — thẻ job chỉ hiện số
+  // lượng + tiến độ, không liệt kê mail nữa.
+  const checking = new Set();
+  let since = "";
+  for (const j of jobs){
+    if (j.kind === "check" && (j.status === "queued" || j.status === "running")){
+      for (const e of (j.emails || [])) checking.add(e);
+      if (!since || j.created_at < since) since = j.created_at;
+    }
+  }
+  CHECKING = {emails: checking, since: since};
   document.getElementById("jobs").innerHTML = jobs.map(j=>
-    "<div class='job'><div class='head'><b>"+esc(j.id)+" — "+(j.kind==="check"?"Kiểm tra":"Đăng nhập lại")+" — "+j.emails.map(esc).join(", ")+"</b><span>"+j.status+"</span></div>" +
+    "<div class='job'><div class='head'><b>"+esc(j.id)+" — "+(j.kind==="check"?"Kiểm tra":"Đăng nhập lại")+" — "+(j.emails||[]).length+" tài khoản · đã xong "+(j.done||0)+"</b><span>"+j.status+"</span></div>" +
     (j.result? "<div>"+esc(j.result)+"</div>":"") +
     (j.log && j.log.length? "<pre>"+esc(j.log.slice(-60).join("\\n"))+"</pre>":"") + "</div>").join("");
+  render();
   if (jobs.some(j=>j.status==="queued"||j.status==="running")) setTimeout(loadJobs, 2000);
 }
 loadAll(); loadJobs(); autoCheck(); setInterval(loadAll, 30000);
