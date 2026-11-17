@@ -353,6 +353,8 @@ class RunSettings:
     # Panel nhận kết quả tra IP lúc bắt đầu lượt chạy VPN (None =
     # giao diện tự chọn panel đang chạy).
     ip_target: object = None
+    # Ẩn cửa sổ Chromium. Trình duyệt vẫn chạy, chỉ không hiện.
+    headless: bool = False
 
 
 class Coordinator:
@@ -382,6 +384,7 @@ class Coordinator:
         self._bad_proxies = dict(settings.bad_mapping)
         self._bad_file = settings.bad_file
         self._ip_target = settings.ip_target
+        self._headless = bool(getattr(settings, "headless", False))
         self.running = True
         self.stop_event.clear()
         try:
@@ -478,6 +481,13 @@ class Coordinator:
         """
         success = fail = 0
         try:
+            if settings.headless:
+                self.events.put(
+                    (
+                        "log",
+                        "Ẩn trình duyệt: Chromium vẫn chạy, không hiện cửa sổ.",
+                    )
+                )
             if settings.relogin:
                 success, fail = self._run_relogin_loop(settings)
             elif settings.meta_login:
@@ -1744,6 +1754,8 @@ class Coordinator:
             command.extend(["--card", card_id])
         if suffix:
             command.append(suffix.lstrip("-"))
+        if getattr(self, "_headless", False):
+            command.append("--headless")
         try:
             process = subprocess.Popen(
                 command,

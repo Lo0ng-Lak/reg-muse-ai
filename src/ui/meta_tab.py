@@ -254,6 +254,7 @@ class MetaTab(ttk.Frame):
             bad_file=self.panel.bad_file,
             bad_mapping=setup["bad_mapping"],
             ip_target=self.panel,
+            headless=setup["headless"],
         )
         try:
             self.app.on_run_started(self.panel)

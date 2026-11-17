@@ -5448,6 +5448,8 @@ def main():
     # --relogin: đăng nhập lại mail Muse đã có, chỉ lấy OTP và
     # cookie. Không nộp thẻ, không mã mời.
     relogin = "--relogin" in flags
+    # --headless: vẫn chạy Chromium, không hiện cửa sổ.
+    headless = "--headless" in flags
     # --card <id>: id kho của thẻ đã giữ chỗ cho tài khoản này
     # (coordinator truyền khi chạy nhiều luồng; id dạng
     # card-<hex>, không phải số thẻ, không trùng với số luồng).
@@ -5502,7 +5504,7 @@ def main():
     page = None
     try:
         browser = playwright.chromium.launch(
-            headless=False, proxy=None if DIRECT_MODE else proxy
+            headless=headless, proxy=None if DIRECT_MODE else proxy
         )
         # Mỗi lần mở trình duyệt là context SẠCH hoàn toàn (kể cả
         # khi dùng cùng một proxy — proxy chỉ đổi IP thoát):
@@ -5571,7 +5573,7 @@ def main():
                     except Exception:
                         pass
                     browser = playwright.chromium.launch(
-                        headless=False,
+                        headless=headless,
                         proxy=None if DIRECT_MODE else proxy,
                     )
                     context, page = _open_clean_page(browser)

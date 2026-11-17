@@ -75,6 +75,13 @@ class ReloginTab(ttk.Frame):
             run, from_=1, to=10, width=5, textvariable=self.lanes_var
         )
         self.lanes_spin.pack(side="left", padx=(6, 12))
+        self.headless_var = tk.BooleanVar(value=False)
+        self.headless_check = ttk.Checkbutton(
+            run,
+            text="Ẩn trình duyệt",
+            variable=self.headless_var,
+        )
+        self.headless_check.pack(side="left", padx=(0, 12))
         self.start_button = ttk.Button(
             run, text="Đăng nhập lại", command=self._start
         )
@@ -206,6 +213,7 @@ class ReloginTab(ttk.Frame):
             relogin=True,
             relogin_excel_path=source,
             relogin_output_path=output,
+            headless=bool(self.headless_var.get()),
         )
         try:
             self.app.on_run_started(None)
@@ -268,6 +276,7 @@ class ReloginTab(ttk.Frame):
             self.browse_output_button,
             self.count_entry,
             self.lanes_spin,
+            self.headless_check,
             self.start_button,
         ):
             widget.configure(state=state)

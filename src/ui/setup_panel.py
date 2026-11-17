@@ -101,6 +101,13 @@ class SetupPanel(ttk.Frame):
             controls, from_=1, to=5, width=5, textvariable=self.lanes_var
         )
         self.lanes_spin.pack(side="left", padx=(6, 12))
+        self.headless_var = tk.BooleanVar(value=False)
+        self.headless_check = ttk.Checkbutton(
+            controls,
+            text="Ẩn trình duyệt",
+            variable=self.headless_var,
+        )
+        self.headless_check.pack(side="left")
 
         if self.show_provider:
             mail_row = ttk.Frame(self)
@@ -389,6 +396,7 @@ class SetupPanel(ttk.Frame):
             "direct": direct,
             "pool": pool,
             "bad_mapping": bad_mapping,
+            "headless": bool(self.headless_var.get()),
         }
 
     def set_running(self, running):
@@ -403,6 +411,9 @@ class SetupPanel(ttk.Frame):
         )
         self.count_spin.configure(state="disabled" if running else "normal")
         self.lanes_spin.configure(state="disabled" if running else "normal")
+        self.headless_check.configure(
+            state="disabled" if running else "normal"
+        )
         if self.provider_combo is not None:
             self.provider_combo.configure(
                 state="disabled" if running else "readonly"
