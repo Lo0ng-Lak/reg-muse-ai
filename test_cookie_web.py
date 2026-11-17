@@ -1345,103 +1345,29 @@ def test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc():
     ), job["log"]
 
 
-def test_check_loop_noi_tiep_luot_sau():
-    for email in ("a@fexpost.com", "b@fexpost.com"):
-        storage._append_spreadsheet_row(
-            email,
-            "s",
-            cookie="AAA-song1-BBB",
-            cookie_taken_at=_iso(_now()),
-        )
+def test_check_uu_tien_qua_han_truoc():
+    # Ưu tiên quá hạn kiểm tra trước (yêu cầu 2026-11-17):
+    # diện stale lấy theo thứ tự của kho — quá hạn lên trước,
+    # còn hạn xếp sau. Còn hạn mà sống thì thôi, chết thì lượt
+    # kiểm tra tự đăng nhập lại (test riêng ở trên).
     storage._append_spreadsheet_row(
-        "khongcookie@fexpost.com",
-        "s",
-        cookie="",
-        cookie_taken_at=_iso(_now()),
-    )
-    goi_check = []
-
-    def factory():
-        return _FakeChecker("song")
-
-    web = cookie_web.CookieWeb(check_loop=True)
-    web.start_check_all = lambda emails: goi_check.append(
-        sorted(emails)
-    ) or "job-99"
-    job = web._new_job(
-        ["a@fexpost.com", "b@fexpost.com"], "check"
-    )
-    web._run_check_job(job, checker_factory=factory)
-    # Lượt sau quét hết tài khoản có cookie, bỏ tài khoản
-    # chưa có cookie.
-    assert goi_check == [
-        ["a@fexpost.com", "b@fexpost.com"]
-    ], goi_check
-
-
-def test_check_loop_khong_noi_tiep_khi_tat():
-    storage._append_spreadsheet_row(
-        "a@fexpost.com",
+        "conhan@fexpost.com",
         "s",
         cookie="AAA-song1-BBB",
         cookie_taken_at=_iso(_now()),
     )
-    goi_check = []
-
-    def factory():
-        return _FakeChecker("song")
-
-    web = cookie_web.CookieWeb()
-    web.start_check_all = lambda emails: goi_check.append(
-        sorted(emails)
-    ) or "job-99"
-    job = web._new_job(["a@fexpost.com"], "check")
-    web._run_check_job(job, checker_factory=factory)
-    assert goi_check == [], goi_check
-
-
-class _FakeTimer:
-    """threading.Timer giả: chỉ ghi lại, không chờ thật."""
-
-    created = []
-
-    def __init__(self, interval, function):
-        self.interval = interval
-        self.function = function
-        self.daemon = False
-        _FakeTimer.created.append(self)
-
-    def start(self):
-        pass
-
-
-def test_check_loop_cho_60_giay_khi_khong_mo_duoc_trinh_duyet():
-    class _BrokenChecker(_FakeChecker):
-        def start(self):
-            raise RuntimeError("không mở được trình duyệt")
-
-    def factory():
-        return _BrokenChecker()
-
-    orig_timer = threading.Timer
-    _FakeTimer.created.clear()
-    threading.Timer = _FakeTimer
-    try:
-        web = cookie_web.CookieWeb(check_loop=True)
-        goi_check = []
-        web.start_check_all = lambda emails: goi_check.append(
-            sorted(emails)
-        ) or "job-99"
-        job = web._new_job(["a@fexpost.com"], "check")
-        web._run_check_job(job, checker_factory=factory)
-        assert goi_check == [], goi_check
-        assert len(_FakeTimer.created) == 1, _FakeTimer.created
-        assert _FakeTimer.created[0].interval == 60.0
-        assert any(
-            "tạm dừng 60 giây" in line for line in job["log"]
-        ), job["log"]
-    finally:
-        threading.Timer = orig_timer
+    storage._append_spreadsheet_row(
+        "quahan@fexpost.com",
+        "s",
+        cookie="AAA-chet1-BBB",
+        cookie_taken_at=_iso(_now() - timedelta(days=9)),
+    )
+    cookies = cookie_vault.list_cookies()
+    emails = cookie_web.select_check_emails(cookies, "stale")
+    assert emails == [
+        "quahan@fexpost.com",
+        "conhan@fexpost.com",
+    ], emails
 
 
 def test_check_slice_khong_chet_khi_mot_mail_loi():
@@ -1533,9 +1459,7 @@ TESTS = [
     test_check_job_khong_dang_nhap_lai_khi_khong_co_cookie_chet,
     test_tu_dong_dang_nhap_lai_bo_qua_khi_dang_co_luot_refresh,
     test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc,
-    test_check_loop_noi_tiep_luot_sau,
-    test_check_loop_khong_noi_tiep_khi_tat,
-    test_check_loop_cho_60_giay_khi_khong_mo_duoc_trinh_duyet,
+    test_check_uu_tien_qua_han_truoc,
     test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
     test_check_slice_khong_chet_khi_mot_mail_loi,
     test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,

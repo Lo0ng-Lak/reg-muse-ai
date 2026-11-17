@@ -160,15 +160,11 @@ def select_check_emails(cookies, scope):
 class CookieWeb:
     """Trạng thái của web quản lý cookie: jobs + khoá chạy."""
 
-    def __init__(self, desktop_coordinator=None, check_loop=False):
+    def __init__(self, desktop_coordinator=None):
         # Coordinator của cửa sổ tkinter (nếu web được mở từ nút
         # trong tool): đăng nhập lại bị từ chối khi tool đang chạy
         # một lượt khác, để hai luồng không giành mailbox.txt.
         self.desktop_coordinator = desktop_coordinator
-        # check_loop: server đang mở thì kiểm tra liên tục — xong
-        # một lượt thì bắt đầu lượt sau ngay (yêu cầu 2026-11-17).
-        # Mặc định tắt để test không tự quay vòng.
-        self.check_loop = check_loop
         self.jobs = {}
         self.jobs_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
@@ -349,7 +345,6 @@ class CookieWeb:
             job["result"] = f"Không kiểm tra được: {error}"
             job["log"].append(str(error))
             job["log"] = job["log"][-MAX_LOG_LINES:]
-            self._chain_check_loop(job)
             return
         finally:
             probe.close()
@@ -394,42 +389,6 @@ class CookieWeb:
             f"(trong {len(emails)} tài khoản)."
         )
         self._tu_dong_dang_nhap_lai_cookie_chet(job, dead)
-        self._chain_check_loop(job)
-
-    def _loop_emails(self):
-        """Mọi tài khoản có cookie — một lượt của vòng kiểm tra
-        liên tục quét hết kho, không chỉ phần quá hạn."""
-        return [
-            row["email"]
-            for row in storage._read_cookie_rows()
-            if row.get("cookie")
-        ]
-
-    def _start_loop_pass(self):
-        emails = self._loop_emails()
-        if emails:
-            self.start_check_all(emails)
-
-    def _chain_check_loop(self, job):
-        """Vòng kiểm tra liên tục (server đang mở): xong một lượt
-        thì bắt đầu lượt sau ngay, trạng thái trên trang lúc nào
-        cũng mới theo thời gian thực. Không mở được trình duyệt
-        thì chờ 60 giây rồi thử lại thay vì quay vòng lỗi."""
-        if not self.check_loop:
-            return
-        if job["done"] == 0 and "Không kiểm tra được" in (
-            job["result"] or ""
-        ):
-            timer = threading.Timer(60.0, self._start_loop_pass)
-            timer.daemon = True
-            timer.start()
-            job["log"].append(
-                "↻ vòng kiểm tra tạm dừng 60 giây (không mở "
-                "được trình duyệt)."
-            )
-            job["log"] = job["log"][-MAX_LOG_LINES:]
-            return
-        self._start_loop_pass()
 
     def _tu_dong_dang_nhap_lai_cookie_chet(self, job, dead_emails):
         """Sau một lượt kiểm tra: cookie nào đã chết thì tự động
@@ -926,7 +885,7 @@ tr:last-child td { border-bottom:0; }
       <option value="">Tất cả hạn</option>
       <option value="song">Còn sống</option>
       <option value="sap-het">Sắp hết</option>
-      <option value="het-han">Hết hạn</option>
+      <option value="het-han">Quá hạn</option>
       <option value="khong-ro">Không rõ hạn</option>
     </select>
     <select id="hf" onchange="PAGE=1;render()">
@@ -963,7 +922,7 @@ tr:last-child td { border-bottom:0; }
 let COOKIES = [];
 let PAGE = 1, PER_PAGE = 50;
 let CHECKING = {emails:new Set(), since:""};
-const LABEL = {song:"Còn sống","sap-het":"Sắp hết","het-han":"Hết hạn","khong-ro":"Không rõ"};
+const LABEL = {song:"Còn sống","sap-het":"Sắp hết","het-han":"Quá hạn","khong-ro":"Không rõ"};
 const HEALTH = {song:"Hoạt động","chet":"Die","khong-ro":"Chưa kiểm tra"};
 const ACTION = {"lay":"Lấy cookie","lam-moi":"Đăng nhập lại","xoa":"Xoá cookie"};
 
@@ -977,7 +936,7 @@ function fmtRemain(sec){
   if (d) s = d+" ngày" + (h? " "+h+" giờ":"");
   else if (h) s = h+" giờ" + (m? " "+m+" phút":"");
   else s = m+" phút";
-  return neg ? "Hết hạn "+s : "Còn "+s;
+  return neg ? "Quá hạn "+s : "Còn "+s;
 }
 function fmtTime(iso){
   if (!iso) return "—";
@@ -1021,7 +980,7 @@ async function loadAll(){
   document.getElementById("stats").innerHTML =
     stat(COOKIES.length,"Tổng tài khoản","") +
     stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
-    stat(c.stats["het-han"],"Hết hạn","bad") + stat(c.stats.chet,"Die","bad") +
+    stat(c.stats["het-han"],"Quá hạn","bad") + stat(c.stats.chet,"Die","bad") +
     stat(c.stats["chua-kiem-tra"],"Chưa kiểm tra","") +
     stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
   if (s) {
@@ -1212,18 +1171,12 @@ class _Server(ThreadingHTTPServer):
         super().__init__(address, CookieWebHandler)
 
 
-def start_server(port=DEFAULT_PORT, desktop_coordinator=None,
-                 check_loop=False):
+def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
     """Mở server quản lý cookie trên 127.0.0.1.
 
     Trả về (httpd, url). Thử port từ port trở đi tới khi bind được.
-    check_loop=True thì server vừa mở là bắt đầu vòng kiểm tra
-    liên tục (xong lượt này tới lượt sau).
     """
-    web = CookieWeb(
-        desktop_coordinator=desktop_coordinator,
-        check_loop=check_loop,
-    )
+    web = CookieWeb(desktop_coordinator=desktop_coordinator)
     # Nhập kho lần đầu chạy nền: lần đầu mở kho, chuyển 2k dòng
     # từ Excel sang SQLite có thể mất một lúc — trang không được
     # chờ nhập xong mới hiện (lỗi 2026-11-17: trang kẹt ở
@@ -1246,8 +1199,6 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None,
         target=httpd.serve_forever, name="cookie-web", daemon=True
     )
     thread.start()
-    if check_loop:
-        web._start_loop_pass()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
 
@@ -1263,8 +1214,7 @@ def open_cookie_web(desktop_coordinator=None):
             webbrowser.open(url)
             return url
         httpd, url = start_server(
-            desktop_coordinator=desktop_coordinator,
-            check_loop=True,
+            desktop_coordinator=desktop_coordinator
         )
         _SERVER = (httpd, url)
     webbrowser.open(url)
@@ -1283,7 +1233,7 @@ def main():
         help="cổng nghe trên 127.0.0.1 (mặc định 8765)",
     )
     args = parser.parse_args()
-    httpd, url = start_server(port=args.port, check_loop=True)
+    httpd, url = start_server(port=args.port)
     print(f"Kho Cookie đang chạy tại {url}")
     print("Mở trình duyệt để quản lý — nhấn Ctrl+C để dừng.")
     webbrowser.open(url)

@@ -584,7 +584,7 @@ sắp hết & đã hết** (sắp hết + đã hết hạn theo mốc 7 ngày)
 hoặc **Đăng nhập lại đã hết** (chỉ tài khoản đã hết hạn), nút sao chép
 cookie, xoá cookie, tìm kiếm/lọc theo hạn và theo hoạt động, thống kê
 và lịch sử lấy/đăng nhập lại. Thống kê có hai chiều riêng: hạn theo
-mốc 7 ngày (Còn sống / Sắp hết / Hết hạn) và sống/chết thật trên
+mốc 7 ngày (Còn sống / Sắp hết / Quá hạn) và sống/chết thật trên
 meta.ai (Die = đã kiểm tra thấy chết; **Chưa kiểm tra** = chưa xác
 minh được sống/chết — gồm cả kiểm tra rồi nhưng chưa rõ).
 **Mở trang là tự kiểm tra, không cần bấm nút**: trang tự xếp job
@@ -592,11 +592,11 @@ kiểm tra diện chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 gi�
 trước (lần đầu mở thì kiểm tra hết, lần sau chỉ kiểm tra lại phần
 đã cũ); đang có job kiểm tra chạy thì không xếp thêm, và bảng tự
 tải lại mỗi 30 giây nên số Die/Sống hiện dần khi kiểm tra xong.
-**Server đang mở thì kiểm tra liên tục**: xong một lượt kiểm tra
-là bắt đầu lượt sau ngay (quét hết tài khoản có cookie), trạng
-thái trên trang lúc nào cũng mới theo thời gian thực; không mở
-được trình duyệt thì chờ 60 giây rồi thử lại. **Cookie nào kiểm
-tra thấy đã chết thì tự động đăng nhập lại lấy cookie mới** (đúng
+Kết quả kiểm tra lưu riêng trong file cookie_health.json (cạnh
+kho tài khoản, không nằm trong kho) nên tắt server mở lại cũng
+không mất — lần sau mở lên chỉ kiểm tra lại những cookie đã quá
+24 giờ chưa kiểm tra, không kiểm tra lại từ đầu.
+**Cookie nào kiểm tra thấy đã chết thì tự động đăng nhập lại lấy cookie mới** (đúng
 luồng Đăng nhập lại: không proxy, không thẻ); tài khoản nào đăng
 nhập lại thất bại (ví dụ Meta bắt xác minh người) thì ghi vào
 log của lượt đó, không làm hỏng lượt kiểm tra.
@@ -645,11 +645,11 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (59 test: hạn 7 ngày, kho SQLite,
+Kiểm tra: `py test_cookie_web.py` (56 test: hạn 7 ngày, kho SQLite,
 API, dashboard, kiểm tra sống/chết bằng trình duyệt headless
 5 luồng song song, đọc 300 dòng, nhập/xuất Excel,
 cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,
 diện tự kiểm tra, chống xếp chồng job kiểm tra, tiến độ job,
-tự đăng nhập lại cookie chết, vòng kiểm tra liên tục) và `py test_account_store.py` (10 test: gộp
+tự đăng nhập lại cookie chết) và `py test_account_store.py` (10 test: gộp
 trùng mail, nhập/xuất, đọc 2.000 dòng). Đăng nhập lại thật bằng
 trình duyệt chỉ kiểm tra được trên máy Windows.
