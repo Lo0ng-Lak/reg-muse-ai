@@ -29,7 +29,7 @@ import queue
 import threading
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -99,6 +99,59 @@ def select_refresh_emails(cookies, scope):
             cookie_vault.STATUS_EXPIRED,
         )
     ]
+
+
+CHECK_FRESH_HOURS = 24
+
+
+def _checked_recently(checked_at, hours=CHECK_FRESH_HOURS):
+    """True khi cookie đã kiểm tra trong `hours` giờ qua.
+
+    Mốc kiểm tra hỏng/không đọc được thì tính là chưa kiểm tra
+    (phải kiểm tra lại) chứ không được tính là mới.
+    """
+    if not checked_at:
+        return False
+    try:
+        when = datetime.fromisoformat(str(checked_at))
+    except ValueError:
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (
+        datetime.now(timezone.utc) - when
+    ).total_seconds() < hours * 3600
+
+
+def select_check_emails(cookies, scope):
+    """Chọn mail kiểm tra sống/chết theo diện (dùng cho /api/check-all).
+
+    - "stale": chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 giờ
+      trước — diện tự kiểm tra khi mở trang: lần đầu mở thì kiểm
+      tra hết, lần sau chỉ kiểm tra lại phần đã cũ, không spam
+      meta.ai mỗi lần F5.
+    - "expiring": có cookie và sắp hết/hết hạn theo mốc 7 ngày.
+    - "all": tất cả tài khoản có cookie.
+    """
+    if scope == "stale":
+        return [
+            item["email"]
+            for item in cookies
+            if item["has_cookie"]
+            and not _checked_recently(item.get("health_checked_at"))
+        ]
+    if scope == "expiring":
+        return [
+            item["email"]
+            for item in cookies
+            if item["has_cookie"]
+            and item["status"]
+            in (
+                cookie_vault.STATUS_EXPIRING,
+                cookie_vault.STATUS_EXPIRED,
+            )
+        ]
+    return [item["email"] for item in cookies if item["has_cookie"]]
 
 
 class CookieWeb:
@@ -214,7 +267,19 @@ class CookieWeb:
         return job["id"]
 
     def start_check_all(self, emails):
-        """Tạo một job kiểm tra sống/chết cho các email (chạy nền)."""
+        """Tạo một job kiểm tra sống/chết cho các email (chạy nền).
+
+        Đang có job kiểm tra chạy thì trả về job đó thay vì xếp
+        job mới — mở trang/F5 nhiều lần không được xếp chồng
+        kiểm tra lên nhau.
+        """
+        with self.jobs_lock:
+            for job in self.jobs.values():
+                if job["kind"] == "check" and job["status"] in (
+                    "queued",
+                    "running",
+                ):
+                    return job["id"]
         job = self._new_job(emails, "check")
         thread = threading.Thread(
             target=self._run_check_job,
@@ -556,27 +621,7 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                 data = self._read_json()
                 scope = (data.get("scope") or "all").strip()
                 cookies = cookie_vault.list_cookies()
-                if scope == "expiring":
-                    # Chỉ kiểm tra diện cần quan tâm: sắp hết/hết
-                    # hạn theo mốc 7 ngày. Với 2k cookie thì kiểm
-                    # tra tất cả mất rất lâu (mỗi cookie một
-                    # request tới meta.ai).
-                    emails = [
-                        item["email"]
-                        for item in cookies
-                        if item["has_cookie"]
-                        and item["status"]
-                        in (
-                            cookie_vault.STATUS_EXPIRING,
-                            cookie_vault.STATUS_EXPIRED,
-                        )
-                    ]
-                else:
-                    emails = [
-                        item["email"]
-                        for item in cookies
-                        if item["has_cookie"]
-                    ]
+                emails = select_check_emails(cookies, scope)
                 if not emails:
                     self._send_json(
                         {"error": "không có tài khoản nào có cookie"}, 400
@@ -882,6 +927,18 @@ async function checkAll(scope){
   if (r.error){ alert(r.error); return; }
   loadJobs();
 }
+async function autoCheck(){
+  // Mở trang là tự kiểm tra, không cần bấm nút: chỉ kiểm tra
+  // diện chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 giờ
+  // trước; server không xếp job mới khi đang có job kiểm tra
+  // chạy. Lỗi thì thôi — trang vẫn hiện số theo mốc 7 ngày,
+  // lần sau mở lại sẽ tự kiểm tra tiếp.
+  try {
+    const r = await fetch("/api/check-all", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({scope:"stale"})}).then(r=>r.json());
+    if (!r.error) loadJobs();
+  } catch(e) { /* bỏ qua */ }
+}
 async function refreshOne(email, btn){
   btn.disabled = true;
   const r = await fetch("/api/refresh", {method:"POST", headers:{"Content-Type":"application/json"},
@@ -926,7 +983,7 @@ async function loadJobs(){
     (j.log && j.log.length? "<pre>"+esc(j.log.slice(-60).join("\\n"))+"</pre>":"") + "</div>").join("");
   if (jobs.some(j=>j.status==="queued"||j.status==="running")) setTimeout(loadJobs, 2000);
 }
-loadAll(); loadJobs(); setInterval(loadAll, 30000);
+loadAll(); loadJobs(); autoCheck(); setInterval(loadAll, 30000);
 </script>
 </body>
 </html>

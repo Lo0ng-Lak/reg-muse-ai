@@ -780,6 +780,39 @@ def test_select_refresh_emails_scopes():
     ) == ["sap@x.com", "het1@x.com", "het2@x.com"]
 
 
+def test_select_check_emails_scopes():
+    now = _now()
+    fresh = _iso(now - timedelta(minutes=30))
+    old = _iso(now - timedelta(hours=25))
+    cookies = [
+        {"email": "never@x.com", "status": "song", "has_cookie": True, "health_checked_at": ""},
+        {"email": "old@x.com", "status": "sap-het", "has_cookie": True, "health_checked_at": old},
+        {"email": "fresh@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh},
+        {"email": "het@x.com", "status": "het-han", "has_cookie": True, "health_checked_at": fresh},
+        {"email": "nocookie@x.com", "status": "khong-ro", "has_cookie": False, "health_checked_at": ""},
+    ]
+    # stale: chưa kiểm tra bao giờ hoặc quá 24 giờ trước.
+    assert cookie_web.select_check_emails(
+        cookies, "stale"
+    ) == ["never@x.com", "old@x.com"]
+    assert cookie_web.select_check_emails(
+        cookies, "expiring"
+    ) == ["old@x.com", "het@x.com"]
+    assert cookie_web.select_check_emails(cookies, "all") == [
+        "never@x.com",
+        "old@x.com",
+        "fresh@x.com",
+        "het@x.com",
+    ]
+
+
+def test_start_check_all_khong_xep_chong_job():
+    web = cookie_web.CookieWeb()
+    job = web._new_job(["a@fexpost.com"], "check")
+    assert web.start_check_all(["b@fexpost.com"]) == job["id"]
+    assert len(web.jobs) == 1
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -812,6 +845,8 @@ TESTS = [
     test_dashboard_script_parses_and_handlers_escaped,
     test_stats_counts_unchecked_separately_from_dead,
     test_select_refresh_emails_scopes,
+    test_select_check_emails_scopes,
+    test_start_check_all_khong_xep_chong_job,
 ]
 
 

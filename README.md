@@ -568,6 +568,11 @@ và lịch sử lấy/đăng nhập lại. Thống kê có hai chiều riêng: h
 mốc 7 ngày (Còn sống / Sắp hết / Hết hạn) và sống/chết thật trên
 meta.ai (Die = đã kiểm tra thấy chết; **Chưa kiểm tra** = chưa từng
 kiểm tra — Die: 0 chỉ có nghĩa khi số Chưa kiểm tra cũng là 0).
+**Mở trang là tự kiểm tra, không cần bấm nút**: trang tự xếp job
+kiểm tra diện chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 giờ
+trước (lần đầu mở thì kiểm tra hết, lần sau chỉ kiểm tra lại phần
+đã cũ); đang có job kiểm tra chạy thì không xếp thêm, và bảng tự
+tải lại mỗi 30 giây nên số Die/Sống hiện dần khi kiểm tra xong.
 Server chỉ nghe trên 127.0.0.1 (máy này).
 
 Đăng nhập lại chạy đúng luồng tab **Đăng nhập lại** của tool
@@ -609,8 +614,9 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (31 test: hạn 7 ngày, kho SQLite,
+Kiểm tra: `py test_cookie_web.py` (33 test: hạn 7 ngày, kho SQLite,
 API, dashboard, kiểm tra sống/chết, đọc 300 dòng, nhập/xuất Excel,
-cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại) và `py test_account_store.py` (10 test: gộp
+cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,
+diện tự kiểm tra, chống xếp chồng job kiểm tra) và `py test_account_store.py` (10 test: gộp
 trùng mail, nhập/xuất, đọc 2.000 dòng). Đăng nhập lại thật bằng
 trình duyệt chỉ kiểm tra được trên máy Windows.
