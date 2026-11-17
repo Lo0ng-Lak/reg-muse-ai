@@ -43,6 +43,9 @@ from coordinator import Coordinator
 
 DEFAULT_PORT = 8765
 MAX_LOG_LINES = 200
+# Số luồng kiểm tra song song (mỗi luồng một trình duyệt headless
+# riêng). Tool đăng ký chạy 1-5 luồng; kiểm tra cũng chạy 5.
+CHECK_WORKERS = 5
 MAX_HISTORY_SHOWN = 100
 
 _SERVER = None
@@ -323,37 +326,93 @@ class CookieWeb:
                 f"(trong {len(job['emails'])} tài khoản)."
             )
 
-    def _run_check_job(self, job):
-        """Một job: kiểm tra sống/chết lần lượt từng email."""
-        job["status"] = "running"
-        alive = 0
-        dead = 0
-        unknown = 0
-        for email in job["emails"]:
-            cookie = self.full_cookie(email)
-            if not cookie:
-                job["log"].append(f"— {email}: chưa có cookie.")
-                unknown += 1
-                continue
-            entry = cookie_health.check_and_cache(email, cookie)
-            status = entry["status"]
-            if status == cookie_health.STATUS_ALIVE:
-                alive += 1
-            elif status == cookie_health.STATUS_DEAD:
-                dead += 1
-            else:
-                unknown += 1
-            job["done"] = alive + dead + unknown
-            job["log"].append(
-                f"{email}: {cookie_health.STATUS_LABELS[status]} "
-                f"({entry['detail']})"
-            )
+    def _run_check_job(self, job, checker_factory=None):
+        """Một job: kiểm tra sống/chết — chia mail cho nhiều luồng
+        song song, mỗi luồng một trình duyệt headless riêng.
+
+        Mở thử một trình duyệt trước: không mở được thì dừng ngay
+        (báo rõ lý do), không chạy cả nghìn lần vô ích.
+        """
+        factory = checker_factory or cookie_health.BrowserChecker
+        probe = factory()
+        try:
+            probe.start()
+        except RuntimeError as error:
+            job["status"] = "done"
+            job["result"] = f"Không kiểm tra được: {error}"
+            job["log"].append(str(error))
             job["log"] = job["log"][-MAX_LOG_LINES:]
+            return
+        finally:
+            probe.close()
+        job["status"] = "running"
+        emails = list(job["emails"])
+        workers = max(1, min(CHECK_WORKERS, len(emails)))
+        counts = {"song": 0, "chet": 0, "khong-ro": 0}
+        lock = threading.Lock()
+        threads = []
+        for index in range(workers):
+            thread = threading.Thread(
+                target=self._check_slice,
+                args=(
+                    job,
+                    emails[index::workers],
+                    factory,
+                    counts,
+                    lock,
+                ),
+                name=f"cookie-check-{job['id']}-{index}",
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
+        for thread in threads:
+            thread.join()
         job["status"] = "done"
         job["result"] = (
-            f"Xong: {alive} hoạt động, {dead} die, {unknown} chưa rõ "
-            f"(trong {len(job['emails'])} tài khoản)."
+            f"Xong: {counts['song']} hoạt động, {counts['chet']} die, "
+            f"{counts['khong-ro']} chưa rõ "
+            f"(trong {len(emails)} tài khoản)."
         )
+
+    def _check_slice(self, job, emails, factory, counts, lock):
+        """Một luồng kiểm tra: mở trình duyệt riêng, kiểm tra lần
+        lượt từng mail trong phần của mình."""
+        checker = factory()
+        try:
+            checker.start()
+        except RuntimeError as error:
+            with lock:
+                job["log"].append(f"✘ luồng kiểm tra: {error}")
+                job["log"] = job["log"][-MAX_LOG_LINES:]
+            return
+        try:
+            for email in emails:
+                cookie = self.full_cookie(email)
+                if not cookie:
+                    with lock:
+                        job["log"].append(
+                            f"— {email}: chưa có cookie."
+                        )
+                        counts["khong-ro"] += 1
+                        job["done"] = sum(counts.values())
+                        job["log"] = job["log"][-MAX_LOG_LINES:]
+                    continue
+                entry = cookie_health.check_and_cache(
+                    email, cookie, checker=checker
+                )
+                status = entry["status"]
+                with lock:
+                    counts[status] += 1
+                    job["done"] = sum(counts.values())
+                    job["log"].append(
+                        f"{email}: "
+                        f"{cookie_health.STATUS_LABELS[status]} "
+                        f"({entry['detail']})"
+                    )
+                    job["log"] = job["log"][-MAX_LOG_LINES:]
+        finally:
+            checker.close()
 
     # --- Đăng nhập lại một tài khoản ------------------------------
 
@@ -618,7 +677,18 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                         {"error": "tài khoản này chưa có cookie"}, 400
                     )
                     return
-                entry = cookie_health.check_and_cache(email, cookie)
+                checker = cookie_health.BrowserChecker()
+                try:
+                    checker.start()
+                except RuntimeError as error:
+                    self._send_json({"error": str(error)}, 500)
+                    return
+                try:
+                    entry = cookie_health.check_and_cache(
+                        email, cookie, checker=checker
+                    )
+                finally:
+                    checker.close()
                 self._send_json({"email": email, **entry})
             elif path == "/api/check-all":
                 data = self._read_json()

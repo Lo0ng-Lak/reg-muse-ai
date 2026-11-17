@@ -2,8 +2,9 @@
 
 Không chỉ "có cookie là được": một cookie có thể còn trong
 hạn 7 ngày nhưng đã chết (đăng xuất ở nơi khác, phiên bị thu
-hồi...). Hàm check_cookie gọi thẳng trang chủ Muse kèm cookie
-đó và đọc dấu hiệu trên trang trả về:
+hồi...). Kiểm tra thật qua BrowserChecker: trình duyệt Chromium
+headless (không mở cửa sổ), gắn cookie vào rồi mở trang chủ
+Muse và đọc dấu hiệu trên trang:
 
 - Sống: trang trả về giao diện chat (ô chat "Ask Meta AI").
 - Die: trang trả về màn đăng nhập (URL chứa login/auth, hoặc
@@ -11,18 +12,26 @@ hồi...). Hàm check_cookie gọi thẳng trang chủ Muse kèm cookie
 - Không rõ: trang không nhận diện được, hoặc mạng lỗi — không
   đoán mò sống/chết khi không chắc.
 
-Cookie KHÔNG bao giờ được ghi vào log hay trả về cùng kết quả
-kiểm tra (chỉ trả trạng thái + ghi chú ngắn). Kết quả được cache
+Kiểm tra bằng urllib (check_cookie) KHÔNG dùng được nữa:
+meta.ai trả 403 "Client challenge" cho client không phải trình
+duyệt — hàm đó giữ lại cho test/tham chiếu. Kết quả được cache
 theo email trong cookie_health.json (cạnh accounts.xlsx) để
 dashboard không phải gọi lại mỗi lần mở.
 """
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime
 
 import paths
+
+
+# Khoá ghi cache kiểm tra: job kiểm tra chạy nhiều luồng, mỗi
+# luồng đọc-sửa-ghi cookie_health.json — không khoá thì hai
+# luồng đọc cùng một bản rồi ghi đè lên nhau, mất kết quả.
+_CACHE_LOCK = threading.Lock()
 
 
 MUSE_HOME_URL = "https://www.meta.ai/"
@@ -124,12 +133,17 @@ def save_health_cache(cache):
         pass
 
 
-def check_and_cache(email, cookie, fetcher=None):
+def check_and_cache(email, cookie, fetcher=None, checker=None):
     """Kiểm tra cookie của một email rồi lưu kết quả vào cache.
 
-    Trả về dict {status, checked_at, detail}.
+    Trả về dict {status, checked_at, detail}. `checker` là một
+    BrowserChecker đã mở (job kiểm tra dùng chung một browser
+    cho cả lượt); không đưa thì dùng check_cookie qua urllib.
     """
-    status, detail = check_cookie(cookie, fetcher=fetcher)
+    if checker is not None:
+        status, detail = checker.check(cookie)
+    else:
+        status, detail = check_cookie(cookie, fetcher=fetcher)
     entry = {
         "status": status,
         "checked_at": datetime.now().astimezone().isoformat(
@@ -137,7 +151,147 @@ def check_and_cache(email, cookie, fetcher=None):
         ),
         "detail": detail,
     }
-    cache = load_health_cache()
-    cache[(email or "").strip().lower()] = entry
-    save_health_cache(cache)
+    with _CACHE_LOCK:
+        cache = load_health_cache()
+        cache[(email or "").strip().lower()] = entry
+        save_health_cache(cache)
     return entry
+
+
+BROWSER_CHECK_TIMEOUT_MS = 20000
+
+
+def parse_cookie_string(text):
+    """Chuỗi cookie 'a=1; b=2' -> [(tên, giá trị)]."""
+    pairs = []
+    for part in (text or "").split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name, value = name.strip(), value.strip()
+        if name:
+            pairs.append((name, value))
+    return pairs
+
+
+class BrowserChecker:
+    """Kiểm tra cookie bằng trình duyệt thật, headless (không mở
+    cửa sổ): một browser dùng chung cho cả lượt kiểm tra, mỗi
+    cookie một context sạch rồi đóng.
+
+    meta.ai chặn kiểm tra bằng urllib (403 "Client challenge" —
+    đòi trình duyệt chạy JavaScript), nên kiểm tra sống/chết
+    phải qua trình duyệt thật. Chậm hơn nhiều (vài giây một
+    cookie) nhưng mới có kết quả thật.
+    """
+
+    def __init__(self, launcher=None):
+        # launcher: hàm () -> browser (để test đưa browser giả).
+        self._launcher = launcher
+        self._playwright = None
+        self._browser = None
+
+    def start(self):
+        """Mở trình duyệt headless.
+
+        Lỗi -> RuntimeError với hướng dẫn cài đặt (không để job
+        chạy cả nghìn lần vô ích).
+        """
+        if self._launcher is not None:
+            try:
+                self._browser = self._launcher()
+            except ImportError as error:
+                raise RuntimeError(
+                    "Thiếu Playwright — kiểm tra sống/chết cần "
+                    "trình duyệt thật. Cài bằng lệnh:\n"
+                    "`py -m pip install -r requirements.txt`\n"
+                    "`py -m playwright install chromium`\n\n"
+                    f"{error}"
+                ) from error
+            return
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as error:
+            raise RuntimeError(
+                "Thiếu Playwright — kiểm tra sống/chết cần trình "
+                "duyệt thật. Cài bằng lệnh:\n"
+                "`py -m pip install -r requirements.txt`\n"
+                "`py -m playwright install chromium`\n\n"
+                f"{error}"
+            ) from error
+        try:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(
+                headless=True
+            )
+        except Exception as error:
+            self.close()
+            raise RuntimeError(
+                "Không mở được trình duyệt kiểm tra: "
+                f"{error}"
+            ) from error
+
+    def check(self, cookie):
+        """Kiểm tra một cookie -> (status, detail)."""
+        text = (cookie or "").strip()
+        if not text or "hatch_sess=" not in text:
+            return STATUS_DEAD, "không có hatch_sess"
+        context = self._browser.new_context()
+        try:
+            context.add_cookies(
+                [
+                    {
+                        "name": name,
+                        "value": value,
+                        "domain": ".meta.ai",
+                        "path": "/",
+                    }
+                    for name, value in parse_cookie_string(text)
+                ]
+            )
+            page = context.new_page()
+            try:
+                page.goto(
+                    MUSE_HOME_URL,
+                    timeout=BROWSER_CHECK_TIMEOUT_MS,
+                )
+                page.wait_for_timeout(1500)
+                url = (page.url or "").lower()
+                body = (page.content() or "").lower()
+                if "login" in url or "auth.meta.com" in url:
+                    return STATUS_DEAD, "bị đẩy về màn đăng nhập"
+                if any(
+                    marker.lower() in body
+                    for marker in ALIVE_MARKERS
+                ):
+                    return STATUS_ALIVE, "vào được giao diện chat"
+                if "log in" in body:
+                    return STATUS_DEAD, "trang hiện màn đăng nhập"
+                return (
+                    STATUS_UNKNOWN,
+                    "trang trả về không nhận diện được",
+                )
+            except Exception as error:
+                return (
+                    STATUS_UNKNOWN,
+                    f"không kiểm tra được ({error})",
+                )
+            finally:
+                page.close()
+        finally:
+            context.close()
+
+    def close(self):
+        if self._browser is not None:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
