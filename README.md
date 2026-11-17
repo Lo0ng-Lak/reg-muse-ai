@@ -570,6 +570,11 @@ mỗi luồng một trình duyệt headless riêng; mỗi cookie tốn vài
 giây nên một lượt 1.000+ cookie chạy nền khoảng 15 phút thay
 vì cả tiếng; không mở được trình
 duyệt thì job dừng ngay và báo rõ lý do thay vì chạy vô ích.
+Cookie được lọc trước khi gắn vào trình duyệt (bỏ cặp tên/giá
+trị lỗi, trùng tên giữ cái sau) và gắn bằng `url`; một mail
+lỗi thì ghi lại rồi tính là chưa rõ, không được giết chết cả
+luồng kiểm tra (lỗi 2026-11-17: `add_cookies` ném 'Invalid
+cookie fields' làm cả 5 luồng chết lặng, job xong 0/0/0).
 Nút **Đăng nhập lại** từng tài khoản, **Đăng nhập lại
 sắp hết & đã hết** (sắp hết + đã hết hạn theo mốc 7 ngày)
 hoặc **Đăng nhập lại đã hết** (chỉ tài khoản đã hết hạn), nút sao chép
@@ -628,7 +633,7 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (43 test: hạn 7 ngày, kho SQLite,
+Kiểm tra: `py test_cookie_web.py` (49 test: hạn 7 ngày, kho SQLite,
 API, dashboard, kiểm tra sống/chết bằng trình duyệt headless
 5 luồng song song, đọc 300 dòng, nhập/xuất Excel,
 cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,

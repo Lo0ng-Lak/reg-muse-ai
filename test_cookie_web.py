@@ -481,6 +481,9 @@ def _fake_browser_checker_class(status):
         def start(self):
             pass
 
+        def smoke_test(self):
+            pass
+
         def check(self, cookie):
             return status, "kiểm tra giả"
 
@@ -838,6 +841,9 @@ class _FakeChecker:
     def start(self):
         pass
 
+    def smoke_test(self):
+        pass
+
     def check(self, cookie):
         self.checked.append(cookie)
         return self.status, "vào được giao diện chat"
@@ -973,10 +979,13 @@ def test_browser_checker_song_khi_vao_duoc_chat():
     checker, browser = _browser_checker_with(page)
     status, detail = checker.check(COOKIE_LIVE)
     assert status == "song", (status, detail)
-    # Cookie được gắn vào context (domain meta.ai), rồi context
+    # Cookie được gắn vào context (url meta.ai), rồi context
     # đóng lại sau mỗi lần kiểm tra.
     assert browser.contexts[0].cookies[0]["name"] == "hatch_sess"
-    assert browser.contexts[0].cookies[0]["domain"] == ".meta.ai"
+    assert (
+        browser.contexts[0].cookies[0]["url"]
+        == "https://www.meta.ai/"
+    )
     assert browser.contexts[0].closed
     assert page.closed
     checker.close()
@@ -1078,6 +1087,139 @@ def test_check_and_cache_khong_mat_entry_khi_ghi_song_song():
     ), cache
 
 
+def test_parse_cookie_string_giu_dau_bang_trong_gia_tri():
+    assert cookie_health.parse_cookie_string(
+        "sb=abc123==; hatch_sess=x=y; c_user=1001"
+    ) == [
+        ("sb", "abc123=="),
+        ("hatch_sess", "x=y"),
+        ("c_user", "1001"),
+    ]
+
+
+def test_clean_cookie_pairs_bo_gia_tri_loi_va_trung_ten():
+    assert cookie_health.clean_cookie_pairs(
+        [
+            ("hatch_sess", "live123"),
+            ("xau", "co dau cach"),
+            ("xau2", "co,dau,phay"),
+            ("xau3", 'co"nhay'),
+            ("sb", "trung"),
+            ("sb", "trung2"),
+            ("", "rong"),
+        ]
+    ) == [("hatch_sess", "live123"), ("sb", "trung2")]
+
+
+class _FailingCookiesContext(_FakeContext):
+    def add_cookies(self, cookies):
+        raise RuntimeError(
+            "Protocol error (Storage.setCookies): "
+            "Invalid cookie fields"
+        )
+
+
+class _FailingCookiesBrowser(_FakeBrowser):
+    def new_context(self):
+        ctx = _FailingCookiesContext(self.page)
+        self.contexts.append(ctx)
+        return ctx
+
+
+def test_browser_checker_bo_qua_cookie_loi():
+    page = _FakePage(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+    )
+    browser = _FakeBrowser(page)
+    checker = cookie_health.BrowserChecker(launcher=lambda: browser)
+    checker.start()
+    status, _detail = checker.check(
+        "hatch_sess=live123; xau=co dau cach; "
+        "c_user=1001; sb=trung; sb=trung2"
+    )
+    assert status == "song", status
+    attached = {
+        c["name"]: c["value"]
+        for c in browser.contexts[0].cookies
+    }
+    assert "xau" not in attached, attached
+    assert attached["sb"] == "trung2", attached
+    assert all(
+        c["url"] == "https://www.meta.ai/"
+        for c in browser.contexts[0].cookies
+    )
+    checker.close()
+
+
+def test_browser_checker_khong_chet_khi_add_cookies_loi():
+    page = _FakePage("https://www.meta.ai/", "<html></html>")
+    browser = _FailingCookiesBrowser(page)
+    checker = cookie_health.BrowserChecker(launcher=lambda: browser)
+    checker.start()
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "khong-ro", (status, detail)
+    assert "không gắn được cookie" in detail, detail
+    assert browser.contexts[0].closed
+    checker.close()
+
+
+class _FlakyChecker(_FakeChecker):
+    def check(self, cookie):
+        if "RAISE" in cookie:
+            raise RuntimeError("trình duyệt sập")
+        return super().check(cookie)
+
+
+def test_check_slice_khong_chet_khi_mot_mail_loi():
+    storage._append_spreadsheet_row(
+        "loi@fexpost.com",
+        "s",
+        cookie="hatch_sess=RAISE123",
+        cookie_taken_at=_iso(_now()),
+    )
+    for email in ("a@fexpost.com", "b@fexpost.com"):
+        storage._append_spreadsheet_row(
+            email,
+            "s",
+            cookie=COOKIE_LIVE,
+            cookie_taken_at=_iso(_now()),
+        )
+
+    def factory():
+        return _FlakyChecker()
+
+    web = cookie_web.CookieWeb()
+    job = web._new_job(
+        ["loi@fexpost.com", "a@fexpost.com", "b@fexpost.com"],
+        "check",
+    )
+    web._run_check_job(job, checker_factory=factory)
+    assert job["done"] == 3, job
+    assert "2 hoạt động" in job["result"], job
+    assert "1 chưa rõ" in job["result"], job
+    assert any(
+        line.startswith("✘ loi@fexpost.com") for line in job["log"]
+    ), job
+
+
+def test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang():
+    class _NoPageChecker(_FakeChecker):
+        def smoke_test(self):
+            raise RuntimeError("không tạo được trang")
+
+    def factory():
+        return _NoPageChecker()
+
+    web = cookie_web.CookieWeb()
+    job = web._new_job(["a@fexpost.com"], "check")
+    web._run_check_job(job, checker_factory=factory)
+    assert job["done"] == 0, job
+    assert "Không kiểm tra được" in job["result"], job
+    assert "không tạo được trang" in job["result"], job
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -1116,7 +1258,13 @@ TESTS = [
     test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet,
     test_check_job_chia_deu_cac_luong,
     test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
+    test_check_slice_khong_chet_khi_mot_mail_loi,
+    test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,
     test_parse_cookie_string,
+    test_parse_cookie_string_giu_dau_bang_trong_gia_tri,
+    test_clean_cookie_pairs_bo_gia_tri_loi_va_trung_ten,
+    test_browser_checker_bo_qua_cookie_loi,
+    test_browser_checker_khong_chet_khi_add_cookies_loi,
     test_browser_checker_song_khi_vao_duoc_chat,
     test_browser_checker_chet_khi_bi_day_ve_dang_nhap,
     test_browser_checker_khong_ro_khi_trang_la,

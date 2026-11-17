@@ -337,7 +337,8 @@ class CookieWeb:
         probe = factory()
         try:
             probe.start()
-        except RuntimeError as error:
+            probe.smoke_test()
+        except Exception as error:
             job["status"] = "done"
             job["result"] = f"Không kiểm tra được: {error}"
             job["log"].append(str(error))
@@ -347,6 +348,14 @@ class CookieWeb:
             probe.close()
         job["status"] = "running"
         emails = list(job["emails"])
+        # Đọc cookie một lần cho cả job thay vì đọc lại cả kho
+        # cho từng mail (2252 mail × 2252 dòng).
+        cookies_by_email = {
+            (row.get("email") or "").strip().lower(): (
+                row.get("cookie") or ""
+            )
+            for row in storage._read_cookie_rows()
+        }
         workers = max(1, min(CHECK_WORKERS, len(emails)))
         counts = {"song": 0, "chet": 0, "khong-ro": 0}
         lock = threading.Lock()
@@ -357,6 +366,7 @@ class CookieWeb:
                 args=(
                     job,
                     emails[index::workers],
+                    cookies_by_email,
                     factory,
                     counts,
                     lock,
@@ -375,9 +385,14 @@ class CookieWeb:
             f"(trong {len(emails)} tài khoản)."
         )
 
-    def _check_slice(self, job, emails, factory, counts, lock):
+    def _check_slice(self, job, emails, cookies_by_email, factory,
+                     counts, lock):
         """Một luồng kiểm tra: mở trình duyệt riêng, kiểm tra lần
-        lượt từng mail trong phần của mình."""
+        lượt từng mail trong phần của mình.
+
+        Lỗi ở một mail không được giết cả luồng: ghi lại rồi
+        tính là chưa rõ, kiểm tra tiếp mail sau.
+        """
         checker = factory()
         try:
             checker.start()
@@ -388,20 +403,30 @@ class CookieWeb:
             return
         try:
             for email in emails:
-                cookie = self.full_cookie(email)
-                if not cookie:
+                try:
+                    cookie = cookies_by_email.get(
+                        (email or "").strip().lower(), ""
+                    )
+                    if not cookie:
+                        with lock:
+                            job["log"].append(
+                                f"— {email}: chưa có cookie."
+                            )
+                            counts["khong-ro"] += 1
+                            job["done"] = sum(counts.values())
+                            job["log"] = job["log"][-MAX_LOG_LINES:]
+                        continue
+                    entry = cookie_health.check_and_cache(
+                        email, cookie, checker=checker
+                    )
+                    status = entry["status"]
+                except Exception as error:
                     with lock:
-                        job["log"].append(
-                            f"— {email}: chưa có cookie."
-                        )
                         counts["khong-ro"] += 1
                         job["done"] = sum(counts.values())
+                        job["log"].append(f"✘ {email}: {error}")
                         job["log"] = job["log"][-MAX_LOG_LINES:]
                     continue
-                entry = cookie_health.check_and_cache(
-                    email, cookie, checker=checker
-                )
-                status = entry["status"]
                 with lock:
                     counts[status] += 1
                     job["done"] = sum(counts.values())
