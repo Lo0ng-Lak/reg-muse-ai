@@ -473,6 +473,23 @@ def test_health_cache_roundtrip_and_list_enrichment():
     assert cookies[0]["health_checked_at"] == entry["checked_at"]
 
 
+def _fake_browser_checker_class(status):
+    """Lớp BrowserChecker giả cho test HTTP: trả trạng thái cố
+    định, không cần trình duyệt thật."""
+
+    class _Fake:
+        def start(self):
+            pass
+
+        def check(self, cookie):
+            return status, "kiểm tra giả"
+
+        def close(self):
+            pass
+
+    return _Fake
+
+
 def test_http_check_endpoint():
     storage._append_spreadsheet_row(
         "a@fexpost.com",
@@ -480,12 +497,8 @@ def test_http_check_endpoint():
         cookie=COOKIE_LIVE,
         cookie_taken_at=_iso(_now()),
     )
-    orig = cookie_health._default_fetch
-    cookie_health._default_fetch = _fake_fetch(
-        "https://www.meta.ai/",
-        '<html><body><textarea placeholder="Ask Meta AI">'
-        "</textarea></body></html>",
-    )
+    orig = cookie_health.BrowserChecker
+    cookie_health.BrowserChecker = _fake_browser_checker_class("song")
     httpd, url = cookie_web.start_server(port=0)
     try:
         status, body = _http(
@@ -497,7 +510,7 @@ def test_http_check_endpoint():
         status, body = _http("GET", url + "/api/cookies")
         assert json.loads(body)["cookies"][0]["health"] == "song"
     finally:
-        cookie_health._default_fetch = orig
+        cookie_health.BrowserChecker = orig
         httpd.shutdown()
         httpd.server_close()
 
@@ -510,11 +523,8 @@ def test_http_check_all_job():
             cookie=COOKIE_LIVE,
             cookie_taken_at=_iso(_now()),
         )
-    orig = cookie_health._default_fetch
-    cookie_health._default_fetch = _fake_fetch(
-        "https://www.meta.ai/login",
-        "<html><body><button>Log in</button></body></html>",
-    )
+    orig = cookie_health.BrowserChecker
+    cookie_health.BrowserChecker = _fake_browser_checker_class("chet")
     httpd, url = cookie_web.start_server(port=0)
     try:
         status, body = _http("POST", url + "/api/check-all", {})
@@ -534,7 +544,7 @@ def test_http_check_all_job():
         assert job is not None and job["status"] == "done", job
         assert "2 die" in job["result"], job
     finally:
-        cookie_health._default_fetch = orig
+        cookie_health.BrowserChecker = orig
         httpd.shutdown()
         httpd.server_close()
 
@@ -600,12 +610,8 @@ def test_http_check_all_expiring_scope():
             cookie=COOKIE_LIVE,
             cookie_taken_at=_iso(_now() - timedelta(days=age_days)),
         )
-    orig = cookie_health._default_fetch
-    cookie_health._default_fetch = _fake_fetch(
-        "https://www.meta.ai/",
-        '<html><body><textarea placeholder="Ask Meta AI">'
-        "</textarea></body></html>",
-    )
+    orig = cookie_health.BrowserChecker
+    cookie_health.BrowserChecker = _fake_browser_checker_class("song")
     httpd, url = cookie_web.start_server(port=0)
     try:
         status, body = _http(
@@ -630,7 +636,7 @@ def test_http_check_all_expiring_scope():
         assert job is not None and job["status"] == "done", job
         assert "2 hoạt động" in job["result"], job
     finally:
-        cookie_health._default_fetch = orig
+        cookie_health.BrowserChecker = orig
         httpd.shutdown()
         httpd.server_close()
 
@@ -820,6 +826,23 @@ def test_start_check_all_khong_xep_chong_job():
     assert len(web.jobs) == 1
 
 
+class _FakeChecker:
+    """BrowserChecker giả: trả trạng thái cố định, không cần
+    trình duyệt thật."""
+
+    def __init__(self, status="song"):
+        self.status = status
+        self.checked = []
+        self.closed = False
+
+    def check(self, cookie):
+        self.checked.append(cookie)
+        return self.status, "vào được giao diện chat"
+
+    def close(self):
+        self.closed = True
+
+
 def test_check_job_reports_done_count():
     for email in ("a@fexpost.com", "b@fexpost.com"):
         storage._append_spreadsheet_row(
@@ -828,24 +851,167 @@ def test_check_job_reports_done_count():
             cookie=COOKIE_LIVE,
             cookie_taken_at=_iso(_now()),
         )
-    orig = cookie_health._default_fetch
-    cookie_health._default_fetch = _fake_fetch(
+    checker = _FakeChecker()
+    web = cookie_web.CookieWeb()
+    job = web._new_job(["a@fexpost.com", "b@fexpost.com"], "check")
+    assert job["done"] == 0, job
+    web._run_check_job(job, checker=checker)
+    assert job["done"] == 2, job
+    assert job["status"] == "done", job
+    assert "2 hoạt động" in job["result"], job
+    assert len(checker.checked) == 2, checker.checked
+    # Checker do người gọi đưa vào thì job không được đóng nó.
+    assert not checker.closed
+
+
+def test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet():
+    class _BrokenChecker:
+        def start(self):
+            raise RuntimeError("Thiếu Playwright — test")
+
+        def close(self):
+            pass
+
+    orig = cookie_health.BrowserChecker
+    cookie_health.BrowserChecker = _BrokenChecker
+    try:
+        web = cookie_web.CookieWeb()
+        job = web._new_job(["a@fexpost.com"], "check")
+        web._run_check_job(job)
+        assert job["done"] == 0, job
+        assert "Không kiểm tra được" in job["result"], job
+    finally:
+        cookie_health.BrowserChecker = orig
+
+
+def test_parse_cookie_string():
+    assert cookie_health.parse_cookie_string(
+        "hatch_sess=abc123; c_user=1001; sb=bbb222"
+    ) == [
+        ("hatch_sess", "abc123"),
+        ("c_user", "1001"),
+        ("sb", "bbb222"),
+    ]
+    assert cookie_health.parse_cookie_string("") == []
+    assert cookie_health.parse_cookie_string("khong-co-dau-bang") == []
+
+
+class _FakePage:
+    def __init__(self, url, body):
+        self.url = url
+        self._body = body
+        self.closed = False
+
+    def goto(self, url, timeout=None):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def content(self):
+        return self._body
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeContext:
+    def __init__(self, page):
+        self.page = page
+        self.cookies = None
+        self.closed = False
+
+    def add_cookies(self, cookies):
+        self.cookies = cookies
+
+    def new_page(self):
+        return self.page
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeBrowser:
+    def __init__(self, page):
+        self.page = page
+        self.contexts = []
+        self.closed = False
+
+    def new_context(self):
+        ctx = _FakeContext(self.page)
+        self.contexts.append(ctx)
+        return ctx
+
+    def close(self):
+        self.closed = True
+
+
+def _browser_checker_with(page):
+    browser = _FakeBrowser(page)
+    checker = cookie_health.BrowserChecker(launcher=lambda: browser)
+    checker.start()
+    return checker, browser
+
+
+def test_browser_checker_song_khi_vao_duoc_chat():
+    page = _FakePage(
         "https://www.meta.ai/",
         '<html><body><textarea placeholder="Ask Meta AI">'
         "</textarea></body></html>",
     )
+    checker, browser = _browser_checker_with(page)
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "song", (status, detail)
+    # Cookie được gắn vào context (domain meta.ai), rồi context
+    # đóng lại sau mỗi lần kiểm tra.
+    assert browser.contexts[0].cookies[0]["name"] == "hatch_sess"
+    assert browser.contexts[0].cookies[0]["domain"] == ".meta.ai"
+    assert browser.contexts[0].closed
+    assert page.closed
+    checker.close()
+    assert browser.closed
+
+
+def test_browser_checker_chet_khi_bi_day_ve_dang_nhap():
+    page = _FakePage(
+        "https://www.meta.ai/login", "<html><body>Log in</body></html>"
+    )
+    checker, browser = _browser_checker_with(page)
+    status, _detail = checker.check(COOKIE_LIVE)
+    assert status == "chet", status
+    checker.close()
+
+
+def test_browser_checker_khong_ro_khi_trang_la():
+    page = _FakePage(
+        "https://www.meta.ai/", "<html><body>trang lạ</body></html>"
+    )
+    checker, browser = _browser_checker_with(page)
+    status, _detail = checker.check(COOKIE_LIVE)
+    assert status == "khong-ro", status
+    checker.close()
+
+
+def test_browser_checker_khong_can_trinh_duyet_khi_thieu_hatch_sess():
+    page = _FakePage("https://www.meta.ai/", "<html></html>")
+    checker, browser = _browser_checker_with(page)
+    status, _detail = checker.check("c_user=1001; sb=bbb222")
+    assert status == "chet", status
+    assert not browser.contexts, "không được mở context"
+    checker.close()
+
+
+def test_browser_checker_start_bao_loi_ro_rang():
+    def boom():
+        raise ImportError("No module named 'playwright'")
+
+    checker = cookie_health.BrowserChecker(launcher=boom)
     try:
-        web = cookie_web.CookieWeb()
-        job = web._new_job(
-            ["a@fexpost.com", "b@fexpost.com"], "check"
-        )
-        assert job["done"] == 0, job
-        web._run_check_job(job)
-        assert job["done"] == 2, job
-        assert job["status"] == "done", job
-        assert "2 hoạt động" in job["result"], job
-    finally:
-        cookie_health._default_fetch = orig
+        checker.start()
+        raise AssertionError("phải báo lỗi")
+    except RuntimeError as error:
+        assert "Playwright" in str(error), error
+        assert "playwright install chromium" in str(error), error
 
 
 TESTS = [
@@ -883,6 +1049,13 @@ TESTS = [
     test_select_check_emails_scopes,
     test_start_check_all_khong_xep_chong_job,
     test_check_job_reports_done_count,
+    test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet,
+    test_parse_cookie_string,
+    test_browser_checker_song_khi_vao_duoc_chat,
+    test_browser_checker_chet_khi_bi_day_ve_dang_nhap,
+    test_browser_checker_khong_ro_khi_trang_la,
+    test_browser_checker_khong_can_trinh_duyet_khi_thieu_hatch_sess,
+    test_browser_checker_start_bao_loi_ro_rang,
 ]
 
 

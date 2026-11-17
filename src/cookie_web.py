@@ -323,37 +323,60 @@ class CookieWeb:
                 f"(trong {len(job['emails'])} tài khoản)."
             )
 
-    def _run_check_job(self, job):
-        """Một job: kiểm tra sống/chết lần lượt từng email."""
-        job["status"] = "running"
-        alive = 0
-        dead = 0
-        unknown = 0
-        for email in job["emails"]:
-            cookie = self.full_cookie(email)
-            if not cookie:
-                job["log"].append(f"— {email}: chưa có cookie.")
-                unknown += 1
-                continue
-            entry = cookie_health.check_and_cache(email, cookie)
-            status = entry["status"]
-            if status == cookie_health.STATUS_ALIVE:
-                alive += 1
-            elif status == cookie_health.STATUS_DEAD:
-                dead += 1
-            else:
-                unknown += 1
-            job["done"] = alive + dead + unknown
-            job["log"].append(
-                f"{email}: {cookie_health.STATUS_LABELS[status]} "
-                f"({entry['detail']})"
+    def _run_check_job(self, job, checker=None):
+        """Một job: kiểm tra sống/chết lần lượt từng email.
+
+        Kiểm tra bằng trình duyệt headless (BrowserChecker — một
+        browser dùng chung cho cả job). Không mở được trình duyệt
+        thì dừng ngay, không chạy cả nghìn lần vô ích.
+        """
+        own_checker = checker is None
+        if own_checker:
+            checker = cookie_health.BrowserChecker()
+            try:
+                checker.start()
+            except RuntimeError as error:
+                job["status"] = "done"
+                job["result"] = f"Không kiểm tra được: {error}"
+                job["log"].append(str(error))
+                job["log"] = job["log"][-MAX_LOG_LINES:]
+                return
+        try:
+            job["status"] = "running"
+            alive = 0
+            dead = 0
+            unknown = 0
+            for email in job["emails"]:
+                cookie = self.full_cookie(email)
+                if not cookie:
+                    job["log"].append(f"— {email}: chưa có cookie.")
+                    unknown += 1
+                    job["done"] = alive + dead + unknown
+                    continue
+                entry = cookie_health.check_and_cache(
+                    email, cookie, checker=checker
+                )
+                status = entry["status"]
+                if status == cookie_health.STATUS_ALIVE:
+                    alive += 1
+                elif status == cookie_health.STATUS_DEAD:
+                    dead += 1
+                else:
+                    unknown += 1
+                job["done"] = alive + dead + unknown
+                job["log"].append(
+                    f"{email}: {cookie_health.STATUS_LABELS[status]} "
+                    f"({entry['detail']})"
+                )
+                job["log"] = job["log"][-MAX_LOG_LINES:]
+            job["status"] = "done"
+            job["result"] = (
+                f"Xong: {alive} hoạt động, {dead} die, {unknown} chưa rõ "
+                f"(trong {len(job['emails'])} tài khoản)."
             )
-            job["log"] = job["log"][-MAX_LOG_LINES:]
-        job["status"] = "done"
-        job["result"] = (
-            f"Xong: {alive} hoạt động, {dead} die, {unknown} chưa rõ "
-            f"(trong {len(job['emails'])} tài khoản)."
-        )
+        finally:
+            if own_checker:
+                checker.close()
 
     # --- Đăng nhập lại một tài khoản ------------------------------
 
@@ -618,7 +641,18 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                         {"error": "tài khoản này chưa có cookie"}, 400
                     )
                     return
-                entry = cookie_health.check_and_cache(email, cookie)
+                checker = cookie_health.BrowserChecker()
+                try:
+                    checker.start()
+                except RuntimeError as error:
+                    self._send_json({"error": str(error)}, 500)
+                    return
+                try:
+                    entry = cookie_health.check_and_cache(
+                        email, cookie, checker=checker
+                    )
+                finally:
+                    checker.close()
                 self._send_json({"email": email, **entry})
             elif path == "/api/check-all":
                 data = self._read_json()
