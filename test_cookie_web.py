@@ -941,8 +941,8 @@ class _FakePage:
         self._fail_content_times = fail_content_times
         self.closed = False
 
-    def goto(self, url, timeout=None):
-        pass
+    def goto(self, url, timeout=None, wait_until=None):
+        self.goto_wait_until = wait_until
 
     def wait_for_timeout(self, ms):
         pass
@@ -1009,6 +1009,9 @@ def test_browser_checker_song_khi_vao_duoc_chat():
     checker, browser = _browser_checker_with(page)
     status, detail = checker.check(COOKIE_LIVE)
     assert status == "song", (status, detail)
+    # Mở trang bằng domcontentloaded (không chờ load hết) để
+    # mỗi lần kiểm tra nhanh hơn.
+    assert page.goto_wait_until == "domcontentloaded", page.goto_wait_until
     # Cookie được gắn vào context (url meta.ai), rồi context
     # đóng lại sau mỗi lần kiểm tra.
     assert browser.contexts[0].cookies[0]["name"] == "hatch_sess"
