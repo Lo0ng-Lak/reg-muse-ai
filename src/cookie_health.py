@@ -161,6 +161,42 @@ def check_and_cache(email, cookie, fetcher=None, checker=None):
 BROWSER_CHECK_TIMEOUT_MS = 20000
 
 
+def _is_valid_cookie_name(name):
+    """Tên cookie hợp lệ theo RFC 7230 (token)."""
+    if not name:
+        return False
+    return all(
+        33 <= ord(ch) <= 126 and ch not in "()<>@,;:\\\"/[]?={} \t"
+        for ch in name
+    )
+
+
+def _is_valid_cookie_value(value):
+    """Giá trị cookie hợp lệ: ASCII in được, trừ dấu cách,
+    dấu phẩy, chấm phẩy, nháy kép, gạch chéo ngược (Chromium
+    từ chối cả lệnh gắn cookie khi một giá trị chứa các ký tự
+    này — lỗi 'Invalid cookie fields' 2026-11-17)."""
+    return all(
+        33 <= ord(ch) <= 126 and ch not in '",;\\' for ch in value
+    )
+
+
+def clean_cookie_pairs(pairs):
+    """Lọc các cặp cookie trước khi gắn vào trình duyệt: bỏ tên
+    rỗng, giá trị chứa ký tự cấm, trùng tên thì giữ cái sau.
+    Cookie thật của Meta có thể kèm vài cookie phụ có giá trị
+    lạ — bỏ chúng đi chứ không để cả lệnh gắn cookie sập theo.
+    """
+    cleaned = {}
+    for name, value in pairs:
+        if not _is_valid_cookie_name(name):
+            continue
+        if not _is_valid_cookie_value(value):
+            continue
+        cleaned[name] = value
+    return list(cleaned.items())
+
+
 def parse_cookie_string(text):
     """Chuỗi cookie 'a=1; b=2' -> [(tên, giá trị)]."""
     pairs = []
@@ -232,24 +268,54 @@ class BrowserChecker:
                 f"{error}"
             ) from error
 
+    def smoke_test(self):
+        """Mở thử một trang trắng: trình duyệt mở được nhưng
+        không tạo được trang thì cũng không kiểm tra được gì —
+        để job dừng ngay với lý do thật thay vì chết lặng."""
+        context = self._browser.new_context()
+        try:
+            page = context.new_page()
+            try:
+                page.goto("about:blank", timeout=10000)
+            finally:
+                page.close()
+        finally:
+            context.close()
+
     def check(self, cookie):
-        """Kiểm tra một cookie -> (status, detail)."""
+        """Kiểm tra một cookie -> (status, detail).
+
+        Gắn cookie bằng `url` (dạng Playwright khuyên dùng) sau
+        khi lọc bỏ cặp lỗi/trùng — một cookie phụ có giá trị lạ
+        không được làm sập cả lần kiểm tra (lỗi 2026-11-17:
+        add_cookies ném 'Invalid cookie fields' và giết chết
+        cả 5 luồng kiểm tra). Gắn cookie lỗi -> chưa rõ, không
+        ném ra ngoài.
+        """
         text = (cookie or "").strip()
         if not text or "hatch_sess=" not in text:
             return STATUS_DEAD, "không có hatch_sess"
+        pairs = clean_cookie_pairs(parse_cookie_string(text))
+        if not any(name == "hatch_sess" for name, _ in pairs):
+            return STATUS_DEAD, "không có hatch_sess"
         context = self._browser.new_context()
         try:
-            context.add_cookies(
-                [
-                    {
-                        "name": name,
-                        "value": value,
-                        "domain": ".meta.ai",
-                        "path": "/",
-                    }
-                    for name, value in parse_cookie_string(text)
-                ]
-            )
+            try:
+                context.add_cookies(
+                    [
+                        {
+                            "name": name,
+                            "value": value,
+                            "url": MUSE_HOME_URL,
+                        }
+                        for name, value in pairs
+                    ]
+                )
+            except Exception as error:
+                return (
+                    STATUS_UNKNOWN,
+                    f"không gắn được cookie ({error})",
+                )
             page = context.new_page()
             try:
                 page.goto(
