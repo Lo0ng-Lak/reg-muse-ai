@@ -540,3 +540,45 @@ pending rows). The
 Muse.ai tab has no Temp mail row — the mail comes from the Meta file
 (the old direct signup, **Bắt đầu đăng ký**, still creates fresh
 tempmail.plus mailboxes).
+
+## Quản lý cookie (web)
+
+Mỗi cookie phiên đăng nhập sống **7 ngày kể từ lúc lấy**. Web quản lý
+kho cookie chạy ngay trên máy Windows, mở bằng trình duyệt:
+
+```powershell
+py main.py --cookie-web
+```
+
+(hoặc bấm nút **Quản lý cookie (web)** ở tab Muse trong tool — server chạy
+chung tiến trình với tool nên nó biết tool có đang chạy lượt khác không.)
+
+Dashboard hiện cho mỗi tài khoản: thời gian đăng nhập lấy cookie, thời
+gian còn lại, trạng thái **Còn sống / Sắp hết (dưới 24 giờ) / Hết hạn**,
+cột **Hoạt động** — kiểm tra thật cookie còn vào được Muse hay đã die
+(nút **Kiểm tra** từng tài khoản hoặc **Kiểm tra tất cả**; kết quả lưu
+lại kèm giờ kiểm tra), nút **Đăng nhập lại** từng tài khoản hoặc **Đăng
+nhập lại tất cả sắp hết** (kể cả tài khoản đã die), nút sao chép cookie,
+xoá cookie, tìm kiếm/lọc theo hạn và theo hoạt động, thống kê và lịch
+sử lấy/đăng nhập lại. Server chỉ nghe trên 127.0.0.1 (máy này).
+
+Đăng nhập lại chạy đúng luồng tab **Đăng nhập lại** của tool
+(`browser_helper.py --relogin`, coordinator `_run_relogin_lane`):
+**không proxy (DIRECT), không nộp thẻ, không mã mời** — chỉ lấy OTP
+từ hộp thư của đúng mail đó. Không đổi bước tạo tài khoản hay đăng
+nhập nào. Thành công thì cookie mới + thời điểm lấy mới được ghi đè
+vào dòng hiện có trong `accounts.xlsx` (đúng cột **Cookie phiên đăng
+nhập** và cột **Thời gian lấy cookie**), đồng thời đồng bộ sang file
+xuất `muse_cookies.xlsx` của tab Đăng nhập lại (nếu đã đặt đường
+dẫn) để tab không lấy lại mail này; thất bại thì tài khoản đó được
+mở lại để lần sau lấy lại được ngay. Cookie đầy đủ không bao giờ
+hiện trong bảng — chỉ lấy qua nút Sao chép.
+
+Kiểm tra sống/chết gọi thẳng trang chủ Muse kèm cookie và đọc dấu
+hiệu trên trang (vào được ô chat "Ask Meta AI" là sống, bị đẩy về
+màn đăng nhập là die, không nhận diện được thì báo không rõ — không
+đoán mò). Cookie không có `hatch_sess` tính là die.
+
+Kiểm tra: `py test_cookie_web.py` (24 test: hạn 7 ngày, cột Excel,
+API, dashboard, kiểm tra sống/chết). Đăng nhập lại thật bằng trình
+duyệt chỉ kiểm tra được trên máy Windows.

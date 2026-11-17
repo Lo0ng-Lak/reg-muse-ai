@@ -74,6 +74,12 @@ class MuseTab(ttk.Frame):
             command=self._start_muse_login,
         )
         self.muse_login_button.grid(row=0, column=3, padx=(6, 0))
+        self.cookie_web_button = ttk.Button(
+            excel_row,
+            text="Quản lý cookie (web)",
+            command=self._open_cookie_web,
+        )
+        self.cookie_web_button.grid(row=0, column=4, padx=(6, 0))
 
         # Kho thẻ lên đầu: bảng + ô dán + nút Nhập kho thẻ phải
         # thấy được ngay mà không cần cuộn (cửa sổ 820x980).
@@ -715,6 +721,30 @@ class MuseTab(ttk.Frame):
             messagebox.showerror(
                 "Không lưu được đường dẫn", str(error)
             )
+
+    def _open_cookie_web(self):
+        """Nút Quản lý cookie (web): mở dashboard quản lý kho
+        cookie trong trình duyệt (chạy trên máy này, 127.0.0.1).
+
+        Server chạy chung tiến trình với tool nên nút Đăng nhập
+        lại trong web biết tool có đang chạy lượt khác không
+        (đang chạy thì từ chối để khỏi giành mailbox.txt).
+        """
+        try:
+            import cookie_web
+
+            url = cookie_web.open_cookie_web(
+                desktop_coordinator=self.coordinator
+            )
+        except Exception as error:
+            self.app.append_log(
+                f"⛔ Không mở được web quản lý cookie: {error}"
+            )
+            return
+        self.app.append_log(
+            f"Đã mở web quản lý kho cookie tại {url} — mỗi cookie "
+            "sống 7 ngày từ lúc lấy, sắp hết thì bấm Đăng nhập lại."
+        )
 
     def _start_muse_login(self):
         """Nút Đăng nhập Muse: đăng nhập Muse bằng tài khoản Meta

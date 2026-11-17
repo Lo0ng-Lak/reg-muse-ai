@@ -3015,6 +3015,38 @@ def _meta_account_link_screen(page, body_text=None):
     return ""
 
 
+def _wait_for_link_screen_gone(page, timeout_seconds=15):
+    """Chờ màn "Continue with your Meta Account" rời khỏi trang
+    sau khi đã bấm Continue — chờ tới khi màn đó biến mất hoặc
+    URL đổi, tối đa timeout_seconds. Trả True khi màn đã rời,
+    False khi hết giờ mà màn vẫn còn. Không bao giờ ném lỗi.
+
+    BẮT BUỘC phải chờ ở đây: vòng lặp của hàm gọi sẽ đọc lại
+    body ngay sau khi hàm này trả về — nếu màn liên kết vẫn
+    còn (trang chưa chuyển xong) mà hàm gọi lại gọi
+    _handle_meta_account_link thì bấm Continue lần 2 vào cùng
+    một màn (gặp live 2026-11-14 08:59: bấm 2 lần cách nhau
+    1 giây rồi rơi vào màn chọn tài khoản không có email cần
+    đăng nhập → FAIL)."""
+    try:
+        url_before = page.url
+    except Exception:
+        url_before = None
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return True
+        try:
+            if url_before is not None and page.url != url_before:
+                return True
+        except Exception:
+            pass
+        if _meta_account_link_screen(page) is None:
+            return True
+        page.wait_for_timeout(500)
+    return False
+
+
 def _handle_meta_account_link(page, email, allow_create_new, body_text=None):
     """Xử lý màn "Continue with your Meta Account".
 
@@ -3052,6 +3084,17 @@ def _handle_meta_account_link(page, email, allow_create_new, body_text=None):
                 "Đã bấm Continue trên thẻ Meta — không bấm "
                 "Create new account."
             )
+            # Bấm xong phải chờ màn này RỜI KHỎI trang rồi mới trả
+            # về (xem _wait_for_link_screen_gone): nếu không, vòng
+            # lặp của hàm gọi đọc lại body ngay và bấm Continue
+            # lần 2 vào cùng một màn khi trang chưa chuyển xong
+            # (live 2026-11-14: bấm đúp cách nhau 1 giây).
+            if not _wait_for_link_screen_gone(page):
+                _status(
+                    "Đã bấm Continue ở màn liên kết tài khoản Meta nhưng màn đó vẫn còn sau "
+                    "15 giây — trang chuyển chậm hoặc lần bấm chưa ăn; lần kiểm tra sau có thể "
+                    "bấm lại (cách lần này hơn 15 giây, không còn là bấm đúp)."
+                )
             return "continue"
         return "stop"
     _status(

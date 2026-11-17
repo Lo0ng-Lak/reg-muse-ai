@@ -112,17 +112,13 @@ class _FakeElement:
             if getattr(self.page, "hold_link_screen", False):
                 return
             if self.page.state == "meta-link-match":
-                if getattr(self.page, "after_link_continue", "card") == "chat-ui":
-                    self.page.state = "chat-ui"
-                    self.page.body_text = (
-                        "Ask Meta AI anything...\n"
-                        "Welcome to Muse. Start a new chat."
-                    )
+                if getattr(self.page, "link_settle_ticks", None):
+                    # Trang chuyển chậm: ghi nhận lần bấm, màn
+                    # chưa đổi — lần bấm sau (nếu có) phải chờ
+                    # màn rời đã, không được bấm đúp.
+                    pass
                 else:
-                    self.page.state = "card"
-                    self.page.body_text = (
-                        "Enter your card number to continue with Muse."
-                    )
+                    self.page._apply_link_destination()
         # Bấm Confirm trên form thẻ → bước thẻ hoàn tất, vào
         # giao diện Muse. reject_next_confirm: lần Confirm đầu
         # hiện hộp thoại "Unable to Add Card" (thẻ gắn quá nhiều
@@ -311,15 +307,51 @@ class _FakePage:
         # qua các lần gọi để giá trị đã điền còn đọc lại được.
         self.fields = {}
         # Bấm Continue ở màn liên kết thì đi đâu: "card" (tới
-        # bước thẻ, mặc định) hoặc "chat-ui" (tài khoản đã đăng
-        # nhập sẵn, vào thẳng giao diện chat).
+        # bước thẻ, mặc định), "chat-ui" (tài khoản đã đăng nhập
+        # sẵn, vào thẳng giao diện chat) hoặc "chooser-other"
+        # (màn chọn thật không có email cần đăng nhập).
         self.after_link_continue = "card"
+        # Trang chuyển chậm sau khi bấm Continue ở màn liên kết:
+        # None = chuyển ngay như cũ; số nguyên = màn cũ còn hiện
+        # thêm từng đó nhịp wait_for_timeout rồi mới sang màn đích
+        # (mô phỏng bấm đúp live 2026-11-14 08:59).
+        self.link_settle_ticks = None
 
     def is_closed(self):
         return self.closed
 
     def wait_for_timeout(self, ms):
-        pass
+        # Mô phỏng trang chuyển chậm sau khi bấm Continue ở màn
+        # liên kết: màn cũ còn hiện thêm vài nhịp rồi mới sang
+        # màn đích.
+        ticks = getattr(self, "link_settle_ticks", None)
+        if ticks:
+            self.link_settle_ticks = ticks - 1
+            if self.link_settle_ticks <= 0:
+                self.link_settle_ticks = None
+                self._apply_link_destination()
+
+    def _apply_link_destination(self):
+        """Sang màn đích sau khi bấm Continue ở màn liên kết."""
+        if self.state != "meta-link-match":
+            return
+        destination = getattr(self, "after_link_continue", "card")
+        if destination == "chat-ui":
+            self.state = "chat-ui"
+            self.body_text = (
+                "Ask Meta AI anything...\n"
+                "Welcome to Muse. Start a new chat."
+            )
+        elif destination == "chooser-other":
+            self.state = "chooser"
+            self.body_text = (
+                "Continue as\n" + OTHER + "\nNot you? Switch account"
+            )
+        else:
+            self.state = "card"
+            self.body_text = (
+                "Enter your card number to continue with Muse."
+            )
 
     def goto(self, url, wait_until=None, timeout=None):
         self.url = url
@@ -1043,6 +1075,75 @@ def test_do_card_step_if_present_card_form_fills_saved_card():
     assert page.state == "muse", "điền thẻ xong phải vào giao diện"
 
 
+# --- 7. Bấm Continue ở màn liên kết: KHÔNG bấm đúp khi trang
+# chuyển chậm ---------------------------------------------------
+# (log live 2026-11-14 08:59: dòng "bấm Continue" hiện 2 lần
+# cách nhau 1 giây — vòng lặp đọc lại body khi màn liên kết
+# vẫn còn (trang chưa chuyển xong) rồi bấm Continue lần 2,
+# rơi vào màn chọn tài khoản không có email cần đăng nhập →
+# FAIL. Sau khi bấm phải chờ màn rời khỏi trang rồi mới đọc
+# lại body.)
+
+def _capture_status():
+    """Chặn _status để đếm dòng log (trả hàm khôi phục)."""
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    return captured, orig
+
+
+def test_link_continue_slow_navigation_clicks_once_to_card():
+    page = _meta_link_page(INTENDED)
+    page.link_settle_ticks = 3
+    captured, orig = _capture_status()
+    try:
+        result = browser_helper._wait_for_profile_or_card(
+            page, INTENDED, 2000
+        )
+    finally:
+        browser_helper._status = orig
+    assert result == "card", result
+    assert page.clicked.count("Continue") == 1, (
+        "màn liên kết còn hiện sau khi bấm thì phải chờ nó rời, "
+        f"không bấm Continue lần 2: {page.clicked}"
+    )
+    # Sau gộp với bản của sư huynh (2026-11-17): một lần bấm ghi
+    # 2 dòng log chứa "bấm Continue" (dòng "khớp — bấm Continue"
+    # trước khi bấm + dòng "Đã bấm Continue" sau khi bấm) nên chỉ
+    # đếm dòng "Đã bấm" — đó mới là bằng chứng đã bấm.
+    assert sum("Đã bấm Continue" in s for s in captured) == 1, (
+        "dòng log 'Đã bấm Continue' chỉ được hiện 1 lần, "
+        f"đã hiện: {captured}"
+    )
+
+
+def test_link_continue_slow_navigation_to_chat_ui_logged_in():
+    page = _meta_link_page(INTENDED)
+    page.after_link_continue = "chat-ui"
+    page.link_settle_ticks = 3
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 2000)
+        == "logged-in"
+    ), "bấm Continue rồi vào thẳng giao diện thì báo đã đăng nhập"
+    assert page.clicked.count("Continue") == 1, (
+        "chỉ được bấm Continue 1 lần dù trang chuyển chậm: "
+        f"{page.clicked}"
+    )
+
+
+def test_link_continue_to_genuine_chooser_still_stops():
+    # Màn chọn THẬT không có email cần đăng nhập sau khi bấm
+    # Continue (không phải do bấm đúp) thì vẫn dừng, không bấm.
+    page = _meta_link_page(INTENDED)
+    page.after_link_continue = "chooser-other"
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 2000)
+        == "chooser"
+    ), "màn chọn thật không có email thì vẫn dừng như cũ"
+    assert page.clicked == ["Continue"], (
+        "chỉ bấm Continue 1 lần ở màn liên kết khớp email, "
+        f"không bấm gì trên màn chọn sai: {page.clicked}"
+    )
 def test_relogin_waitlist_drops_account_without_clicking():
     # muse.ai/access "Join the waitlist": bỏ mail, không bấm nút.
     page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/access")
@@ -1213,6 +1314,9 @@ TESTS = [
     test_confirm_final_step_link_match_to_chat_ui_returns,
     test_do_card_step_if_present_chat_ui_skips,
     test_do_card_step_if_present_card_form_fills_saved_card,
+    test_link_continue_slow_navigation_clicks_once_to_card,
+    test_link_continue_slow_navigation_to_chat_ui_logged_in,
+    test_link_continue_to_genuine_chooser_still_stops,
     test_relogin_waitlist_drops_account_without_clicking,
     test_too_many_attempts_reloads_and_fills_same_card,
     test_card_trouble_dialog_drops_proxy,

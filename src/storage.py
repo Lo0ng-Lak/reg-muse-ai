@@ -80,6 +80,13 @@ SPREADSHEET_HEADERS = [
     "Cookie phiên đăng nhập",
     "Mã mời",
     "Link lấy OTP",
+    # Cột cuối (thêm 2026-11-17 cho web quản lý cookie): thời điểm
+    # lấy cookie này. Để CUỐI để sheet cũ (6 cột) vẫn khớp vị trí
+    # — vòng bổ sung tiêu đề chỉ ghi vào ô đang trống, và dòng
+    # append ghi đúng thứ tự 7 cột. "Thời gian tạo" là lúc tạo
+    # dòng (đăng ký/đăng nhập), còn đây là lúc lấy cookie — hai
+    # mốc khác nhau khi đăng nhập lại để lấy cookie mới.
+    "Thời gian lấy cookie",
 ]
 
 META_SPREADSHEET_HEADERS = [
@@ -108,7 +115,14 @@ def _migrate_legacy_sheet(sheet):
         for index, cell in enumerate(row):
             cell.value = migrated[index] if index < len(migrated) else None
 
-def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", otp_link=""):
+def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", otp_link="", cookie_taken_at=""):
+    """Ghi một tài khoản vào accounts.xlsx.
+
+    cookie_taken_at: thời điểm lấy cookie (ISO, có múi giờ). Có
+    cookie mà không đưa mốc này thì tự lấy giờ hiện tại — mốc
+    này là gốc tính hạn 7 ngày của web quản lý cookie. Không có
+    cookie thì cột để trống.
+    """
     temporary_file = SPREADSHEET_FILE.with_name("accounts.tmp.xlsx")
     try:
         SPREADSHEET_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +164,14 @@ def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", otp_l
                 cookie,
                 invite,
                 otp_link,
+                (
+                    cookie_taken_at
+                    or (
+                        datetime.now().astimezone().isoformat(timespec="seconds")
+                        if cookie
+                        else ""
+                    )
+                ),
             ]
         )
         # accounts.xlsx đang mở trong Excel là khóa cứng trên
@@ -227,6 +249,216 @@ def _last_invite_from_sheet():
         except Exception:
             continue
     return ""
+
+# --- Kho cookie (web quản lý cookie, 2026-11-17) -------------------
+#
+# Cookie phiên nằm trong accounts.xlsx, một dòng một tài khoản
+# (dòng mới được append mỗi lần đăng nhập/đăng ký thành công).
+# Các hàm dưới đây đọc/ghi theo TÊN tiêu đề nên sheet đời nào
+# cũng đọc được; cột "Thời gian lấy cookie" (cột 7) là mốc tính
+# hạn 7 ngày — dòng cũ chưa có cột này thì web quản lý tự lấy
+# "Thời gian tạo" làm mốc dự phòng (xem cookie_vault.py).
+
+COOKIE_HISTORY_FILE = "cookie_history.json"
+
+
+def _cookie_sheet_columns(sheet):
+    """Vị trí các cột của sheet accounts.xlsx (theo tên tiêu đề)."""
+    columns = {}
+    for cell in sheet[1]:
+        if isinstance(cell.value, str):
+            columns[cell.value.strip()] = cell.column
+    return columns
+
+
+def _read_cookie_rows():
+    """Mọi dòng trong accounts.xlsx -> list dict.
+
+    Mỗi dict: row (số dòng), email, mail_password, cookie,
+    invite, otp_link, created_at, cookie_taken_at (chuỗi ISO
+    hoặc "" khi trống). Đọc file chờ trước nếu file chính chưa
+    có (cùng nhịp như _last_invite_from_sheet). File không có /
+    không đọc được -> [].
+    """
+    for path in (SPREADSHEET_FILE, PENDING_SPREADSHEET_FILE):
+        try:
+            if not path.exists():
+                continue
+            workbook = load_workbook(path, read_only=True)
+            try:
+                sheet = workbook.active
+                columns = _cookie_sheet_columns(sheet)
+                email_col = columns.get("Email Muse.ai")
+                if not email_col:
+                    continue
+                rows = []
+                for row_index in range(2, sheet.max_row + 1):
+                    values = [
+                        sheet.cell(row=row_index, column=column).value
+                        for column in range(1, sheet.max_column + 1)
+                    ]
+
+                    def _get(header):
+                        column = columns.get(header)
+                        if not column or column > len(values):
+                            return ""
+                        value = values[column - 1]
+                        return "" if value is None else value
+
+                    email = str(_get("Email Muse.ai") or "").strip()
+                    if not email:
+                        continue
+                    rows.append(
+                        {
+                            "row": row_index,
+                            "email": email,
+                            "mail_password": str(
+                                _get("Mật khẩu hộp thư") or ""
+                            ),
+                            "cookie": str(
+                                _get("Cookie phiên đăng nhập") or ""
+                            ),
+                            "invite": str(_get("Mã mời") or ""),
+                            "otp_link": str(_get("Link lấy OTP") or ""),
+                            "created_at": str(_get("Thời gian tạo") or ""),
+                            "cookie_taken_at": str(
+                                _get("Thời gian lấy cookie") or ""
+                            ),
+                        }
+                    )
+                return rows
+            finally:
+                workbook.close()
+        except Exception:
+            continue
+    return []
+
+
+def _update_cookie_row(email, cookie, taken_at):
+    """Cập nhật cookie + thời điểm lấy của dòng MỚI NHẤT của email.
+
+    Dùng khi đăng nhập lại lấy cookie mới: ghi đè vào dòng hiện
+    có thay vì append dòng mới, để kho cookie mỗi tài khoản chỉ
+    có một dòng sống. Trả về True nếu cập nhật được, False khi
+    không tìm thấy dòng. File đang bị khóa (mở trong Excel) thì
+    raise RuntimeError sau 3 lần thử.
+    """
+    if not SPREADSHEET_FILE.exists():
+        return False
+    workbook = load_workbook(SPREADSHEET_FILE)
+    try:
+        sheet = workbook.active
+        columns = _cookie_sheet_columns(sheet)
+        email_col = columns.get("Email Muse.ai")
+        cookie_col = columns.get("Cookie phiên đăng nhập")
+        taken_col = columns.get("Thời gian lấy cookie")
+        if not email_col or not cookie_col:
+            return False
+        if not taken_col:
+            taken_col = sheet.max_column + 1
+            sheet.cell(row=1, column=taken_col, value="Thời gian lấy cookie")
+        target = (email or "").strip().lower()
+        found = None
+        for row_index in range(2, sheet.max_row + 1):
+            value = sheet.cell(row=row_index, column=email_col).value
+            if isinstance(value, str) and value.strip().lower() == target:
+                found = row_index
+        if found is None:
+            return False
+        sheet.cell(row=found, column=cookie_col, value=cookie)
+        sheet.cell(row=found, column=taken_col, value=taken_at)
+        _save_workbook_retry(workbook, SPREADSHEET_FILE)
+        return True
+    finally:
+        workbook.close()
+
+
+def _clear_cookie_row(email):
+    """Xoá cookie + thời điểm lấy của dòng MỚI NHẤT của email.
+
+    Dòng vẫn giữ lại (email, mã mời...) — chỉ cookie bị xoá,
+    đăng nhập lại là lấy cookie mới. Trả về True nếu xoá được.
+    """
+    if not SPREADSHEET_FILE.exists():
+        return False
+    workbook = load_workbook(SPREADSHEET_FILE)
+    try:
+        sheet = workbook.active
+        columns = _cookie_sheet_columns(sheet)
+        email_col = columns.get("Email Muse.ai")
+        cookie_col = columns.get("Cookie phiên đăng nhập")
+        taken_col = columns.get("Thời gian lấy cookie")
+        if not email_col or not cookie_col:
+            return False
+        target = (email or "").strip().lower()
+        found = None
+        for row_index in range(2, sheet.max_row + 1):
+            value = sheet.cell(row=row_index, column=email_col).value
+            if isinstance(value, str) and value.strip().lower() == target:
+                found = row_index
+        if found is None:
+            return False
+        sheet.cell(row=found, column=cookie_col).value = None
+        if taken_col:
+            sheet.cell(row=found, column=taken_col).value = None
+        _save_workbook_retry(workbook, SPREADSHEET_FILE)
+        return True
+    finally:
+        workbook.close()
+
+
+def _cookie_history_path():
+    """File lịch sử lấy/đăng nhập lại cookie (JSON, cạnh
+    accounts.xlsx trong AppData)."""
+    return paths.APP_DATA / COOKIE_HISTORY_FILE
+
+
+def _append_cookie_history(action, email, detail=""):
+    """Ghi một mốc vào lịch sử cookie: action là "lay" (lấy lần
+    đầu), "lam-moi" (đăng nhập lại lấy mới) hoặc "xoa" (xoá
+    cookie). Lỗi ghi được nuốt — lịch sử không được phá luồng
+    chính."""
+    try:
+        path = _cookie_history_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entries = []
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            entries = []
+        if not isinstance(entries, list):
+            entries = []
+        entries.append(
+            {
+                "at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                ),
+                "action": action,
+                "email": email,
+                "detail": detail,
+            }
+        )
+        # Chỉ giữ 500 mốc gần nhất để file không phình.
+        entries = entries[-500:]
+        path.write_text(
+            json.dumps(entries, ensure_ascii=False), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _read_cookie_history(limit=100):
+    """Lịch sử cookie mới nhất trước (tối đa limit mốc)."""
+    try:
+        entries = json.loads(
+            _cookie_history_path().read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    return list(reversed(entries))[: max(0, int(limit))]
+
 
 def _append_meta_row(email, mail_password="", username="", provider="", otp_link=""):
     """Ghi một tài khoản Meta đã tạo vào meta_accounts.xlsx.
@@ -555,6 +787,58 @@ def _meta_sheet_columns(sheet):
         if isinstance(cell.value, str):
             columns[cell.value.strip()] = cell.column
     return columns
+
+
+def _meta_account_row(excel_path, email):
+    """Một dòng Meta theo email (bất kể đã đăng nhập hay chưa).
+
+    Web quản lý cookie dùng để đăng nhập LẠI: tài khoản đã đăng
+    nhập rồi nên không nằm trong _pending_meta_logins nữa, nhưng
+    vẫn cần bí mật hộp thư + dịch vụ của nó. Trả về dict {email,
+    secret, provider, username} hoặc None khi không tìm thấy /
+    file không đọc được.
+    """
+    try:
+        workbook = load_workbook(excel_path, read_only=True)
+    except Exception:
+        return None
+    try:
+        sheet = workbook.active
+        columns = _meta_sheet_columns(sheet)
+        email_col = columns.get("Email Meta")
+        if not email_col:
+            return None
+        secret_col = columns.get("Mật khẩu hộp thư")
+        username_col = columns.get("Username Meta")
+        provider_col = columns.get("Nhà cung cấp")
+        target = (email or "").strip().lower()
+        valid_providers = {pid for pid, _ in mail_providers.PROVIDERS}
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            value = row[email_col - 1] if len(row) >= email_col else ""
+            if not isinstance(value, str):
+                continue
+            if value.strip().lower() != target:
+                continue
+            secret = ""
+            if secret_col and len(row) >= secret_col:
+                secret = str(row[secret_col - 1] or "")
+            username = ""
+            if username_col and len(row) >= username_col:
+                username = str(row[username_col - 1] or "")
+            provider = ""
+            if provider_col and len(row) >= provider_col:
+                provider = str(row[provider_col - 1] or "").strip()
+            if provider not in valid_providers:
+                provider = _provider_for_email(value)
+            return {
+                "email": value.strip(),
+                "secret": secret,
+                "provider": provider,
+                "username": username,
+            }
+        return None
+    finally:
+        workbook.close()
 
 
 def _pending_meta_logins(excel_path):
