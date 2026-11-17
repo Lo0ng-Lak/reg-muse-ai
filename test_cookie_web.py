@@ -1106,6 +1106,144 @@ def test_browser_checker_start_bao_loi_ro_rang():
         assert "playwright install chromium" in str(error), error
 
 
+class _FakeAPIResponse:
+    def __init__(self, url, body):
+        self.url = url
+        self._body = body
+
+    def text(self):
+        return self._body
+
+
+class _FakeAPIRequest:
+    """Ngăn xếp yêu cầu giả: trả HTML cố định, ghi lại header."""
+
+    def __init__(self, response=None, error=None):
+        self._response = response
+        self._error = error
+        self.get_calls = []
+        self.last_headers = None
+        self.disposed = False
+
+    def get(self, url, headers=None, timeout=None):
+        self.get_calls.append(url)
+        self.last_headers = headers or {}
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+    def dispose(self):
+        self.disposed = True
+
+
+def _api_checker_with(url, body, error=None):
+    request = _FakeAPIRequest(
+        response=_FakeAPIResponse(url, body), error=error
+    )
+    checker = cookie_health.ApiChecker(launcher=lambda: request)
+    checker.start()
+    return checker, request
+
+
+def test_api_checker_song_khi_html_co_ask_meta_ai():
+    checker, request = _api_checker_with(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+    )
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "song", (status, detail)
+    assert "yêu cầu nhanh" in detail, detail
+    # Cookie được gửi kèm trong header của yêu cầu nhanh.
+    assert "hatch_sess=live123" in request.last_headers["Cookie"]
+    checker.close()
+    assert request.disposed
+
+
+def test_api_checker_chet_khi_bi_day_ve_dang_nhap():
+    checker, _request = _api_checker_with(
+        "https://www.meta.ai/login", "<html><body>login</body></html>"
+    )
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "chet", (status, detail)
+    checker.close()
+
+
+def test_api_checker_chet_khi_html_hien_sign_in():
+    checker, _request = _api_checker_with(
+        "https://www.meta.ai/",
+        "<html><body><button>Sign in to continue</button></body></html>",
+    )
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "chet", (status, detail)
+    checker.close()
+
+
+def test_api_checker_khong_ro_khi_html_la():
+    checker, _request = _api_checker_with(
+        "https://www.meta.ai/", "<html><body>hello</body></html>"
+    )
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "khong-ro", (status, detail)
+    checker.close()
+
+
+def test_api_checker_khong_ro_khi_loi_mang():
+    checker, _request = _api_checker_with(
+        "https://www.meta.ai/",
+        "",
+        error=RuntimeError("Connection reset"),
+    )
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "khong-ro", (status, detail)
+    checker.close()
+
+
+def test_api_checker_chet_khi_khong_co_hatch_sess():
+    checker, request = _api_checker_with(
+        "https://www.meta.ai/", "<html></html>"
+    )
+    status, _detail = checker.check("c_user=1001; sb=bbb222")
+    assert status == "chet", status
+    # Không có hatch_sess thì không gọi mạng làm gì.
+    assert request.get_calls == []
+    checker.close()
+
+
+def test_check_and_cache_dung_trinh_duyet_khi_yeu_cau_nhanh_khong_ro():
+    # Yêu cầu nhanh không nhận diện được HTML lạ -> qua trình
+    # duyệt, kết quả trình duyệt được giữ.
+    fast, _request = _api_checker_with(
+        "https://www.meta.ai/", "<html><body>hello</body></html>"
+    )
+    browser = _FakeChecker(status="song")
+    entry = cookie_health.check_and_cache(
+        "a@fexpost.com", COOKIE_LIVE, checker=browser,
+        fast_checker=fast,
+    )
+    assert entry["status"] == "song", entry
+    assert browser.checked == [COOKIE_LIVE], browser.checked
+    fast.close()
+
+
+def test_check_and_cache_khong_dung_trinh_duyet_khi_yeu_cau_nhanh_ket_luan_duoc():
+    # Yêu cầu nhanh đã kết luận sống -> trình duyệt không được
+    # gọi (tiết kiệm một lần mở trang).
+    fast, _request = _api_checker_with(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+    )
+    browser = _FakeChecker(status="song")
+    entry = cookie_health.check_and_cache(
+        "a@fexpost.com", COOKIE_LIVE, checker=browser,
+        fast_checker=fast,
+    )
+    assert entry["status"] == "song", entry
+    assert browser.checked == [], browser.checked
+    fast.close()
+
+
 def test_check_job_chia_deu_cac_luong():
     emails = [f"u{i}@fexpost.com" for i in range(4)]
     for email in emails:
@@ -1479,6 +1617,14 @@ TESTS = [
     test_browser_checker_challenge_page,
     test_browser_checker_khong_can_trinh_duyet_khi_thieu_hatch_sess,
     test_browser_checker_start_bao_loi_ro_rang,
+    test_api_checker_song_khi_html_co_ask_meta_ai,
+    test_api_checker_chet_khi_bi_day_ve_dang_nhap,
+    test_api_checker_chet_khi_html_hien_sign_in,
+    test_api_checker_khong_ro_khi_html_la,
+    test_api_checker_khong_ro_khi_loi_mang,
+    test_api_checker_chet_khi_khong_co_hatch_sess,
+    test_check_and_cache_dung_trinh_duyet_khi_yeu_cau_nhanh_khong_ro,
+    test_check_and_cache_khong_dung_trinh_duyet_khi_yeu_cau_nhanh_ket_luan_duoc,
 ]
 
 

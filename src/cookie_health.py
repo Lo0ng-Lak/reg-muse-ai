@@ -134,14 +134,25 @@ def save_health_cache(cache):
         pass
 
 
-def check_and_cache(email, cookie, fetcher=None, checker=None):
+def check_and_cache(email, cookie, fetcher=None, checker=None,
+                    fast_checker=None):
     """Kiểm tra cookie của một email rồi lưu kết quả vào cache.
 
     Trả về dict {status, checked_at, detail}. `checker` là một
     BrowserChecker đã mở (job kiểm tra dùng chung một browser
     cho cả lượt); không đưa thì dùng check_cookie qua urllib.
+    `fast_checker` là một ApiChecker đã mở: thử yêu cầu nhanh
+    trước, chỉ qua trình duyệt khi yêu cầu nhanh không kết luận
+    được (chưa rõ) — kết luận sống/chết từ yêu cầu nhanh được
+    giữ nguyên, không kiểm tra lại.
     """
-    if checker is not None:
+    if fast_checker is not None:
+        status, detail = fast_checker.check(cookie)
+        if status == STATUS_UNKNOWN and checker is not None:
+            status, detail = checker.check(cookie)
+        elif status == STATUS_UNKNOWN:
+            status, detail = check_cookie(cookie, fetcher=fetcher)
+    elif checker is not None:
         status, detail = checker.check(cookie)
     else:
         status, detail = check_cookie(cookie, fetcher=fetcher)
@@ -413,6 +424,121 @@ class BrowserChecker:
             except Exception:
                 pass
             self._browser = None
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+
+class ApiChecker:
+    """Yêu cầu nhanh: một GET tới meta.ai bằng ngăn xếp mạng của
+    Chromium (APIRequestContext) — cùng dấu vân tay TLS với trình
+    duyệt thật nên không bị 403 \"Client challenge\" như urllib —
+    rồi đọc dấu hiệu sống/chết ngay trong HTML/URL trả về.
+
+    Nhanh hơn trình duyệt thật nhiều (một yêu cầu HTTP thay vì
+    mở trang + chờ SPA render), nhưng chỉ kết luận khi dấu hiệu
+    rõ ràng: giao diện chat trong HTML -> sống; bị đẩy về màn
+    đăng nhập (URL hoặc HTML) -> chết. Còn lại trả chưa rõ và
+    người gọi phải qua BrowserChecker — không bao giờ đoán mò.
+    Chưa kiểm chứng được với meta.ai thật trên máy ảo này
+    (meta.ai bị chặn, không có Playwright): lần chạy đầu trên
+    máy Windows sẽ cho thấy tỉ lệ yêu cầu nhanh kết luận được
+    bao nhiêu (xem chi tiết \"(yêu cầu nhanh)\" trong log job).
+    """
+
+    def __init__(self, launcher=None):
+        # launcher: hàm () -> APIRequestContext (test đưa giả).
+        self._launcher = launcher
+        self._playwright = None
+        self._request = None
+
+    def start(self):
+        """Mở ngăn xếp yêu cầu (không mở trình duyệt)."""
+        if self._launcher is not None:
+            try:
+                self._request = self._launcher()
+            except ImportError as error:
+                raise RuntimeError(
+                    "Thiếu Playwright — yêu cầu nhanh cần ngăn "
+                    "xếp mạng của Chromium. Cài bằng lệnh:\n"
+                    "`py -m pip install -r requirements.txt`\n"
+                    "`py -m playwright install chromium`\n\n"
+                    f"{error}"
+                ) from error
+            return
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as error:
+            raise RuntimeError(
+                "Thiếu Playwright — yêu cầu nhanh cần ngăn xếp "
+                "mạng của Chromium. Cài bằng lệnh:\n"
+                "`py -m pip install -r requirements.txt`\n"
+                "`py -m playwright install chromium`\n\n"
+                f"{error}"
+            ) from error
+        try:
+            self._playwright = sync_playwright().start()
+            self._request = self._playwright.request.new_context()
+        except Exception as error:
+            self.close()
+            raise RuntimeError(
+                "Không mở được yêu cầu nhanh: " f"{error}"
+            ) from error
+
+    def check(self, cookie):
+        """Một GET kèm cookie -> (status, detail).
+
+        Sống/chết chỉ khi dấu hiệu rõ; không nhận diện được thì
+        trả chưa rõ để người gọi qua trình duyệt thật.
+        """
+        text = (cookie or "").strip()
+        if not text or "hatch_sess=" not in text:
+            return STATUS_DEAD, "không có hatch_sess"
+        try:
+            response = self._request.get(
+                MUSE_HOME_URL,
+                headers={"Cookie": text, "User-Agent": _BROWSER_UA},
+                timeout=CHECK_TIMEOUT_SECONDS * 1000,
+            )
+            final_url = (response.url or "").lower()
+            body = (response.text() or "").lower()
+        except Exception as error:
+            return (
+                STATUS_UNKNOWN,
+                f"không gọi được (yêu cầu nhanh) ({error})",
+            )
+        if any(
+            marker.lower() in body for marker in ALIVE_MARKERS
+        ):
+            return (
+                STATUS_ALIVE,
+                "vào được giao diện chat (yêu cầu nhanh)",
+            )
+        if "login" in final_url or "auth.meta.com" in final_url:
+            return (
+                STATUS_DEAD,
+                "bị đẩy về màn đăng nhập (yêu cầu nhanh)",
+            )
+        if "log in" in body or "sign in" in body:
+            return (
+                STATUS_DEAD,
+                "trang hiện màn đăng nhập (yêu cầu nhanh)",
+            )
+        return (
+            STATUS_UNKNOWN,
+            "không nhận diện được qua yêu cầu nhanh",
+        )
+
+    def close(self):
+        if self._request is not None:
+            try:
+                self._request.dispose()
+            except Exception:
+                pass
+            self._request = None
         if self._playwright is not None:
             try:
                 self._playwright.stop()

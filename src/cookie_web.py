@@ -328,16 +328,21 @@ class CookieWeb:
                 f"(trong {len(job['emails'])} tài khoản)."
             )
 
-    def _run_check_job(self, job, checker_factory=None):
+    def _run_check_job(self, job, checker_factory=None,
+                       fast_factory=None):
         """Một job: kiểm tra sống/chết — chia mail cho nhiều luồng
         song song, mỗi luồng một trình duyệt headless riêng.
 
-        Mở thử một trình duyệt trước: không mở được thì dừng ngay
-        (báo rõ lý do), không chạy cả nghìn lần vô ích. Xong lượt
-        kiểm tra, cookie nào đã chết thì tự động đăng nhập lại
-        lấy cookie mới (yêu cầu 2026-11-17).
+        Mỗi luồng thử yêu cầu nhanh (ApiChecker) trước: kết luận
+        được sống/chết thì khỏi mở trình duyệt; không kết luận
+        được thì qua trình duyệt như trước. Mở thử một trình
+        duyệt trước: không mở được thì dừng ngay (báo rõ lý do),
+        không chạy cả nghìn lần vô ích. Xong lượt kiểm tra,
+        cookie nào đã chết thì tự động đăng nhập lại lấy cookie
+        mới (yêu cầu 2026-11-17).
         """
         factory = checker_factory or cookie_health.BrowserChecker
+        fast_factory = fast_factory or cookie_health.ApiChecker
         probe = factory()
         try:
             probe.start()
@@ -376,6 +381,7 @@ class CookieWeb:
                     counts,
                     dead,
                     lock,
+                    fast_factory,
                 ),
                 name=f"cookie-check-{job['id']}-{index}",
                 daemon=True,
@@ -430,12 +436,16 @@ class CookieWeb:
         return refresh_id
 
     def _check_slice(self, job, emails, cookies_by_email, factory,
-                     counts, dead, lock):
+                     counts, dead, lock, fast_factory=None):
         """Một luồng kiểm tra: mở trình duyệt riêng, kiểm tra lần
         lượt từng mail trong phần của mình.
 
-        Lỗi ở một mail không được giết cả luồng: ghi lại rồi
-        tính là chưa rõ, kiểm tra tiếp mail sau.
+        Mỗi mail thử yêu cầu nhanh trước (một GET, không mở
+        trang): kết luận được thì khỏi mở trình duyệt; yêu cầu
+        nhanh không mở được (thiếu Playwright...) thì cả luồng
+        chỉ dùng trình duyệt. Lỗi ở một mail không được giết cả
+        luồng: ghi lại rồi tính là chưa rõ, kiểm tra tiếp mail
+        sau.
         """
         checker = factory()
         try:
@@ -445,6 +455,15 @@ class CookieWeb:
                 job["log"].append(f"✘ luồng kiểm tra: {error}")
                 job["log"] = job["log"][-MAX_LOG_LINES:]
             return
+        fast = None
+        if fast_factory is not None:
+            try:
+                fast = fast_factory()
+                fast.start()
+            except Exception:
+                # Yêu cầu nhanh không dùng được thì chỉ dùng
+                # trình duyệt — không làm hỏng lượt kiểm tra.
+                fast = None
         try:
             for email in emails:
                 try:
@@ -461,7 +480,8 @@ class CookieWeb:
                             job["log"] = job["log"][-MAX_LOG_LINES:]
                         continue
                     entry = cookie_health.check_and_cache(
-                        email, cookie, checker=checker
+                        email, cookie, checker=checker,
+                        fast_checker=fast,
                     )
                     status = entry["status"]
                 except Exception as error:
@@ -483,6 +503,8 @@ class CookieWeb:
                     )
                     job["log"] = job["log"][-MAX_LOG_LINES:]
         finally:
+            if fast is not None:
+                fast.close()
             checker.close()
 
     # --- Đăng nhập lại một tài khoản ------------------------------
@@ -754,11 +776,19 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                 except RuntimeError as error:
                     self._send_json({"error": str(error)}, 500)
                     return
+                fast = cookie_health.ApiChecker()
+                try:
+                    fast.start()
+                except Exception:
+                    fast = None
                 try:
                     entry = cookie_health.check_and_cache(
-                        email, cookie, checker=checker
+                        email, cookie, checker=checker,
+                        fast_checker=fast,
                     )
                 finally:
+                    if fast is not None:
+                        fast.close()
                     checker.close()
                 self._send_json({"email": email, **entry})
             elif path == "/api/check-all":
