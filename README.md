@@ -586,18 +586,26 @@ liệu chạy, cùng chỗ với `accounts.xlsx` cũ): một dòng một tài
 khoản, email là khoá duy nhất nên không bao giờ trùng dòng hay lẫn
 cookie giữa các mail. Lần đầu mở kho, tool tự nhập một lần từ
 `accounts.xlsx` cũ (kể cả file chờ `accounts.pending.xlsx` nếu có)
-rồi để file Excel đó nguyên làm bản sao lưu; muốn nhập lại thì bấm
-**Nhập từ Excel**, muốn xem bằng Excel thì bấm **Xuất ra Excel**.
+rồi để file Excel đó nguyên làm bản sao lưu; bước nhập này chạy
+nền từ lúc mở server nên trang mở lên ngay, hiện dòng "Đang nhập
+tài khoản từ Excel…" và bảng tự đầy khi xong (trang tự tải lại
+mỗi 30 giây); muốn nhập lại thì bấm **Nhập từ Excel**, muốn xem
+bằng Excel thì bấm **Xuất ra Excel**.
 Với 2.000 tài khoản, mở kho vẫn tức thì (đọc 2k dòng dưới 0,1
 giây); bảng phân trang 50 dòng/trang (chọn được 50/100/200) để
 trình duyệt không nặng; nút **Kiểm tra cookie sắp hết** chỉ kiểm
 tra diện sắp hết/hết hạn thay vì cả kho (mỗi cookie một request
 tới meta.ai nên kiểm tra tất cả 2k cookie mất rất lâu). Trang
-không bao giờ kẹt ở "Đang tải…" nữa: lỗi tải kho hiện thẳng lên
-đầu trang.
+không bao giờ kẹt ở "Đang tải…" nữa: mỗi API có hạn 15 giây và
+tải độc lập (phần nào lỗi thì phần đó báo, các phần còn lại vẫn
+hiện), lỗi tải kho hiện thẳng lên đầu trang. Lưu ý lỗi
+2026-11-17: code JS của trang từng bị vỡ ngoặc ở nút
+Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
+chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
+test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (28 test: hạn 7 ngày, kho SQLite,
-API, dashboard, kiểm tra sống/chết, đọc 300 dòng, nhập/xuất Excel)
-và `py test_account_store.py` (10 test: gộp trùng mail, nhập/xuất,
-đọc 2.000 dòng). Đăng nhập lại thật bằng trình duyệt chỉ kiểm tra
-được trên máy Windows.
+Kiểm tra: `py test_cookie_web.py` (29 test: hạn 7 ngày, kho SQLite,
+API, dashboard, kiểm tra sống/chết, đọc 300 dòng, nhập/xuất Excel,
+cú pháp JS của trang) và `py test_account_store.py` (10 test: gộp
+trùng mail, nhập/xuất, đọc 2.000 dòng). Đăng nhập lại thật bằng
+trình duyệt chỉ kiểm tra được trên máy Windows.
