@@ -579,6 +579,12 @@ hiệu trên trang (vào được ô chat "Ask Meta AI" là sống, bị đẩy 
 màn đăng nhập là die, không nhận diện được thì báo không rõ — không
 đoán mò). Cookie không có `hatch_sess` tính là die.
 
-Kiểm tra: `py test_cookie_web.py` (24 test: hạn 7 ngày, cột Excel,
-API, dashboard, kiểm tra sống/chết). Đăng nhập lại thật bằng trình
-duyệt chỉ kiểm tra được trên máy Windows.
+Kho lớn (2.000 tài khoản): đọc Excel một lượt xuôi nên mở kho chỉ
+mất ~0,2 giây; bảng phân trang 50 dòng/trang (chọn được 50/100/200)
+để trình duyệt không nặng; nút **Kiểm tra cookie sắp hết** chỉ
+kiểm tra diện sắp hết/hết hạn thay vì cả kho (mỗi cookie một
+request tới meta.ai nên kiểm tra tất cả 2k cookie mất rất lâu).
+
+Kiểm tra: `py test_cookie_web.py` (27 test: hạn 7 ngày, cột Excel,
+API, dashboard, kiểm tra sống/chết, đọc 300 dòng). Đăng nhập lại
+thật bằng trình duyệt chỉ kiểm tra được trên máy Windows.
