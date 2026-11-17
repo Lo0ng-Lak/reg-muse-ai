@@ -27,7 +27,7 @@ STATUS_UNKNOWN = "khong-ro"
 STATUS_LABELS = {
     STATUS_ALIVE: "Còn sống",
     STATUS_EXPIRING: "Sắp hết",
-    STATUS_EXPIRED: "Hết hạn",
+    STATUS_EXPIRED: "Quá hạn",
     STATUS_UNKNOWN: "Không rõ",
 }
 
