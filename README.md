@@ -569,14 +569,17 @@ hướng/challenge/render — đọc ngay thì gặp 'page is navigating'
 hoặc trang chưa nhận diện được); trang chặn bot thì báo rõ là
 challenge chứ không đoán mò. Kiểm tra bằng urllib
 không dùng được nữa (meta.ai trả 403 "Client challenge" cho
-client không phải trình duyệt). Kiểm tra chạy 10 luồng song song,
-mỗi luồng thử **yêu cầu nhanh** (ApiChecker: một GET bằng ngăn
-xếp mạng của Chromium, không mở trang — kết luận được sống/chết
-từ HTML/URL trả về thì khỏi mở trình duyệt, nhanh hơn nhiều;
-không nhận diện được thì tự qua trình duyệt như trước, không
-đoán mò) rồi mới qua trình duyệt headless riêng; mỗi cookie tốn
-vài giây nên một lượt 1.000+ cookie chạy nền khoảng 8 phút thay
-vì cả tiếng; không mở được trình
+client không phải trình duyệt). Kiểm tra chạy 5 luồng song song
+(từng là 10, trả về 5 ngày 2026-11-17 vì 10 luồng làm job kẹt
+cứng ở 96/2096 — meta.ai đáp chậm/trắng trang), mỗi luồng thử
+**yêu cầu nhanh** (ApiChecker: một GET bằng ngăn xếp mạng của
+Chromium, không mở trang — kết luận được sống/chết từ HTML/URL
+trả về thì khỏi mở trình duyệt, nhanh hơn nhiều; không nhận
+diện được thì tự qua trình duyệt như trước, không đoán mò) rồi
+mới qua trình duyệt headless riêng; một mail kẹt quá 75 giây
+thì bỏ trình duyệt đó, mở cái mới, kiểm tra tiếp — job không
+bao giờ đứng cứng. Một lượt 1.000+ cookie chạy nền khoảng 15
+phút thay vì cả tiếng; không mở được trình
 duyệt thì job dừng ngay và báo rõ lý do thay vì chạy vô ích.
 Cookie được lọc trước khi gắn vào trình duyệt (bỏ cặp tên/giá
 trị lỗi, trùng tên giữ cái sau) và gắn bằng `url`; một mail
@@ -649,7 +652,7 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (65 test: hạn 7 ngày, kho SQLite,
+Kiểm tra: `py test_cookie_web.py` (67 test: hạn 7 ngày, kho SQLite,
 API, dashboard, kiểm tra sống/chết bằng trình duyệt headless
 10 luồng song song, đọc 300 dòng, nhập/xuất Excel,
 cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,
