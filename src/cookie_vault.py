@@ -167,10 +167,15 @@ def cookie_stats(cookies):
     - Hạn theo mốc 7 ngày: song / sap-het / het-han / khong-ro
       (khong-ro = không có mốc lấy cookie).
     - Sống/chết thật: chỉ biết sau khi kiểm tra trên meta.ai
-      (chet / hoat-dong). "chua-kiem-tra" đếm số chưa từng kiểm
-      tra — không có số này thì "Die: 0" dễ bị đọc nhầm là
-      "không có tài khoản nào chết" trong khi thật ra chưa kiểm
-      tra tài khoản nào.
+      (chet / hoat-dong). "chua-kiem-tra" đếm số chưa xác minh
+      được sống/chết — gồm cả chưa từng kiểm tra lẫn kiểm tra
+      rồi nhưng chưa rõ (lỗi 403, challenge, trang chưa nhận
+      diện được). Số này chỉ về 0 khi mọi cookie đã có kết
+      luận sống/chết thật; đếm theo "chưa từng kiểm tra" thì
+      sai (lỗi 2026-11-17: cả 2252 đều từng bị kiểm tra lỗi
+      403 nên số hiện 0 trong khi gần như chưa xác minh được
+      tài khoản nào). Tài khoản chưa có cookie thì đếm riêng
+      ở "khong-co-cookie", không tính vào đây.
     """
     stats = {
         "total": len(cookies),
@@ -191,6 +196,6 @@ def cookie_stats(cookies):
             stats["chet"] += 1
         elif item.get("health") == cookie_health.STATUS_ALIVE:
             stats["hoat-dong"] += 1
-        if not item.get("health_checked_at"):
+        elif item.get("has_cookie"):
             stats["chua-kiem-tra"] += 1
     return stats

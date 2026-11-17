@@ -585,8 +585,8 @@ hoặc **Đăng nhập lại đã hết** (chỉ tài khoản đã hết hạn),
 cookie, xoá cookie, tìm kiếm/lọc theo hạn và theo hoạt động, thống kê
 và lịch sử lấy/đăng nhập lại. Thống kê có hai chiều riêng: hạn theo
 mốc 7 ngày (Còn sống / Sắp hết / Hết hạn) và sống/chết thật trên
-meta.ai (Die = đã kiểm tra thấy chết; **Chưa kiểm tra** = chưa từng
-kiểm tra — Die: 0 chỉ có nghĩa khi số Chưa kiểm tra cũng là 0).
+meta.ai (Die = đã kiểm tra thấy chết; **Chưa kiểm tra** = chưa xác
+minh được sống/chết — gồm cả kiểm tra rồi nhưng chưa rõ).
 **Mở trang là tự kiểm tra, không cần bấm nút**: trang tự xếp job
 kiểm tra diện chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 giờ
 trước (lần đầu mở thì kiểm tra hết, lần sau chỉ kiểm tra lại phần

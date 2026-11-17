@@ -768,6 +768,18 @@ def test_stats_counts_unchecked_separately_from_dead():
     stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
     assert stats["chua-kiem-tra"] == 1, stats
     assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
+    # Kiểm tra rồi nhưng chưa rõ (lỗi mạng, như 403 hồi
+    # 2026-11-17) vẫn phải tính là chưa kiểm tra — số này
+    # chỉ về 0 khi đã có kết luận sống/chết thật.
+    def _boom(url, cookie, timeout):
+        raise urllib.error.URLError("403")
+
+    cookie_health.check_and_cache(
+        "c@fexpost.com", COOKIE_LIVE, fetcher=_boom
+    )
+    stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
+    assert stats["chua-kiem-tra"] == 1, stats
+    assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
 
 
 def test_select_refresh_emails_scopes():
