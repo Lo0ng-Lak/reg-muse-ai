@@ -331,11 +331,10 @@ class RunSettings:
     # Excel người dùng chọn ở tab Meta, không tạo hộp thư mới).
     meta_login: bool = False
     meta_excel_path: str = ""
-    # Đăng nhập lại mail Muse đã có (file Excel cột Email
-    # Muse.ai): không proxy, không thẻ, chỉ OTP + cookie ra file
-    # xuất gồm hai cột Email và Cookie đăng nhập.
+    # Đăng nhập lại mail Muse đã có trong kho SQLite: không proxy,
+    # không thẻ, chỉ OTP + cookie ra file xuất gồm hai cột Email
+    # và Cookie đăng nhập.
     relogin: bool = False
-    relogin_excel_path: str = ""
     relogin_output_path: str = ""
     invite: str = ""
     single_invite: bool = False
@@ -1533,14 +1532,14 @@ class Coordinator:
                     shared["vault"].release(card_holder["card"])
 
     def _run_relogin_loop(self, settings):
-        """Đăng nhập lại từng mail trong file Excel, lấy cookie mới.
+        """Đăng nhập lại từng mail trong kho, lấy cookie mới.
 
         Không proxy (ghi DIRECT), không thẻ, không mã mời. Tối đa
         10 luồng: mỗi luồng một file hộp thư riêng, OTP đọc từ
         đúng mail đó. Có cookie thì ghi một dòng Email + Cookie
         vào file xuất. Không cookie thì bỏ qua mail đó.
         """
-        rows = storage._relogin_accounts(settings.relogin_excel_path)
+        rows = storage._relogin_accounts()
         done = storage._relogin_done_emails(settings.relogin_output_path)
         pending = [
             row for row in rows if row["email"].lower() not in done

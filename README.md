@@ -86,27 +86,29 @@ the app then, with no further clicks:
    confirms for you; otherwise the batch pauses for up to four minutes for
    you to type the card and a US ZIP in the Chromium window yourself. Only
    after the card step is accepted are the account's email and mailbox
-   secret appended to `accounts.xlsx` in the app's local Windows data folder;
-   failed attempts are only written to the on-screen log, never to the
-   sheet.
+   secret saved to the account store (`accounts.db`, SQLite — one row
+   per account, email is the unique key) in the app's local Windows
+   data folder; failed attempts are only written to the on-screen
+   log, never to the store.
 6. After the card step there is one last screen with a **Get started**
    button (sometimes Confirm/Continue): the tool clicks it — repeatedly
    if several such screens chain together — waits to land inside the
-   Muse interface, and reads the session cookies. A successful row in `accounts.xlsx`
-   therefore carries: creation time, email, the mailbox secret (the
+   Muse interface, and reads the session cookies. A successful account
+   in the store therefore carries: creation time, email, the mailbox secret (the
    mail.tm password or the Guerrillamail session token; empty for providers
    where the address itself is the inbox key), the session cookie in the
    browser's header form (`name=value; name=value; …`, covering the
    muse.ai, meta.com and facebook.com cookies — passed from the helper
    to the app out of band and never printed in the log), and the
-   account's own invite code (below). Sheets written by older versions
-   are migrated on the next successful row: a fictional "Muse.ai
-   password" column, if present, is dropped and the remaining columns
-   shifted left; missing headers are filled in. If `accounts.xlsx`
-   cannot be written because it is locked (usually because it is open
-   in Excel), the row is kept in `accounts.pending.xlsx` next to it
-   and merged into the main sheet on the next successful write — close
-   the Excel window to unblock it.
+   account's own invite code (below). Accounts from an older
+   `accounts.xlsx` are imported into the store once, the first time
+   the store is used (or any time with the **Nhập từ Excel** button in
+   the cookie web / Relogin tab); the Excel file itself is left
+   untouched as a backup, and **Xuất ra Excel** writes the whole
+   store back to `accounts.xlsx` whenever you want to look at it in
+   Excel. Because the store is SQLite, writing one account never
+   rewrites the whole vault, and opening the export in Excel never
+   locks the tool.
 7. Invite codes form a chain. Once inside the Muse interface, each
    account first redeems the *previous* account's invite code — the app
    passes it to the helper in `redeem.txt`, and the helper follows the
@@ -132,8 +134,8 @@ the app then, with no further clicks:
    field is overwritten with each new account's code as the run
    proceeds; it persists between runs in a local `invite.txt`. You
    never have to type it: if the field is empty at Start, the app
-   seeds the chain from the newest invite code already in
-   `accounts.xlsx`, and if there is none, the first account simply
+   seeds the chain from the newest invite code already in the account
+   store, and if there is none, the first account simply
    redeems nothing and starts the chain with its own code.
 
    The **Chỉ dùng 1 mã mời này** ("use only this one invite
@@ -161,7 +163,8 @@ connection mode, temp-mail provider and target count:
 - **Muse.ai** tab: proxy pool in `proxies.txt`, bad proxies in
   `bad-proxies.txt` (the files from before — your existing pool carries
   over untouched), plus the card vault (bulk import, per-card limit,
-  auto-rotation) and invite-code chain. Accounts go to `accounts.xlsx`.
+  auto-rotation) and invite-code chain. Accounts go to the account
+  store (`accounts.db`, SQLite).
 - **Meta (meta.ai)** tab: proxy pool in `proxies_meta.txt`, bad proxies
   in `bad-proxies-meta.txt`, plus the CapSolver key and selfie image.
   Accounts go to `meta_accounts.xlsx`. See "Meta account registration"
@@ -525,7 +528,7 @@ once every card in the vault is exhausted; with a card selected
 manually it uses only that card and stops when that card hits its
 limit. Pick another card (or raise a limit) in the vault before
 running again.
-A successful login is saved to `accounts.xlsx` — email, mailbox
+A successful login is saved to the account store — email, mailbox
 secret, session cookie and invite code as usual, plus the mailbox's
 `Link lấy OTP` — and marked in the Meta file's **Muse** column, so
 the next run skips it. While a login is running, the row is marked
@@ -567,24 +570,34 @@ sử lấy/đăng nhập lại. Server chỉ nghe trên 127.0.0.1 (máy này).
 **không proxy (DIRECT), không nộp thẻ, không mã mời** — chỉ lấy OTP
 từ hộp thư của đúng mail đó. Không đổi bước tạo tài khoản hay đăng
 nhập nào. Thành công thì cookie mới + thời điểm lấy mới được ghi đè
-vào dòng hiện có trong `accounts.xlsx` (đúng cột **Cookie phiên đăng
-nhập** và cột **Thời gian lấy cookie**), đồng thời đồng bộ sang file
-xuất `muse_cookies.xlsx` của tab Đăng nhập lại (nếu đã đặt đường
-dẫn) để tab không lấy lại mail này; thất bại thì tài khoản đó được
-mở lại để lần sau lấy lại được ngay. Cookie đầy đủ không bao giờ
-hiện trong bảng — chỉ lấy qua nút Sao chép.
+vào dòng của tài khoản đó trong kho SQLite, đồng thời đồng bộ sang
+file xuất `muse_cookies.xlsx` của tab Đăng nhập lại (nếu đã đặt
+đường dẫn) để tab không lấy lại mail này; thất bại thì tài khoản đó
+được mở lại để lần sau lấy lại được ngay. Cookie đầy đủ không bao
+giờ hiện trong bảng — chỉ lấy qua nút Sao chép.
 
 Kiểm tra sống/chết gọi thẳng trang chủ Muse kèm cookie và đọc dấu
 hiệu trên trang (vào được ô chat "Ask Meta AI" là sống, bị đẩy về
 màn đăng nhập là die, không nhận diện được thì báo không rõ — không
 đoán mò). Cookie không có `hatch_sess` tính là die.
 
-Kho lớn (2.000 tài khoản): đọc Excel một lượt xuôi nên mở kho chỉ
-mất ~0,2 giây; bảng phân trang 50 dòng/trang (chọn được 50/100/200)
-để trình duyệt không nặng; nút **Kiểm tra cookie sắp hết** chỉ
-kiểm tra diện sắp hết/hết hạn thay vì cả kho (mỗi cookie một
-request tới meta.ai nên kiểm tra tất cả 2k cookie mất rất lâu).
+Kho tài khoản duy nhất là SQLite (`accounts.db` trong thư mục dữ
+liệu chạy, cùng chỗ với `accounts.xlsx` cũ): một dòng một tài
+khoản, email là khoá duy nhất nên không bao giờ trùng dòng hay lẫn
+cookie giữa các mail. Lần đầu mở kho, tool tự nhập một lần từ
+`accounts.xlsx` cũ (kể cả file chờ `accounts.pending.xlsx` nếu có)
+rồi để file Excel đó nguyên làm bản sao lưu; muốn nhập lại thì bấm
+**Nhập từ Excel**, muốn xem bằng Excel thì bấm **Xuất ra Excel**.
+Với 2.000 tài khoản, mở kho vẫn tức thì (đọc 2k dòng dưới 0,1
+giây); bảng phân trang 50 dòng/trang (chọn được 50/100/200) để
+trình duyệt không nặng; nút **Kiểm tra cookie sắp hết** chỉ kiểm
+tra diện sắp hết/hết hạn thay vì cả kho (mỗi cookie một request
+tới meta.ai nên kiểm tra tất cả 2k cookie mất rất lâu). Trang
+không bao giờ kẹt ở "Đang tải…" nữa: lỗi tải kho hiện thẳng lên
+đầu trang.
 
-Kiểm tra: `py test_cookie_web.py` (27 test: hạn 7 ngày, cột Excel,
-API, dashboard, kiểm tra sống/chết, đọc 300 dòng). Đăng nhập lại
-thật bằng trình duyệt chỉ kiểm tra được trên máy Windows.
+Kiểm tra: `py test_cookie_web.py` (28 test: hạn 7 ngày, kho SQLite,
+API, dashboard, kiểm tra sống/chết, đọc 300 dòng, nhập/xuất Excel)
+và `py test_account_store.py` (10 test: gộp trùng mail, nhập/xuất,
+đọc 2.000 dòng). Đăng nhập lại thật bằng trình duyệt chỉ kiểm tra
+được trên máy Windows.

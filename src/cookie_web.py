@@ -4,16 +4,17 @@ Chạy:  py main.py --cookie-web
   (hoặc bấm nút "Quản lý cookie (web)" ở tab Muse trong tool)
 
 Server chỉ nghe trên 127.0.0.1 (máy này) — không mở ra mạng ngoài.
-Kho cookie là file accounts.xlsx (đọc cột "Cookie phiên đăng
-nhập", mốc lấy ở cột "Thời gian lấy cookie", cập nhật đúng hai
-cột đó khi đăng nhập lại). Không đổi các bước tạo tài khoản hay
-đăng nhập.
+Kho tài khoản duy nhất là SQLite (accounts.db) — một dòng một
+tài khoản, email là khoá duy nhất (xem account_store.py).
+accounts.xlsx chỉ còn là đường vào (nút "Nhập từ Excel", nhập
+một lần từ file cũ) và đường ra (nút "Xuất ra Excel"). Không đổi
+các bước tạo tài khoản hay đăng nhập.
 
 Đăng nhập lại chạy ĐÚNG luồng tab Đăng nhập lại của tool
 (coordinator._run_relogin_lane): không proxy (DIRECT), không
 nộp thẻ, không mã mời — chỉ lấy OTP từ hộp thư của đúng mail
 đó rồi lấy cookie mới qua helper --relogin. Cookie mới ghi đè
-vào dòng hiện có trong accounts.xlsx (và đồng bộ sang file xuất
+vào dòng hiện có trong kho SQLite (và đồng bộ sang file xuất
 muse_cookies.xlsx của tab Đăng nhập lại nếu đã đặt đường dẫn).
 
 Mỗi cookie sống 7 ngày kể từ lúc lấy. Dashboard còn kiểm tra
@@ -53,8 +54,9 @@ def _now_iso():
 
 
 def _relogin_source_path():
-    """File Excel nguồn của tab Đăng nhập lại (mặc định là
-    accounts.xlsx)."""
+    """File Excel nguồn để NHẬP vào kho (mặc định là
+    accounts.xlsx). Kho sống là SQLite — file này chỉ dùng khi
+    bấm "Nhập từ Excel"."""
     path = storage._load_relogin_source_path()
     if path:
         return path
@@ -100,27 +102,35 @@ class CookieWeb:
                 return row.get("cookie") or ""
         return ""
 
+    def import_excel(self, path=None):
+        """Nhập tài khoản từ file Excel vào kho SQLite."""
+        return storage.import_accounts_from_excel(path)
+
+    def export_excel_bytes(self):
+        """Toàn bộ kho -> bytes file Excel (để tải về)."""
+        import account_store
+
+        return account_store.export_to_excel_bytes(
+            storage.ACCOUNTS_DB_FILE
+        )
+
     def delete_cookie(self, email):
         """Xoá cookie của một tài khoản (giữ lại dòng + mã mời)."""
         if storage._clear_cookie_row(email):
             storage._append_cookie_history("xoa", email, "xoá cookie")
             return True, "Đã xoá cookie."
-        return False, "Không tìm thấy tài khoản này trong accounts.xlsx."
+        return False, "Không tìm thấy tài khoản này trong kho."
 
     def history(self):
         return storage._read_cookie_history(MAX_HISTORY_SHOWN)
 
     def status(self):
-        source_path = _relogin_source_path()
-        try:
-            source_count = len(storage._relogin_accounts(source_path))
-        except Exception:
-            source_count = 0
         cookies = cookie_vault.list_cookies()
         return {
-            "source_path": source_path,
+            "db_path": str(storage.ACCOUNTS_DB_FILE),
+            "total": len(cookies),
+            "source_path": _relogin_source_path(),
             "output_path": _relogin_output_path(),
-            "source_count": source_count,
             "vault_count": sum(
                 1 for item in cookies if item["has_cookie"]
             ),
@@ -251,7 +261,7 @@ class CookieWeb:
         DIRECT), không nộp thẻ, không mã mời — helper chạy với
         --relogin, OTP lấy từ hộp thư của đúng mail đó. Khác tab
         ở chỗ đích ghi: cookie mới ghi đè vào dòng hiện có trong
-        accounts.xlsx (cột Cookie + cột Thời gian lấy cookie) để
+        kho SQLite (cột Cookie + cột Thời gian lấy cookie) để
         quản lý một chỗ, đồng thời đồng bộ sang file xuất
         muse_cookies.xlsx của tab (nếu đã đặt đường dẫn) để tab
         không lấy lại mail này.
@@ -263,8 +273,7 @@ class CookieWeb:
             if len(log) > MAX_LOG_LINES:
                 del log[: -MAX_LOG_LINES]
 
-        source_path = _relogin_source_path()
-        rows = storage._relogin_accounts(source_path)
+        rows = storage._relogin_accounts()
         row = next(
             (
                 item
@@ -276,9 +285,8 @@ class CookieWeb:
         )
         if row is None:
             raise RuntimeError(
-                f"không tìm thấy mail {email} trong file nguồn "
-                f"({source_path}) — đăng nhập lại cần mail + bí mật "
-                "hộp thư của tài khoản đó."
+                f"không tìm thấy mail {email} trong kho — đăng nhập "
+                "lại cần mail + bí mật hộp thư của tài khoản đó."
             )
         if row["provider"] == "mail.tm" and not row["secret"]:
             raise RuntimeError(
@@ -439,6 +447,22 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                 self._send_json({"history": self.web.history()})
             elif path == "/api/status":
                 self._send_json(self.web.status())
+            elif path == "/api/export-excel":
+                body = self.web.export_excel_bytes()
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type",
+                    "application/vnd.openxmlformats-officedocument"
+                    ".spreadsheetml.sheet",
+                )
+                self.send_header(
+                    "Content-Disposition",
+                    'attachment; filename="accounts.xlsx"',
+                )
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
             else:
                 self._send_json({"error": "không có đường này"}, 404)
         except Exception as error:
@@ -563,6 +587,11 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                     {"ok": ok, "message": message},
                     200 if ok else 404,
                 )
+            elif path == "/api/import-excel":
+                data = self._read_json()
+                source = (data.get("path") or "").strip() or None
+                result = self.web.import_excel(source)
+                self._send_json(result)
             else:
                 self._send_json({"error": "không có đường này"}, 404)
         except Exception as error:
@@ -629,6 +658,7 @@ tr:last-child td { border-bottom:0; }
 .job pre { background:#101828; color:#e6e8eb; border-radius:8px; padding:10px; max-height:220px;
   overflow:auto; font-size:12.5px; white-space:pre-wrap; margin:10px 0 0; }
 .empty { color:var(--dim); }
+.errorbox { background:var(--red-bg); color:var(--red); border:1px solid #fecdca; border-radius:12px; padding:12px 14px; margin-bottom:14px; font-weight:600; }
 .pager { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap; }
 .pager .info { color:var(--dim); font-size:13px; margin-right:auto; }
 .note { color:var(--dim); font-size:13px; }
@@ -643,6 +673,7 @@ tr:last-child td { border-bottom:0; }
     <p class="sub">Mỗi cookie sống <b>7 ngày</b> kể từ lúc lấy. Đăng nhập lại chạy đúng luồng tab Đăng nhập lại: không proxy, không thẻ. Cột Hoạt động kiểm tra thật cookie còn vào được Muse hay đã die.</p>
   </header>
   <div class="stats" id="stats"></div>
+  <div class="errorbox" id="errorBox" style="display:none"></div>
   <div class="toolbar">
     <input type="text" id="q" placeholder="Tìm email…" oninput="PAGE=1;render()">
     <select id="f" onchange="PAGE=1;render()">
@@ -662,10 +693,12 @@ tr:last-child td { border-bottom:0; }
     <button class="ghost" onclick="checkAll('expiring')">Kiểm tra cookie sắp hết</button>
     <button id="btnAll" onclick="refreshAll()">Đăng nhập lại tất cả sắp hết</button>
     <button class="ghost" onclick="loadAll()">Làm mới</button>
+    <button class="ghost" onclick="importExcel()">Nhập từ Excel</button>
+    <button class="ghost" onclick="exportExcel()">Xuất ra Excel</button>
   </div>
   <div class="card">
     <h2>Danh sách cookie</h2>
-    <p class="hint">Nguồn: file accounts.xlsx — cột Cookie phiên đăng nhập, mốc lấy ở cột Thời gian lấy cookie. Đăng nhập lại cập nhật đúng hai cột đó.</p>
+    <p class="hint">Nguồn: kho SQLite (accounts.db) — một dòng một tài khoản, email là khoá duy nhất. Đăng nhập lại cập nhật đúng dòng của tài khoản đó.</p>
     <div id="tableWrap"><p class="empty">Đang tải…</p></div>
     <div class="pager" id="pager"></div>
   </div>
@@ -698,25 +731,41 @@ function fmtTime(iso){
   const d = new Date(iso);
   return d.toLocaleString("vi-VN", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
 }
+async function checkJson(r){
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || ("lỗi HTTP " + r.status));
+  return d;
+}
 async function loadAll(){
-  const [c, h, s] = await Promise.all([
-    fetch("/api/cookies").then(r=>r.json()),
-    fetch("/api/history").then(r=>r.json()),
-    fetch("/api/status").then(r=>r.json()),
-  ]);
-  COOKIES = c.cookies || [];
-  document.getElementById("stats").innerHTML =
-    stat(COOKIES.length,"Tổng tài khoản","") +
-    stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
-    stat(c.stats["het-han"],"Hết hạn","bad") + stat(c.stats.chet,"Die","bad") +
-    stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
-  document.getElementById("metaLine").textContent =
-    "File nguồn: " + s.source_path + " (" + s.source_count + " mail) · File xuất tab Đăng nhập lại: " + (s.output_path || "chưa đặt") + " · Đang có cookie: " + s.vault_count + ".";
-  document.getElementById("history").innerHTML = (h.history||[]).length
-    ? "<table><tr><th>Thời gian</th><th>Việc</th><th>Email</th><th>Chi tiết</th></tr>" +
-      h.history.map(e=>"<tr><td>"+fmtTime(e.at)+"</td><td>"+(ACTION[e.action]||e.action)+"</td><td>"+esc(e.email)+"</td><td>"+esc(e.detail||"")+"</td></tr>").join("") + "</table>"
-    : "<p class='empty'>Chưa có lịch sử.</p>";
-  render();
+  const box = document.getElementById("errorBox");
+  try {
+    const [c, h, s] = await Promise.all([
+      fetch("/api/cookies").then(checkJson),
+      fetch("/api/history").then(checkJson),
+      fetch("/api/status").then(checkJson),
+    ]);
+    box.style.display = "none"; box.textContent = "";
+    COOKIES = c.cookies || [];
+    document.getElementById("stats").innerHTML =
+      stat(COOKIES.length,"Tổng tài khoản","") +
+      stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
+      stat(c.stats["het-han"],"Hết hạn","bad") + stat(c.stats.chet,"Die","bad") +
+      stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
+    document.getElementById("metaLine").textContent =
+      "Kho: " + s.db_path + " (" + s.total + " tài khoản) · File nhập Excel: " + s.source_path + " · File xuất tab Đăng nhập lại: " + (s.output_path || "chưa đặt") + " · Đang có cookie: " + s.vault_count + ".";
+    document.getElementById("history").innerHTML = (h.history||[]).length
+      ? "<table><tr><th>Thời gian</th><th>Việc</th><th>Email</th><th>Chi tiết</th></tr>" +
+        h.history.map(e=>"<tr><td>"+fmtTime(e.at)+"</td><td>"+(ACTION[e.action]||e.action)+"</td><td>"+esc(e.email)+"</td><td>"+esc(e.detail||"")+"</td></tr>").join("") + "</table>"
+      : "<p class='empty'>Chưa có lịch sử.</p>";
+    render();
+  } catch(e) {
+    // Lỗi phải hiện ra, không được để trang kẹt ở "Đang tải…"
+    // mãi như bản trước.
+    box.style.display = "block";
+    box.textContent = "Không tải được kho: " + e.message + " — thử tải lại trang, hoặc kiểm tra cửa sổ đang chạy server.";
+    document.getElementById("tableWrap").innerHTML = "<p class='empty'>Chưa tải được dữ liệu.</p>";
+    document.getElementById("history").innerHTML = "<p class='empty'>Chưa tải được dữ liệu.</p>";
+  }
 }
 function stat(n,label,cls){ return "<div class='stat "+cls+"'><b>"+n+"</b><span>"+label+"</span></div>"; }
 function esc(s){ return String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
@@ -802,6 +851,15 @@ async function refreshAll(){
   alert("Đã xếp " + r.count + " tài khoản vào hàng đợi đăng nhập lại.");
   loadJobs();
 }
+async function importExcel(){
+  if (!confirm("Nhập tài khoản từ file Excel vào kho? Tài khoản đã có trong kho sẽ được gộp (không tạo dòng trùng).")) return;
+  const r = await fetch("/api/import-excel", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({})}).then(r=>r.json());
+  if (r.error){ alert(r.error); return; }
+  alert("Nhập xong: " + r.imported + " mới, " + r.updated + " cập nhật, " + r.skipped + " dòng bỏ qua. Kho đang có " + r.total + " tài khoản.");
+  loadAll();
+}
+function exportExcel(){ window.open("/api/export-excel", "_blank"); }
 async function deleteCookie(email, btn){
   if (!confirm("Xoá cookie của " + email + "? (Dòng vẫn giữ lại, đăng nhập lại là có cookie mới.)")) return;
   const r = await fetch("/api/delete", {method:"POST", headers:{"Content-Type":"application/json"},

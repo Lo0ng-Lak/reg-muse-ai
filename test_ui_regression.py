@@ -30,6 +30,10 @@ TMP = Path(tempfile.mkdtemp(prefix="reg-test-ui-"))
 paths.data_file = lambda name: TMP / name
 
 import storage  # noqa: E402
+
+storage.SPREADSHEET_FILE = TMP / "accounts.xlsx"
+storage.PENDING_SPREADSHEET_FILE = TMP / "accounts.pending.xlsx"
+storage.ACCOUNTS_DB_FILE = TMP / "accounts.db"
 from coordinator import Coordinator, RunSettings  # noqa: E402
 
 try:
@@ -101,7 +105,8 @@ def test_lane_crash_resets_running():
 
 
 def test_relogin_sheet_reads_email_and_writes_cookie_file():
-    """File nguồn kiểu accounts.xlsx: chỉ lấy mail + mật khẩu hộp
+    """Kho SQLite là nguồn đăng nhập lại: nhập file Excel kiểu
+    accounts.xlsx vào kho trước, rồi chỉ lấy mail + mật khẩu hộp
     thư. File xuất chỉ có Email và Cookie đăng nhập. Mail
     @flubai.com là mail.tm. Mail trùng chỉ giữ một dòng."""
     from openpyxl import Workbook, load_workbook
@@ -150,7 +155,11 @@ def test_relogin_sheet_reads_email_and_writes_cookie_file():
         ]
     )
     workbook.save(source)
-    rows = storage._relogin_accounts(source)
+    # Nguồn đăng nhập lại là kho SQLite: nhập file Excel vào kho
+    # trước (nút "Nhập từ Excel" làm việc này).
+    result = storage.import_accounts_from_excel(str(source))
+    assert result["total"] == 2, result
+    rows = storage._relogin_accounts()
     assert [row["email"] for row in rows] == [
         "muse111@flubai.com",
         "muse222@mailto.plus",

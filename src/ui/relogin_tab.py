@@ -1,9 +1,10 @@
 """Tab đăng nhập lại Muse: lấy lại cookie của mail đã có.
 
-Đọc file Excel có cột Email Muse.ai (và Mật khẩu hộp thư để lấy
-OTP). Đăng nhập đúng từng mail, không proxy, không nộp thẻ.
-Cookie mới ghi ra một file Excel khác, chỉ hai cột: Email và
-Cookie đăng nhập.
+Đọc mail từ kho SQLite (accounts.db) — một dòng một tài khoản,
+kèm Mật khẩu hộp thư để lấy OTP. Đăng nhập đúng từng mail,
+không proxy, không nộp thẻ. Cookie mới ghi ra một file Excel
+khác, chỉ hai cột: Email và Cookie đăng nhập. Muốn đưa thêm
+mail từ file Excel vào kho thì bấm "Nhập từ Excel…".
 """
 
 import tkinter as tk
@@ -29,7 +30,7 @@ class ReloginTab(ttk.Frame):
         ttk.Label(
             self,
             text=(
-                "Chọn file Excel đã có mail Muse (cột Email Muse.ai). "
+                "Lấy lại cookie của mail đã có trong kho (accounts.db). "
                 "Tool đăng nhập đúng mail đó, lấy OTP từ hộp thư, "
                 "rồi ghi cookie mới ra file khác — chỉ hai cột Email "
                 "và Cookie đăng nhập. Không dùng proxy, không nộp thẻ."
@@ -39,16 +40,14 @@ class ReloginTab(ttk.Frame):
 
         source = ttk.Frame(self)
         source.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        source.columnconfigure(1, weight=1)
-        ttk.Label(source, text="File Excel nguồn:").grid(
-            row=0, column=0, sticky="w"
+        source.columnconfigure(0, weight=1)
+        self.store_label = ttk.Label(source, text="")
+        self.store_label.grid(row=0, column=0, sticky="w")
+        self.import_button = ttk.Button(
+            source, text="Nhập từ Excel…", command=self._import_from_excel
         )
-        self.source_entry = ttk.Entry(source)
-        self.source_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6))
-        self.browse_source_button = ttk.Button(
-            source, text="Chọn file…", command=self._browse_source
-        )
-        self.browse_source_button.grid(row=0, column=2)
+        self.import_button.grid(row=0, column=1, sticky="e")
+        self._refresh_store_label()
 
         output = ttk.Frame(self)
         output.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -84,32 +83,45 @@ class ReloginTab(ttk.Frame):
         )
         self.open_output_button.pack(side="left", padx=(8, 0))
 
-        saved_source = storage._load_relogin_source_path()
-        if saved_source:
-            self.source_entry.insert(0, saved_source)
         saved_output = storage._load_relogin_output_path()
         if saved_output:
             self.output_entry.insert(0, saved_output)
 
-    def _browse_source(self):
+    def _refresh_store_label(self):
+        try:
+            total = len(storage._relogin_accounts())
+        except Exception:
+            total = 0
+        self.store_label.configure(
+            text=f"Kho: accounts.db — {total} tài khoản"
+        )
+
+    def _import_from_excel(self):
         from tkinter import filedialog
 
         path = filedialog.askopenfilename(
-            title="Chọn file Excel mail Muse",
+            title="Chọn file Excel để nhập vào kho",
             filetypes=[("Excel", "*.xlsx"), ("Tất cả", "*.*")],
         )
         if not path:
             return
-        self.source_entry.delete(0, "end")
-        self.source_entry.insert(0, path)
+        try:
+            result = storage.import_accounts_from_excel(path)
+        except Exception as error:
+            messagebox.showerror("Không nhập được file", str(error))
+            return
         try:
             storage._save_relogin_source_path(path)
-        except OSError as error:
-            messagebox.showerror("Không lưu được đường dẫn", str(error))
-        output = self.output_entry.get().strip()
-        if not output:
-            suggested = str(Path(path).with_name("muse_cookies.xlsx"))
-            self.output_entry.insert(0, suggested)
+        except OSError:
+            pass
+        self._refresh_store_label()
+        messagebox.showinfo(
+            "Nhập xong",
+            f"Thêm {result['imported']} mail mới, cập nhật "
+            f"{result['updated']} mail đã có, bỏ qua "
+            f"{result['skipped']} dòng không có mail. Kho đang có "
+            f"{result['total']} tài khoản.",
+        )
 
     def _browse_output(self):
         from tkinter import filedialog
@@ -131,29 +143,11 @@ class ReloginTab(ttk.Frame):
     def _start(self):
         if self.coordinator.running:
             return
-        source = self.source_entry.get().strip()
         output = self.output_entry.get().strip()
-        if not source or not Path(source).is_file():
-            messagebox.showwarning(
-                "Thiếu file Excel",
-                "Chọn file Excel có cột Email Muse.ai.",
-            )
-            return
         if not output:
             messagebox.showwarning(
                 "Thiếu file xuất",
                 "Chọn file Excel để ghi Email và Cookie đăng nhập.",
-            )
-            return
-        try:
-            same = Path(source).resolve() == Path(output).resolve()
-        except OSError:
-            same = False
-        if same:
-            messagebox.showwarning(
-                "File xuất trùng file nguồn",
-                "Chọn một file khác để ghi cookie. File nguồn giữ "
-                "nguyên mail và mật khẩu hộp thư.",
             )
             return
         try:
@@ -175,12 +169,12 @@ class ReloginTab(ttk.Frame):
         except (tk.TclError, ValueError):
             lanes = 1
         lanes = max(1, min(lanes, 10))
-        rows = storage._relogin_accounts(source)
+        rows = storage._relogin_accounts()
         if not rows:
             messagebox.showwarning(
                 "Không có mail",
-                "File không có cột Email Muse.ai, hoặc không có "
-                "dòng mail nào.",
+                "Kho chưa có mail nào. Bấm 'Nhập từ Excel…' để đưa "
+                "mail vào kho.",
             )
             return
         done = storage._relogin_done_emails(output)
@@ -195,7 +189,6 @@ class ReloginTab(ttk.Frame):
             )
             return
         try:
-            storage._save_relogin_source_path(source)
             storage._save_relogin_output_path(output)
         except OSError:
             pass
@@ -204,7 +197,6 @@ class ReloginTab(ttk.Frame):
             direct=True,
             lanes=lanes,
             relogin=True,
-            relogin_excel_path=source,
             relogin_output_path=output,
         )
         try:
@@ -215,8 +207,7 @@ class ReloginTab(ttk.Frame):
             skipped = len(rows) - len(pending)
             self.app.append_log(
                 "--- Bắt đầu ĐĂNG NHẬP LẠI: "
-                f"{planned} mail chưa có cookie trong "
-                f"{Path(source).name} ---"
+                f"{planned} mail chưa có cookie trong file xuất ---"
             )
             if skipped:
                 self.app.append_log(
@@ -262,8 +253,7 @@ class ReloginTab(ttk.Frame):
     def set_running(self, running):
         state = "disabled" if running else "normal"
         for widget in (
-            self.source_entry,
-            self.browse_source_button,
+            self.import_button,
             self.output_entry,
             self.browse_output_button,
             self.count_entry,
