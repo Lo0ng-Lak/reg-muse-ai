@@ -914,9 +914,10 @@ def test_parse_cookie_string():
 
 
 class _FakePage:
-    def __init__(self, url, body):
+    def __init__(self, url, body, fail_content_times=0):
         self.url = url
         self._body = body
+        self._fail_content_times = fail_content_times
         self.closed = False
 
     def goto(self, url, timeout=None):
@@ -926,6 +927,12 @@ class _FakePage:
         pass
 
     def content(self):
+        if self._fail_content_times > 0:
+            self._fail_content_times -= 1
+            raise RuntimeError(
+                "Page.content: Unable to retrieve content because "
+                "the page is navigating and changing the content."
+            )
         return self._body
 
     def close(self):
@@ -963,9 +970,11 @@ class _FakeBrowser:
         self.closed = True
 
 
-def _browser_checker_with(page):
+def _browser_checker_with(page, timeout_ms=None):
     browser = _FakeBrowser(page)
-    checker = cookie_health.BrowserChecker(launcher=lambda: browser)
+    checker = cookie_health.BrowserChecker(
+        launcher=lambda: browser, timeout_ms=timeout_ms
+    )
     checker.start()
     return checker, browser
 
@@ -1006,9 +1015,48 @@ def test_browser_checker_khong_ro_khi_trang_la():
     page = _FakePage(
         "https://www.meta.ai/", "<html><body>trang lạ</body></html>"
     )
-    checker, browser = _browser_checker_with(page)
+    checker, browser = _browser_checker_with(page, timeout_ms=300)
     status, _detail = checker.check(COOKIE_LIVE)
     assert status == "khong-ro", status
+    checker.close()
+
+
+def test_browser_checker_cho_trang_on_dinh():
+    # Trang đang điều hướng 2 lần đầu (content() ném lỗi),
+    # lần 3 mới hiện ô chat -> vẫn kết luận sống.
+    page = _FakePage(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+        fail_content_times=2,
+    )
+    checker, browser = _browser_checker_with(page)
+    status, _detail = checker.check(COOKIE_LIVE)
+    assert status == "song", status
+    checker.close()
+
+
+def test_browser_checker_chet_khi_trang_hien_sign_in():
+    page = _FakePage(
+        "https://www.meta.ai/",
+        "<html><body><button>Sign in</button></body></html>",
+    )
+    checker, browser = _browser_checker_with(page)
+    status, _detail = checker.check(COOKIE_LIVE)
+    assert status == "chet", status
+    checker.close()
+
+
+def test_browser_checker_challenge_page():
+    page = _FakePage(
+        "https://www.meta.ai/",
+        "<html><head><title>Just a moment...</title></head>"
+        "<body>Verify you are human</body></html>",
+    )
+    checker, browser = _browser_checker_with(page, timeout_ms=300)
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "khong-ro", (status, detail)
+    assert "challenge" in detail, detail
     checker.close()
 
 
@@ -1268,6 +1316,9 @@ TESTS = [
     test_browser_checker_song_khi_vao_duoc_chat,
     test_browser_checker_chet_khi_bi_day_ve_dang_nhap,
     test_browser_checker_khong_ro_khi_trang_la,
+    test_browser_checker_cho_trang_on_dinh,
+    test_browser_checker_chet_khi_trang_hien_sign_in,
+    test_browser_checker_challenge_page,
     test_browser_checker_khong_can_trinh_duyet_khi_thieu_hatch_sess,
     test_browser_checker_start_bao_loi_ro_rang,
 ]
