@@ -44,14 +44,92 @@ from coordinator import Coordinator
 DEFAULT_PORT = 8765
 MAX_LOG_LINES = 200
 # Số luồng kiểm tra song song (mỗi luồng một trình duyệt headless
-# riêng). Tool đăng ký chạy 1-5 luồng; kiểm tra chạy 10 (tăng từ
-# 5 lên 10 theo yêu cầu 2026-11-17: kiểm tra nhanh gần gấp đôi,
-# đổi lại máy nặng hơn khi lượt kiểm tra đang chạy).
-CHECK_WORKERS = 10
+# riêng). Từng là 10 (tăng 2026-11-17) nhưng 10 luồng làm job
+# kẹt cứng ở 96/2096 — meta.ai đáp chậm/trắng trang, có thể do
+# dập quá nhiều yêu cầu song song từ một IP + máy nặng. Trả về
+# 5, cộng thêm chống kẹt từng mail (CHECK_ONE_TIMEOUT_SECONDS).
+CHECK_WORKERS = 5
+# Tối đa cho một cookie: yêu cầu nhanh (10 giây) + trình duyệt
+# (mở trang 20 giây + chờ ổn định 20 giây) + ghi cache. Quá hạn
+# này thì trình duyệt đã kẹt — bỏ checker đó, mở cái mới, lượt
+# kiểm tra tiếp tục thay vì đứng cứng cả job.
+CHECK_ONE_TIMEOUT_SECONDS = 75
 MAX_HISTORY_SHOWN = 100
 
 _SERVER = None
 _SERVER_LOCK = threading.Lock()
+
+
+def _kiem_tra_mot_mail(email, cookie, checker, fast,
+                       timeout_seconds=CHECK_ONE_TIMEOUT_SECONDS):
+    """Kiểm tra một cookie, chờ tối đa timeout_seconds.
+
+    Trả về entry {status, checked_at, detail}, hoặc None khi
+    quá hạn — lúc đó checker đã kẹt, người gọi phải bỏ nó và
+    mở cặp kiểm tra mới (không gọi close() trực tiếp vì trình
+    duyệt kẹt thì close cũng kẹt theo). Luồng kẹt cứ chạy nền
+    (daemon): nếu sau đó nó trả kết quả thì kết quả vẫn được
+    ghi vào cache, chỉ là lượt kiểm tra không chờ nó nữa.
+    """
+    result = {}
+
+    def _chay():
+        try:
+            result["entry"] = cookie_health.check_and_cache(
+                email, cookie, checker=checker, fast_checker=fast,
+            )
+        except Exception as error:
+            result["error"] = error
+
+    thread = threading.Thread(target=_chay, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        return None
+    if "error" in result:
+        raise result["error"]
+    return result.get("entry")
+
+
+def _mo_cap_kiem_tra(factory, fast_factory):
+    """Mở một cặp kiểm tra (trình duyệt + yêu cầu nhanh).
+
+    Trả về (checker, fast, loi) — fast có thể là None khi yêu
+    cầu nhanh không mở được; checker None + loi là lý do khi
+    trình duyệt không mở được (người gọi dừng luồng).
+    """
+    checker = factory()
+    try:
+        checker.start()
+    except RuntimeError as error:
+        return None, None, str(error)
+    fast = None
+    if fast_factory is not None:
+        try:
+            fast = fast_factory()
+            fast.start()
+        except Exception:
+            fast = None
+    return checker, fast, None
+
+
+def _bo_cap_kiem_tra_ket(checker, fast):
+    """Đóng một cặp kiểm tra đã kẹt trong luồng nền: trình duyệt
+    kẹt thì close() cũng kẹt theo, không được để nó giữ chân
+    luồng kiểm tra — tiến trình kẹt cứ để đó, tắt server thì
+    hết (daemon)."""
+    def _dong():
+        try:
+            if fast is not None:
+                fast.close()
+        except Exception:
+            pass
+        try:
+            checker.close()
+        except Exception:
+            pass
+
+    threading.Thread(target=_dong, daemon=True).start()
 
 
 def _now_iso():
@@ -436,34 +514,34 @@ class CookieWeb:
         return refresh_id
 
     def _check_slice(self, job, emails, cookies_by_email, factory,
-                     counts, dead, lock, fast_factory=None):
+                     counts, dead, lock, fast_factory=None,
+                     timeout_seconds=None):
         """Một luồng kiểm tra: mở trình duyệt riêng, kiểm tra lần
         lượt từng mail trong phần của mình.
 
         Mỗi mail thử yêu cầu nhanh trước (một GET, không mở
         trang): kết luận được thì khỏi mở trình duyệt; yêu cầu
         nhanh không mở được (thiếu Playwright...) thì cả luồng
-        chỉ dùng trình duyệt. Lỗi ở một mail không được giết cả
-        luồng: ghi lại rồi tính là chưa rõ, kiểm tra tiếp mail
-        sau.
+        chỉ dùng trình duyệt. Một mail kẹt quá
+        CHECK_ONE_TIMEOUT_SECONDS thì bỏ cặp kiểm tra đó, mở
+        cặp mới, kiểm tra tiếp — job không bao giờ đứng cứng
+        (lỗi 2026-11-17: kẹt ở 96/2096). Lỗi ở một mail không
+        được giết cả luồng: ghi lại rồi tính là chưa rõ, kiểm
+        tra tiếp mail sau.
         """
-        checker = factory()
-        try:
-            checker.start()
-        except RuntimeError as error:
+        checker, fast, error = _mo_cap_kiem_tra(
+            factory, fast_factory
+        )
+        if checker is None:
             with lock:
                 job["log"].append(f"✘ luồng kiểm tra: {error}")
                 job["log"] = job["log"][-MAX_LOG_LINES:]
             return
-        fast = None
-        if fast_factory is not None:
-            try:
-                fast = fast_factory()
-                fast.start()
-            except Exception:
-                # Yêu cầu nhanh không dùng được thì chỉ dùng
-                # trình duyệt — không làm hỏng lượt kiểm tra.
-                fast = None
+        timeout = (
+            CHECK_ONE_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else timeout_seconds
+        )
         try:
             for email in emails:
                 try:
@@ -479,10 +557,33 @@ class CookieWeb:
                             job["done"] = sum(counts.values())
                             job["log"] = job["log"][-MAX_LOG_LINES:]
                         continue
-                    entry = cookie_health.check_and_cache(
-                        email, cookie, checker=checker,
-                        fast_checker=fast,
+                    entry = _kiem_tra_mot_mail(
+                        email, cookie, checker, fast,
+                        timeout_seconds=timeout,
                     )
+                    if entry is None:
+                        with lock:
+                            counts["khong-ro"] += 1
+                            job["done"] = sum(counts.values())
+                            job["log"].append(
+                                f"✘ {email}: kiểm tra kẹt quá "
+                                f"{timeout} giây, bỏ qua."
+                            )
+                            job["log"] = job["log"][-MAX_LOG_LINES:]
+                        _bo_cap_kiem_tra_ket(checker, fast)
+                        checker, fast, error = _mo_cap_kiem_tra(
+                            factory, fast_factory
+                        )
+                        if checker is None:
+                            with lock:
+                                job["log"].append(
+                                    "✘ luồng kiểm tra: không mở "
+                                    "lại được trình duyệt "
+                                    f"({error}), dừng luồng."
+                                )
+                                job["log"] = job["log"][-MAX_LOG_LINES:]
+                            return
+                        continue
                     status = entry["status"]
                 except Exception as error:
                     with lock:

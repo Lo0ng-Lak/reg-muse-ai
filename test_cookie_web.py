@@ -1511,6 +1511,83 @@ def test_check_uu_tien_qua_han_truoc():
     ], emails
 
 
+def test_kiem_tra_mot_mail_tra_ve_none_khi_ket():
+    done = threading.Event()
+
+    class _Ket:
+        def check(self, cookie):
+            time.sleep(1.2)
+            done.set()
+            return "song", "xong muộn"
+
+    started = time.monotonic()
+    entry = cookie_web._kiem_tra_mot_mail(
+        "a@fexpost.com", COOKIE_LIVE, _Ket(), None,
+        timeout_seconds=0.5,
+    )
+    elapsed = time.monotonic() - started
+    assert entry is None, entry
+    assert elapsed < 3, elapsed
+    # Chờ luồng kẹt chạy xong để nó không ghi cache sang test sau.
+    assert done.wait(timeout=3), "luồng kẹt không chạy xong"
+    time.sleep(0.5)
+
+
+def test_check_slice_thay_cap_moi_khi_mot_mail_ket():
+    # Mail đầu kẹt (check ngủ 1.2 giây), mail sau vẫn được kiểm
+    # tra bằng cặp mới — job không đứng cứng (lỗi 2026-11-17:
+    # kẹt ở 96/2096).
+    calls = {"n": 0}
+    done = threading.Event()
+
+    class _KetRoiSong:
+        def __init__(self):
+            calls["n"] += 1
+            self.so = calls["n"]
+
+        def start(self):
+            pass
+
+        def check(self, cookie):
+            if self.so == 1:
+                time.sleep(1.2)
+                done.set()
+                return "song", "xong muộn"
+            return "song", "vào được giao diện chat"
+
+        def close(self):
+            pass
+
+    def factory():
+        return _KetRoiSong()
+
+    web = cookie_web.CookieWeb()
+    job = web._new_job(
+        ["ket@fexpost.com", "song@fexpost.com"], "check"
+    )
+    counts = {"song": 0, "chet": 0, "khong-ro": 0}
+    dead = []
+    lock = threading.Lock()
+    cookies = {
+        "ket@fexpost.com": COOKIE_LIVE,
+        "song@fexpost.com": COOKIE_LIVE,
+    }
+    started = time.monotonic()
+    web._check_slice(
+        job, ["ket@fexpost.com", "song@fexpost.com"], cookies,
+        factory, counts, dead, lock, fast_factory=None,
+        timeout_seconds=0.5,
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 5, elapsed
+    assert job["done"] == 2, job
+    assert counts == {"song": 1, "chet": 0, "khong-ro": 1}, counts
+    assert any("kẹt quá" in line for line in job["log"]), job
+    assert calls["n"] == 2, calls
+    assert done.wait(timeout=3), "luồng kẹt không chạy xong"
+    time.sleep(0.5)
+
+
 def test_check_slice_khong_chet_khi_mot_mail_loi():
     storage._append_spreadsheet_row(
         "loi@fexpost.com",
@@ -1625,6 +1702,8 @@ TESTS = [
     test_api_checker_chet_khi_khong_co_hatch_sess,
     test_check_and_cache_dung_trinh_duyet_khi_yeu_cau_nhanh_khong_ro,
     test_check_and_cache_khong_dung_trinh_duyet_khi_yeu_cau_nhanh_ket_luan_duoc,
+    test_kiem_tra_mot_mail_tra_ve_none_khi_ket,
+    test_check_slice_thay_cap_moi_khi_mot_mail_ket,
 ]
 
 
