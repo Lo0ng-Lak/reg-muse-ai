@@ -835,6 +835,9 @@ class _FakeChecker:
         self.checked = []
         self.closed = False
 
+    def start(self):
+        pass
+
     def check(self, cookie):
         self.checked.append(cookie)
         return self.status, "vào được giao diện chat"
@@ -851,17 +854,25 @@ def test_check_job_reports_done_count():
             cookie=COOKIE_LIVE,
             cookie_taken_at=_iso(_now()),
         )
-    checker = _FakeChecker()
+    created = []
+
+    def factory():
+        checker = _FakeChecker()
+        created.append(checker)
+        return checker
+
     web = cookie_web.CookieWeb()
     job = web._new_job(["a@fexpost.com", "b@fexpost.com"], "check")
     assert job["done"] == 0, job
-    web._run_check_job(job, checker=checker)
+    web._run_check_job(job, checker_factory=factory)
     assert job["done"] == 2, job
     assert job["status"] == "done", job
     assert "2 hoạt động" in job["result"], job
-    assert len(checker.checked) == 2, checker.checked
-    # Checker do người gọi đưa vào thì job không được đóng nó.
-    assert not checker.closed
+    # 1 probe + 2 luồng (2 mail) = 3 checker, mỗi cái đều đóng;
+    # chỉ 2 checker của luồng là kiểm tra thật (mỗi cái 1 mail).
+    assert len(created) == 3, len(created)
+    assert all(c.closed for c in created), created
+    assert sum(len(c.checked) for c in created) == 2, created
 
 
 def test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet():
@@ -1014,6 +1025,59 @@ def test_browser_checker_start_bao_loi_ro_rang():
         assert "playwright install chromium" in str(error), error
 
 
+def test_check_job_chia_deu_cac_luong():
+    emails = [f"u{i}@fexpost.com" for i in range(4)]
+    for email in emails:
+        storage._append_spreadsheet_row(
+            email,
+            "s",
+            cookie=COOKIE_LIVE,
+            cookie_taken_at=_iso(_now()),
+        )
+    created = []
+
+    def factory():
+        checker = _FakeChecker()
+        created.append(checker)
+        return checker
+
+    web = cookie_web.CookieWeb()
+    job = web._new_job(emails, "check")
+    web._run_check_job(job, checker_factory=factory)
+    assert job["done"] == 4, job
+    assert "4 hoạt động" in job["result"], job
+    # 1 probe + 4 luồng (4 mail, mỗi luồng 1 mail).
+    assert len(created) == 5, len(created)
+    workers = [c for c in created if c.checked]
+    assert len(workers) == 4, created
+    assert all(len(c.checked) == 1 for c in workers), created
+
+
+def test_check_and_cache_khong_mat_entry_khi_ghi_song_song():
+    import threading
+
+    checker = _FakeChecker()
+    emails = [f"u{i}@fexpost.com" for i in range(10)]
+    threads = [
+        threading.Thread(
+            target=cookie_health.check_and_cache,
+            args=(email, COOKIE_LIVE),
+            kwargs={"checker": checker},
+            daemon=True,
+        )
+        for email in emails
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    cache = cookie_health.load_health_cache()
+    assert sorted(cache) == sorted(emails), cache
+    assert all(
+        entry["status"] == "song" for entry in cache.values()
+    ), cache
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -1050,6 +1114,8 @@ TESTS = [
     test_start_check_all_khong_xep_chong_job,
     test_check_job_reports_done_count,
     test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet,
+    test_check_job_chia_deu_cac_luong,
+    test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
     test_parse_cookie_string,
     test_browser_checker_song_khi_vao_duoc_chat,
     test_browser_checker_chet_khi_bi_day_ve_dang_nhap,

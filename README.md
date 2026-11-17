@@ -565,8 +565,10 @@ headless (không mở cửa sổ, không cần bấm gì): mỗi cookie một
 context sạch, gắn cookie rồi mở meta.ai — thấy ô chat "Ask Meta AI"
 là sống, bị đẩy về màn đăng nhập là die. Kiểm tra bằng urllib
 không dùng được nữa (meta.ai trả 403 "Client challenge" cho
-client không phải trình duyệt). Vì mỗi cookie tốn vài giây nên
-một lượt 1.000+ cookie chạy nền cả tiếng; không mở được trình
+client không phải trình duyệt). Kiểm tra chạy 5 luồng song song,
+mỗi luồng một trình duyệt headless riêng; mỗi cookie tốn vài
+giây nên một lượt 1.000+ cookie chạy nền khoảng 15 phút thay
+vì cả tiếng; không mở được trình
 duyệt thì job dừng ngay và báo rõ lý do thay vì chạy vô ích.
 Nút **Đăng nhập lại** từng tài khoản, **Đăng nhập lại
 sắp hết & đã hết** (sắp hết + đã hết hạn theo mốc 7 ngày)
@@ -626,9 +628,9 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (41 test: hạn 7 ngày, kho SQLite,
-API, dashboard, kiểm tra sống/chết bằng trình duyệt headless,
-đọc 300 dòng, nhập/xuất Excel,
+Kiểm tra: `py test_cookie_web.py` (43 test: hạn 7 ngày, kho SQLite,
+API, dashboard, kiểm tra sống/chết bằng trình duyệt headless
+5 luồng song song, đọc 300 dòng, nhập/xuất Excel,
 cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,
 diện tự kiểm tra, chống xếp chồng job kiểm tra, tiến độ job) và `py test_account_store.py` (10 test: gộp
 trùng mail, nhập/xuất, đọc 2.000 dòng). Đăng nhập lại thật bằng

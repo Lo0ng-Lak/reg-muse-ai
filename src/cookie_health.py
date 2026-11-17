@@ -20,11 +20,18 @@ dashboard không phải gọi lại mỗi lần mở.
 """
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from datetime import datetime
 
 import paths
+
+
+# Khoá ghi cache kiểm tra: job kiểm tra chạy nhiều luồng, mỗi
+# luồng đọc-sửa-ghi cookie_health.json — không khoá thì hai
+# luồng đọc cùng một bản rồi ghi đè lên nhau, mất kết quả.
+_CACHE_LOCK = threading.Lock()
 
 
 MUSE_HOME_URL = "https://www.meta.ai/"
@@ -144,9 +151,10 @@ def check_and_cache(email, cookie, fetcher=None, checker=None):
         ),
         "detail": detail,
     }
-    cache = load_health_cache()
-    cache[(email or "").strip().lower()] = entry
-    save_health_cache(cache)
+    with _CACHE_LOCK:
+        cache = load_health_cache()
+        cache[(email or "").strip().lower()] = entry
+        save_health_cache(cache)
     return entry
 
 
