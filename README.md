@@ -592,6 +592,14 @@ kiểm tra diện chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 gi�
 trước (lần đầu mở thì kiểm tra hết, lần sau chỉ kiểm tra lại phần
 đã cũ); đang có job kiểm tra chạy thì không xếp thêm, và bảng tự
 tải lại mỗi 30 giây nên số Die/Sống hiện dần khi kiểm tra xong.
+**Server đang mở thì kiểm tra liên tục**: xong một lượt kiểm tra
+là bắt đầu lượt sau ngay (quét hết tài khoản có cookie), trạng
+thái trên trang lúc nào cũng mới theo thời gian thực; không mở
+được trình duyệt thì chờ 60 giây rồi thử lại. **Cookie nào kiểm
+tra thấy đã chết thì tự động đăng nhập lại lấy cookie mới** (đúng
+luồng Đăng nhập lại: không proxy, không thẻ); tài khoản nào đăng
+nhập lại thất bại (ví dụ Meta bắt xác minh người) thì ghi vào
+log của lượt đó, không làm hỏng lượt kiểm tra.
 Thẻ Lượt chạy chỉ hiện số lượng + tiến độ (đã xong X / N), không
 liệt kê mail; tài khoản nào đang được kiểm tra thì đúng dòng đó
 hiện huy hiệu "Đang kiểm tra…" (nhấp nháy nhẹ) thay cho trạng
@@ -637,10 +645,11 @@ Sao chép/Kiểm tra/Đăng nhập lại/Xoá nên cả khối script không
 chạy — đã sửa (dấu nháy trong onclick phải là `&quot;`) và có
 test hồi quy kiểm tra cú pháp JS bằng `node --check` khi có node.
 
-Kiểm tra: `py test_cookie_web.py` (52 test: hạn 7 ngày, kho SQLite,
+Kiểm tra: `py test_cookie_web.py` (59 test: hạn 7 ngày, kho SQLite,
 API, dashboard, kiểm tra sống/chết bằng trình duyệt headless
 5 luồng song song, đọc 300 dòng, nhập/xuất Excel,
 cú pháp JS của trang, thống kê Chưa kiểm tra, diện đăng nhập lại,
-diện tự kiểm tra, chống xếp chồng job kiểm tra, tiến độ job) và `py test_account_store.py` (10 test: gộp
+diện tự kiểm tra, chống xếp chồng job kiểm tra, tiến độ job,
+tự đăng nhập lại cookie chết, vòng kiểm tra liên tục) và `py test_account_store.py` (10 test: gộp
 trùng mail, nhập/xuất, đọc 2.000 dòng). Đăng nhập lại thật bằng
 trình duyệt chỉ kiểm tra được trên máy Windows.

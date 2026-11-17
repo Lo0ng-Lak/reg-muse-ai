@@ -160,11 +160,15 @@ def select_check_emails(cookies, scope):
 class CookieWeb:
     """Trạng thái của web quản lý cookie: jobs + khoá chạy."""
 
-    def __init__(self, desktop_coordinator=None):
+    def __init__(self, desktop_coordinator=None, check_loop=False):
         # Coordinator của cửa sổ tkinter (nếu web được mở từ nút
         # trong tool): đăng nhập lại bị từ chối khi tool đang chạy
         # một lượt khác, để hai luồng không giành mailbox.txt.
         self.desktop_coordinator = desktop_coordinator
+        # check_loop: server đang mở thì kiểm tra liên tục — xong
+        # một lượt thì bắt đầu lượt sau ngay (yêu cầu 2026-11-17).
+        # Mặc định tắt để test không tự quay vòng.
+        self.check_loop = check_loop
         self.jobs = {}
         self.jobs_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
@@ -331,7 +335,9 @@ class CookieWeb:
         song song, mỗi luồng một trình duyệt headless riêng.
 
         Mở thử một trình duyệt trước: không mở được thì dừng ngay
-        (báo rõ lý do), không chạy cả nghìn lần vô ích.
+        (báo rõ lý do), không chạy cả nghìn lần vô ích. Xong lượt
+        kiểm tra, cookie nào đã chết thì tự động đăng nhập lại
+        lấy cookie mới (yêu cầu 2026-11-17).
         """
         factory = checker_factory or cookie_health.BrowserChecker
         probe = factory()
@@ -343,6 +349,7 @@ class CookieWeb:
             job["result"] = f"Không kiểm tra được: {error}"
             job["log"].append(str(error))
             job["log"] = job["log"][-MAX_LOG_LINES:]
+            self._chain_check_loop(job)
             return
         finally:
             probe.close()
@@ -358,6 +365,7 @@ class CookieWeb:
         }
         workers = max(1, min(CHECK_WORKERS, len(emails)))
         counts = {"song": 0, "chet": 0, "khong-ro": 0}
+        dead = []
         lock = threading.Lock()
         threads = []
         for index in range(workers):
@@ -369,6 +377,7 @@ class CookieWeb:
                     cookies_by_email,
                     factory,
                     counts,
+                    dead,
                     lock,
                 ),
                 name=f"cookie-check-{job['id']}-{index}",
@@ -384,9 +393,83 @@ class CookieWeb:
             f"{counts['khong-ro']} chưa rõ "
             f"(trong {len(emails)} tài khoản)."
         )
+        self._tu_dong_dang_nhap_lai_cookie_chet(job, dead)
+        self._chain_check_loop(job)
+
+    def _loop_emails(self):
+        """Mọi tài khoản có cookie — một lượt của vòng kiểm tra
+        liên tục quét hết kho, không chỉ phần quá hạn."""
+        return [
+            row["email"]
+            for row in storage._read_cookie_rows()
+            if row.get("cookie")
+        ]
+
+    def _start_loop_pass(self):
+        emails = self._loop_emails()
+        if emails:
+            self.start_check_all(emails)
+
+    def _chain_check_loop(self, job):
+        """Vòng kiểm tra liên tục (server đang mở): xong một lượt
+        thì bắt đầu lượt sau ngay, trạng thái trên trang lúc nào
+        cũng mới theo thời gian thực. Không mở được trình duyệt
+        thì chờ 60 giây rồi thử lại thay vì quay vòng lỗi."""
+        if not self.check_loop:
+            return
+        if job["done"] == 0 and "Không kiểm tra được" in (
+            job["result"] or ""
+        ):
+            timer = threading.Timer(60.0, self._start_loop_pass)
+            timer.daemon = True
+            timer.start()
+            job["log"].append(
+                "↻ vòng kiểm tra tạm dừng 60 giây (không mở "
+                "được trình duyệt)."
+            )
+            job["log"] = job["log"][-MAX_LOG_LINES:]
+            return
+        self._start_loop_pass()
+
+    def _tu_dong_dang_nhap_lai_cookie_chet(self, job, dead_emails):
+        """Sau một lượt kiểm tra: cookie nào đã chết thì tự động
+        đăng nhập lại lấy cookie mới (luồng ReloginTab: không
+        proxy, không thẻ). Đăng nhập lại thất bại ở tài khoản
+        nào (ví dụ Meta bắt xác minh người) thì ghi vào log,
+        không làm hỏng lượt kiểm tra vừa xong."""
+        if not dead_emails:
+            return None
+        with self.jobs_lock:
+            refresh_dang_chay = any(
+                item["kind"] == "refresh"
+                and item["status"] in ("queued", "running")
+                for item in self.jobs.values()
+            )
+        if refresh_dang_chay:
+            job["log"].append(
+                f"↻ {len(dead_emails)} cookie đã chết — đã có lượt "
+                "đăng nhập lại đang chạy, để lượt đó làm."
+            )
+            job["log"] = job["log"][-MAX_LOG_LINES:]
+            return None
+        try:
+            refresh_id = self.start_refresh(list(dead_emails))
+        except Exception as error:
+            job["log"].append(
+                "⚠ không tự đăng nhập lại được "
+                f"({len(dead_emails)} cookie chết): {error}"
+            )
+            job["log"] = job["log"][-MAX_LOG_LINES:]
+            return None
+        job["log"].append(
+            f"↻ {len(dead_emails)} cookie đã chết — tự động đăng "
+            f"nhập lại ({refresh_id})."
+        )
+        job["log"] = job["log"][-MAX_LOG_LINES:]
+        return refresh_id
 
     def _check_slice(self, job, emails, cookies_by_email, factory,
-                     counts, lock):
+                     counts, dead, lock):
         """Một luồng kiểm tra: mở trình duyệt riêng, kiểm tra lần
         lượt từng mail trong phần của mình.
 
@@ -429,6 +512,8 @@ class CookieWeb:
                     continue
                 with lock:
                     counts[status] += 1
+                    if status == cookie_health.STATUS_DEAD:
+                        dead.append(email)
                     job["done"] = sum(counts.values())
                     job["log"].append(
                         f"{email}: "
@@ -1127,12 +1212,18 @@ class _Server(ThreadingHTTPServer):
         super().__init__(address, CookieWebHandler)
 
 
-def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
+def start_server(port=DEFAULT_PORT, desktop_coordinator=None,
+                 check_loop=False):
     """Mở server quản lý cookie trên 127.0.0.1.
 
     Trả về (httpd, url). Thử port từ port trở đi tới khi bind được.
+    check_loop=True thì server vừa mở là bắt đầu vòng kiểm tra
+    liên tục (xong lượt này tới lượt sau).
     """
-    web = CookieWeb(desktop_coordinator=desktop_coordinator)
+    web = CookieWeb(
+        desktop_coordinator=desktop_coordinator,
+        check_loop=check_loop,
+    )
     # Nhập kho lần đầu chạy nền: lần đầu mở kho, chuyển 2k dòng
     # từ Excel sang SQLite có thể mất một lúc — trang không được
     # chờ nhập xong mới hiện (lỗi 2026-11-17: trang kẹt ở
@@ -1155,6 +1246,8 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
         target=httpd.serve_forever, name="cookie-web", daemon=True
     )
     thread.start()
+    if check_loop:
+        web._start_loop_pass()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
 
@@ -1170,7 +1263,8 @@ def open_cookie_web(desktop_coordinator=None):
             webbrowser.open(url)
             return url
         httpd, url = start_server(
-            desktop_coordinator=desktop_coordinator
+            desktop_coordinator=desktop_coordinator,
+            check_loop=True,
         )
         _SERVER = (httpd, url)
     webbrowser.open(url)
@@ -1189,7 +1283,7 @@ def main():
         help="cổng nghe trên 127.0.0.1 (mặc định 8765)",
     )
     args = parser.parse_args()
-    httpd, url = start_server(port=args.port)
+    httpd, url = start_server(port=args.port, check_loop=True)
     print(f"Kho Cookie đang chạy tại {url}")
     print("Mở trình duyệt để quản lý — nhấn Ctrl+C để dừng.")
     webbrowser.open(url)

@@ -528,6 +528,12 @@ def test_http_check_all_job():
         )
     orig = cookie_health.BrowserChecker
     cookie_health.BrowserChecker = _fake_browser_checker_class("chet")
+    orig_hook = (
+        cookie_web.CookieWeb._tu_dong_dang_nhap_lai_cookie_chet
+    )
+    cookie_web.CookieWeb._tu_dong_dang_nhap_lai_cookie_chet = (
+        lambda self, job, dead: None
+    )
     httpd, url = cookie_web.start_server(port=0)
     try:
         status, body = _http("POST", url + "/api/check-all", {})
@@ -548,6 +554,9 @@ def test_http_check_all_job():
         assert "2 die" in job["result"], job
     finally:
         cookie_health.BrowserChecker = orig
+        cookie_web.CookieWeb._tu_dong_dang_nhap_lai_cookie_chet = (
+            orig_hook
+        )
         httpd.shutdown()
         httpd.server_close()
 
@@ -1232,6 +1241,209 @@ class _FlakyChecker(_FakeChecker):
         return super().check(cookie)
 
 
+class _MixedChecker(_FakeChecker):
+    """Checker giả: chết hay sống tùy cookie — để test lượt
+    kiểm tra tự đăng nhập lại đúng tài khoản đã chết."""
+
+    def check(self, cookie):
+        self.checked.append(cookie)
+        if "chet" in cookie:
+            return "chet", "bị đẩy về màn đăng nhập"
+        return "song", "vào được giao diện chat"
+
+
+def test_check_job_tu_dong_dang_nhap_lai_cookie_chet():
+    storage._append_spreadsheet_row(
+        "chet@fexpost.com",
+        "s",
+        cookie="AAA-chet1-BBB",
+        cookie_taken_at=_iso(_now()),
+    )
+    storage._append_spreadsheet_row(
+        "song@fexpost.com",
+        "s",
+        cookie="AAA-song1-BBB",
+        cookie_taken_at=_iso(_now()),
+    )
+    goi_refresh = []
+
+    def factory():
+        return _MixedChecker()
+
+    web = cookie_web.CookieWeb()
+    web.start_refresh = lambda emails: goi_refresh.append(
+        list(emails)
+    ) or "job-99"
+    job = web._new_job(
+        ["chet@fexpost.com", "song@fexpost.com"], "check"
+    )
+    web._run_check_job(job, checker_factory=factory)
+    assert "1 die" in job["result"], job
+    assert goi_refresh == [["chet@fexpost.com"]], goi_refresh
+    assert any(
+        "tự động đăng nhập lại (job-99)" in line
+        for line in job["log"]
+    ), job["log"]
+
+
+def test_check_job_khong_dang_nhap_lai_khi_khong_co_cookie_chet():
+    storage._append_spreadsheet_row(
+        "song@fexpost.com",
+        "s",
+        cookie="AAA-song1-BBB",
+        cookie_taken_at=_iso(_now()),
+    )
+    goi_refresh = []
+
+    def factory():
+        return _FakeChecker("song")
+
+    web = cookie_web.CookieWeb()
+    web.start_refresh = lambda emails: goi_refresh.append(
+        list(emails)
+    ) or "job-99"
+    job = web._new_job(["song@fexpost.com"], "check")
+    web._run_check_job(job, checker_factory=factory)
+    assert goi_refresh == [], goi_refresh
+    assert "1 hoạt động" in job["result"], job
+
+
+def test_tu_dong_dang_nhap_lai_bo_qua_khi_dang_co_luot_refresh():
+    web = cookie_web.CookieWeb()
+    web._new_job(["x@fexpost.com"], "refresh")
+    goi_refresh = []
+    web.start_refresh = lambda emails: goi_refresh.append(
+        list(emails)
+    ) or "job-99"
+    job = web._new_job(["chet@fexpost.com"], "check")
+    ket_qua = web._tu_dong_dang_nhap_lai_cookie_chet(
+        job, ["chet@fexpost.com"]
+    )
+    assert ket_qua is None, ket_qua
+    assert goi_refresh == [], goi_refresh
+    assert any(
+        "đã có lượt đăng nhập lại đang chạy" in line
+        for line in job["log"]
+    ), job["log"]
+
+
+def test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc():
+    web = cookie_web.CookieWeb()
+
+    def _loi(emails):
+        raise RuntimeError("Tool đang chạy một lượt khác")
+
+    web.start_refresh = _loi
+    job = web._new_job(["chet@fexpost.com"], "check")
+    ket_qua = web._tu_dong_dang_nhap_lai_cookie_chet(
+        job, ["chet@fexpost.com"]
+    )
+    assert ket_qua is None, ket_qua
+    assert any(
+        "không tự đăng nhập lại được" in line
+        for line in job["log"]
+    ), job["log"]
+
+
+def test_check_loop_noi_tiep_luot_sau():
+    for email in ("a@fexpost.com", "b@fexpost.com"):
+        storage._append_spreadsheet_row(
+            email,
+            "s",
+            cookie="AAA-song1-BBB",
+            cookie_taken_at=_iso(_now()),
+        )
+    storage._append_spreadsheet_row(
+        "khongcookie@fexpost.com",
+        "s",
+        cookie="",
+        cookie_taken_at=_iso(_now()),
+    )
+    goi_check = []
+
+    def factory():
+        return _FakeChecker("song")
+
+    web = cookie_web.CookieWeb(check_loop=True)
+    web.start_check_all = lambda emails: goi_check.append(
+        sorted(emails)
+    ) or "job-99"
+    job = web._new_job(
+        ["a@fexpost.com", "b@fexpost.com"], "check"
+    )
+    web._run_check_job(job, checker_factory=factory)
+    # Lượt sau quét hết tài khoản có cookie, bỏ tài khoản
+    # chưa có cookie.
+    assert goi_check == [
+        ["a@fexpost.com", "b@fexpost.com"]
+    ], goi_check
+
+
+def test_check_loop_khong_noi_tiep_khi_tat():
+    storage._append_spreadsheet_row(
+        "a@fexpost.com",
+        "s",
+        cookie="AAA-song1-BBB",
+        cookie_taken_at=_iso(_now()),
+    )
+    goi_check = []
+
+    def factory():
+        return _FakeChecker("song")
+
+    web = cookie_web.CookieWeb()
+    web.start_check_all = lambda emails: goi_check.append(
+        sorted(emails)
+    ) or "job-99"
+    job = web._new_job(["a@fexpost.com"], "check")
+    web._run_check_job(job, checker_factory=factory)
+    assert goi_check == [], goi_check
+
+
+class _FakeTimer:
+    """threading.Timer giả: chỉ ghi lại, không chờ thật."""
+
+    created = []
+
+    def __init__(self, interval, function):
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        _FakeTimer.created.append(self)
+
+    def start(self):
+        pass
+
+
+def test_check_loop_cho_60_giay_khi_khong_mo_duoc_trinh_duyet():
+    class _BrokenChecker(_FakeChecker):
+        def start(self):
+            raise RuntimeError("không mở được trình duyệt")
+
+    def factory():
+        return _BrokenChecker()
+
+    orig_timer = threading.Timer
+    _FakeTimer.created.clear()
+    threading.Timer = _FakeTimer
+    try:
+        web = cookie_web.CookieWeb(check_loop=True)
+        goi_check = []
+        web.start_check_all = lambda emails: goi_check.append(
+            sorted(emails)
+        ) or "job-99"
+        job = web._new_job(["a@fexpost.com"], "check")
+        web._run_check_job(job, checker_factory=factory)
+        assert goi_check == [], goi_check
+        assert len(_FakeTimer.created) == 1, _FakeTimer.created
+        assert _FakeTimer.created[0].interval == 60.0
+        assert any(
+            "tạm dừng 60 giây" in line for line in job["log"]
+        ), job["log"]
+    finally:
+        threading.Timer = orig_timer
+
+
 def test_check_slice_khong_chet_khi_mot_mail_loi():
     storage._append_spreadsheet_row(
         "loi@fexpost.com",
@@ -1317,6 +1529,13 @@ TESTS = [
     test_check_job_reports_done_count,
     test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet,
     test_check_job_chia_deu_cac_luong,
+    test_check_job_tu_dong_dang_nhap_lai_cookie_chet,
+    test_check_job_khong_dang_nhap_lai_khi_khong_co_cookie_chet,
+    test_tu_dong_dang_nhap_lai_bo_qua_khi_dang_co_luot_refresh,
+    test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc,
+    test_check_loop_noi_tiep_luot_sau,
+    test_check_loop_khong_noi_tiep_khi_tat,
+    test_check_loop_cho_60_giay_khi_khong_mo_duoc_trinh_duyet,
     test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
     test_check_slice_khong_chet_khi_mot_mail_loi,
     test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,
