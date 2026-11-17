@@ -44,8 +44,10 @@ from coordinator import Coordinator
 DEFAULT_PORT = 8765
 MAX_LOG_LINES = 200
 # Số luồng kiểm tra song song (mỗi luồng một trình duyệt headless
-# riêng). Tool đăng ký chạy 1-5 luồng; kiểm tra cũng chạy 5.
-CHECK_WORKERS = 5
+# riêng). Tool đăng ký chạy 1-5 luồng; kiểm tra chạy 10 (tăng từ
+# 5 lên 10 theo yêu cầu 2026-11-17: kiểm tra nhanh gần gấp đôi,
+# đổi lại máy nặng hơn khi lượt kiểm tra đang chạy).
+CHECK_WORKERS = 10
 MAX_HISTORY_SHOWN = 100
 
 _SERVER = None
