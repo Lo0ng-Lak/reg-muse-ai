@@ -341,9 +341,14 @@ class BrowserChecker:
             page = context.new_page()
             try:
                 try:
+                    # domcontentloaded thay vì load: chỉ cần HTML
+                    # về là vòng chờ ổn định bên dưới lo phần còn
+                    # lại — không chờ hình/font phụ tải xong
+                    # (mỗi cookie nhanh hơn).
                     page.goto(
                         MUSE_HOME_URL,
                         timeout=self._timeout_ms,
+                        wait_until="domcontentloaded",
                     )
                 except Exception as error:
                     return (
@@ -390,7 +395,7 @@ class BrowserChecker:
                             STATUS_UNKNOWN,
                             "trang trả về không nhận diện được",
                         )
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(250)
             except Exception as error:
                 return (
                     STATUS_UNKNOWN,
