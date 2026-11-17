@@ -519,10 +519,30 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                 entry = cookie_health.check_and_cache(email, cookie)
                 self._send_json({"email": email, **entry})
             elif path == "/api/check-all":
+                data = self._read_json()
+                scope = (data.get("scope") or "all").strip()
                 cookies = cookie_vault.list_cookies()
-                emails = [
-                    item["email"] for item in cookies if item["has_cookie"]
-                ]
+                if scope == "expiring":
+                    # Chỉ kiểm tra diện cần quan tâm: sắp hết/hết
+                    # hạn theo mốc 7 ngày. Với 2k cookie thì kiểm
+                    # tra tất cả mất rất lâu (mỗi cookie một
+                    # request tới meta.ai).
+                    emails = [
+                        item["email"]
+                        for item in cookies
+                        if item["has_cookie"]
+                        and item["status"]
+                        in (
+                            cookie_vault.STATUS_EXPIRING,
+                            cookie_vault.STATUS_EXPIRED,
+                        )
+                    ]
+                else:
+                    emails = [
+                        item["email"]
+                        for item in cookies
+                        if item["has_cookie"]
+                    ]
                 if not emails:
                     self._send_json(
                         {"error": "không có tài khoản nào có cookie"}, 400
@@ -609,6 +629,8 @@ tr:last-child td { border-bottom:0; }
 .job pre { background:#101828; color:#e6e8eb; border-radius:8px; padding:10px; max-height:220px;
   overflow:auto; font-size:12.5px; white-space:pre-wrap; margin:10px 0 0; }
 .empty { color:var(--dim); }
+.pager { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+.pager .info { color:var(--dim); font-size:13px; margin-right:auto; }
 .note { color:var(--dim); font-size:13px; }
 .actions { white-space:nowrap; }
 @media (max-width:760px) { .stats { grid-template-columns:repeat(2,1fr); } }
@@ -622,21 +644,22 @@ tr:last-child td { border-bottom:0; }
   </header>
   <div class="stats" id="stats"></div>
   <div class="toolbar">
-    <input type="text" id="q" placeholder="Tìm email…" oninput="render()">
-    <select id="f" onchange="render()">
+    <input type="text" id="q" placeholder="Tìm email…" oninput="PAGE=1;render()">
+    <select id="f" onchange="PAGE=1;render()">
       <option value="">Tất cả hạn</option>
       <option value="song">Còn sống</option>
       <option value="sap-het">Sắp hết</option>
       <option value="het-han">Hết hạn</option>
       <option value="khong-ro">Không rõ hạn</option>
     </select>
-    <select id="hf" onchange="render()">
+    <select id="hf" onchange="PAGE=1;render()">
       <option value="">Tất cả hoạt động</option>
       <option value="song">Đang hoạt động</option>
       <option value="chet">Die</option>
       <option value="khong-ro">Chưa kiểm tra</option>
     </select>
-    <button id="btnCheckAll" onclick="checkAll()">Kiểm tra tất cả</button>
+    <button id="btnCheckAll" onclick="checkAll('all')">Kiểm tra tất cả</button>
+    <button class="ghost" onclick="checkAll('expiring')">Kiểm tra cookie sắp hết</button>
     <button id="btnAll" onclick="refreshAll()">Đăng nhập lại tất cả sắp hết</button>
     <button class="ghost" onclick="loadAll()">Làm mới</button>
   </div>
@@ -644,6 +667,7 @@ tr:last-child td { border-bottom:0; }
     <h2>Danh sách cookie</h2>
     <p class="hint">Nguồn: file accounts.xlsx — cột Cookie phiên đăng nhập, mốc lấy ở cột Thời gian lấy cookie. Đăng nhập lại cập nhật đúng hai cột đó.</p>
     <div id="tableWrap"><p class="empty">Đang tải…</p></div>
+    <div class="pager" id="pager"></div>
   </div>
   <div class="card" id="jobsCard" style="display:none">
     <h2>Lượt chạy</h2>
@@ -657,6 +681,7 @@ tr:last-child td { border-bottom:0; }
 </div>
 <script>
 let COOKIES = [];
+let PAGE = 1, PER_PAGE = 50;
 const LABEL = {song:"Còn sống","sap-het":"Sắp hết","het-han":"Hết hạn","khong-ro":"Không rõ"};
 const HEALTH = {song:"Hoạt động","chet":"Die","khong-ro":"Chưa kiểm tra"};
 const ACTION = {"lay":"Lấy cookie","lam-moi":"Đăng nhập lại","xoa":"Xoá cookie"};
@@ -700,10 +725,23 @@ function render(){
   const f = document.getElementById("f").value;
   const hf = document.getElementById("hf").value;
   const rows = COOKIES.filter(c => (!q || c.email.toLowerCase().includes(q)) && (!f || c.status===f) && (!hf || c.health===hf));
+  // Phân trang: chỉ vẽ 1 trang (mặc định 50 dòng) — vẽ cả 2k
+  // dòng một lúc làm trình duyệt nặng, và đồng hồ đếm ngược
+  // mỗi giây phải chạm vào từng ô.
+  const totalPages = Math.max(1, Math.ceil(rows.length / PER_PAGE));
+  if (PAGE > totalPages) PAGE = totalPages;
+  const pageRows = rows.slice((PAGE-1)*PER_PAGE, PAGE*PER_PAGE);
+  document.getElementById("pager").innerHTML =
+    "<span class='info'>Hiển thị " + (rows.length? (PAGE-1)*PER_PAGE+1 : 0) + "–" + Math.min(rows.length, PAGE*PER_PAGE) + " / " + rows.length + " tài khoản</span>" +
+    "<select onchange='PER_PAGE=parseInt(this.value,10);PAGE=1;render()'>" +
+    [50,100,200].map(n=>"<option value='"+n+"'"+(n===PER_PAGE?" selected":"")+">"+n+" / trang</option>").join("") + "</select>" +
+    "<button class='ghost small' onclick='PAGE=Math.max(1,PAGE-1);render()'"+(PAGE<=1?" disabled":"")+">‹ Trước</button>" +
+    "<span>Trang "+PAGE+" / "+totalPages+"</span>" +
+    "<button class='ghost small' onclick='PAGE=Math.min("+totalPages+",PAGE+1);render()'"+(PAGE>=totalPages?" disabled":"")+">Sau ›</button>";
   if (!rows.length){ document.getElementById("tableWrap").innerHTML = "<p class='empty'>Không có tài khoản nào khớp.</p>"; return; }
   document.getElementById("tableWrap").innerHTML =
     "<table><tr><th>Email</th><th>Cookie</th><th>Lấy lúc</th><th>Hết hạn</th><th>Còn lại</th><th>Hoạt động</th><th>Hạn</th><th></th></tr>" +
-    rows.map(c=>"<tr><td>"+esc(c.email)+"</td>" +
+    pageRows.map(c=>"<tr><td>"+esc(c.email)+"</td>" +
       "<td class='mono'>"+esc(c.cookie_masked||"(trống)")+" <button class='ghost small' onclick='copyCookie(\""+esc(c.email)+"\",this)'>Sao chép</button></td>" +
       "<td>"+fmtTime(c.cookie_taken_at)+"</td><td>"+fmtTime(c.expires_at)+"</td>" +
       "<td class='count' data-remain='"+(c.remaining_seconds??"")+"'>"+fmtRemain(c.remaining_seconds)+"</td>" +
@@ -739,10 +777,10 @@ async function checkOne(email, btn){
   if (r.error){ alert(r.error); return; }
   loadAll();
 }
-async function checkAll(){
+async function checkAll(scope){
   const btn = document.getElementById("btnCheckAll"); btn.disabled = true;
   const r = await fetch("/api/check-all", {method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({})}).then(r=>r.json());
+    body: JSON.stringify({scope: scope || "all"})}).then(r=>r.json());
   btn.disabled = false;
   if (r.error){ alert(r.error); return; }
   loadJobs();

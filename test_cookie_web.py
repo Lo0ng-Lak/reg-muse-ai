@@ -524,6 +524,102 @@ def test_http_check_all_job():
         httpd.server_close()
 
 
+def test_read_many_rows_complete():
+    # Vòng đọc mới (iter_rows một lượt xuôi) phải đọc đủ mọi
+    # dòng, đúng thứ tự, không bỏ dòng cuối. Vòng cũ dùng
+    # sheet.cell() trong read_only nên với 2k dòng mất hàng phút.
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(list(storage.SPREADSHEET_HEADERS))
+    for i in range(300):
+        ws.append(
+            [
+                _iso(_now()),
+                f"acc{i:03d}@fexpost.com",
+                "s",
+                f"hatch_sess=c{i:03d}",
+                f"INV{i:03d}",
+                "",
+                _iso(_now()),
+            ]
+        )
+    wb.save(storage.SPREADSHEET_FILE)
+    rows = storage._read_cookie_rows()
+    assert len(rows) == 300, len(rows)
+    assert rows[0]["email"] == "acc000@fexpost.com"
+    assert rows[-1]["email"] == "acc299@fexpost.com"
+    assert rows[-1]["cookie"] == "hatch_sess=c299"
+    assert rows[150]["invite"] == "INV150"
+
+
+def test_last_invite_from_sheet_reads_last_code():
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(list(storage.SPREADSHEET_HEADERS))
+    for email, invite in [
+        ("a@fexpost.com", "ABC123"),
+        ("b@fexpost.com", ""),
+        ("c@fexpost.com", "không phải mã"),
+        ("d@fexpost.com", "ZZZ999"),
+    ]:
+        ws.append([_iso(_now()), email, "s", "", invite, "", ""])
+    wb.save(storage.SPREADSHEET_FILE)
+    assert storage._last_invite_from_sheet() == "ZZZ999"
+
+
+def test_http_check_all_expiring_scope():
+    from datetime import timedelta
+
+    for email, age_days in [
+        ("song@fexpost.com", 0),
+        ("saphet@fexpost.com", 6.5),
+        ("hethan@fexpost.com", 8),
+    ]:
+        storage._append_spreadsheet_row(
+            email,
+            "s",
+            cookie=COOKIE_LIVE,
+            cookie_taken_at=_iso(_now() - timedelta(days=age_days)),
+        )
+    orig = cookie_health._default_fetch
+    cookie_health._default_fetch = _fake_fetch(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+    )
+    httpd, url = cookie_web.start_server(port=0)
+    try:
+        status, body = _http(
+            "POST",
+            url + "/api/check-all",
+            {"scope": "expiring"},
+        )
+        assert status == 202, (status, body)
+        job_id = json.loads(body)["job_id"]
+        assert json.loads(body)["count"] == 2, body
+        deadline = time.time() + 15
+        job = None
+        while time.time() < deadline:
+            _, body = _http("GET", url + "/api/jobs")
+            jobs = json.loads(body)["jobs"]
+            job = next(
+                (item for item in jobs if item["id"] == job_id), None
+            )
+            if job and job["status"] == "done":
+                break
+            time.sleep(0.5)
+        assert job is not None and job["status"] == "done", job
+        assert "2 hoạt động" in job["result"], job
+    finally:
+        cookie_health._default_fetch = orig
+        httpd.shutdown()
+        httpd.server_close()
+
+
 TESTS = [
     test_status_alive,
     test_status_expiring_soon,
@@ -549,6 +645,9 @@ TESTS = [
     test_health_cache_roundtrip_and_list_enrichment,
     test_http_check_endpoint,
     test_http_check_all_job,
+    test_read_many_rows_complete,
+    test_last_invite_from_sheet_reads_last_code,
+    test_http_check_all_expiring_scope,
 ]
 
 

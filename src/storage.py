@@ -240,12 +240,21 @@ def _last_invite_from_sheet():
                     break
             if column is None:
                 continue
-            for row in range(sheet.max_row, 1, -1):
-                value = sheet.cell(row=row, column=column).value
+            # Đọc một lượt xuôi bằng iter_rows: ở chế độ
+            # read_only, sheet.cell(row, column) phải quét lại từ
+            # đầu sheet mỗi lần gọi nên với 2k dòng sẽ thành
+            # O(n^2) và mất hàng phút (đo 2026-11-17).
+            code = ""
+            for values in sheet.iter_rows(min_row=2, values_only=True):
+                if not values or column > len(values):
+                    continue
+                value = values[column - 1]
                 if value:
-                    code = str(value).strip().upper()
-                    if re.fullmatch(r"[A-Z0-9]{6}", code):
-                        return code
+                    candidate = str(value).strip().upper()
+                    if re.fullmatch(r"[A-Z0-9]{6}", candidate):
+                        code = candidate
+            if code:
+                return code
         except Exception:
             continue
     return ""
@@ -292,11 +301,16 @@ def _read_cookie_rows():
                 if not email_col:
                     continue
                 rows = []
-                for row_index in range(2, sheet.max_row + 1):
-                    values = [
-                        sheet.cell(row=row_index, column=column).value
-                        for column in range(1, sheet.max_column + 1)
-                    ]
+                # Đọc một lượt xuôi bằng iter_rows: ở chế độ
+                # read_only, sheet.cell(row, column) phải quét lại
+                # từ đầu sheet mỗi lần gọi nên với 2k dòng sẽ
+                # thành O(n^2) và mất hàng phút (đo 2026-11-17:
+                # _read_cookie_rows quá 60 giây với 2000 dòng).
+                for row_index, values in enumerate(
+                    sheet.iter_rows(min_row=2, values_only=True),
+                    start=2,
+                ):
+                    values = values or ()
 
                     def _get(header):
                         column = columns.get(header)
