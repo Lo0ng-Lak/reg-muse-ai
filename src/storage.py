@@ -105,6 +105,15 @@ META_SPREADSHEET_HEADERS = [
     "Link lấy OTP",
 ]
 
+_ACCOUNTS_MIGRATION_LOCK = threading.Lock()
+_ACCOUNTS_MIGRATION_STATE = "idle"  # idle | running | done
+
+
+def _accounts_migration_running():
+    """True khi bước nhập kho lần đầu đang chạy nền."""
+    return _ACCOUNTS_MIGRATION_STATE == "running"
+
+
 def _ensure_accounts_migrated():
     """Nhập một lần từ accounts.xlsx sang kho SQLite.
 
@@ -115,13 +124,35 @@ def _ensure_accounts_migrated():
     accounts.pending.xlsx nhập sau file chính để dòng mới hơn
     trong file chờ thắng. Nhập tay lại thì dùng
     import_accounts_from_excel().
+
+    Bước nhập chạy nền (gọi từ luồng riêng lúc mở server): nếu
+    một lần đọc kho tới trong lúc đang nhập thì hàm này trả về
+    ngay thay vì bắt lần đọc chờ nhập xong (lỗi 2026-11-17:
+    trang web kẹt ở "Đang tải…" trong lúc nhập 2k dòng); lần
+    đọc đó thấy kho như lúc đó, trang tự tải lại sau 30 giây
+    sẽ thấy đủ dữ liệu.
     """
-    if account_store.db_file_exists(ACCOUNTS_DB_FILE):
+    global _ACCOUNTS_MIGRATION_STATE
+    with _ACCOUNTS_MIGRATION_LOCK:
+        if _ACCOUNTS_MIGRATION_STATE != "idle":
+            return
+        if account_store.db_file_exists(ACCOUNTS_DB_FILE):
+            _ACCOUNTS_MIGRATION_STATE = "done"
+            return
+        _ACCOUNTS_MIGRATION_STATE = "running"
+    try:
+        account_store.import_from_excel(SPREADSHEET_FILE, ACCOUNTS_DB_FILE)
+        account_store.import_from_excel(
+            PENDING_SPREADSHEET_FILE, ACCOUNTS_DB_FILE
+        )
+    except Exception:
+        # Nhập lỗi không được phá lần đọc kho: để trạng thái về
+        # idle để lần sau thử lại.
+        with _ACCOUNTS_MIGRATION_LOCK:
+            _ACCOUNTS_MIGRATION_STATE = "idle"
         return
-    account_store.import_from_excel(SPREADSHEET_FILE, ACCOUNTS_DB_FILE)
-    account_store.import_from_excel(
-        PENDING_SPREADSHEET_FILE, ACCOUNTS_DB_FILE
-    )
+    with _ACCOUNTS_MIGRATION_LOCK:
+        _ACCOUNTS_MIGRATION_STATE = "done"
 
 
 def _append_spreadsheet_row(email, mail_password="", cookie="", invite="", otp_link="", cookie_taken_at=""):

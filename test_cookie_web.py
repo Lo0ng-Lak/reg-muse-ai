@@ -70,6 +70,10 @@ def _iso(dt):
 
 
 def reset():
+    # Đặt lại trạng thái nhập kho: mỗi test tự nhập từ fixture
+    # Excel của mình (không thì test đầu tiên nhập xong sẽ làm
+    # các test sau bỏ qua bước nhập).
+    storage._ACCOUNTS_MIGRATION_STATE = "idle"
     for name in (
         "accounts.xlsx",
         "accounts.tmp.xlsx",
@@ -653,7 +657,13 @@ def test_http_import_export_excel():
         status, body = _http("POST", url + "/api/import-excel", {})
         assert status == 200, (status, body)
         data = json.loads(body)
-        assert data["imported"] == 1 and data["total"] == 1, data
+        # Server đã tự nhập file lúc mở (luồng nhập nền) nên
+        # lần nhập tay này có thể đếm là "cập nhật" thay vì
+        # "mới" — quan trọng là dòng đó có trong kho, đúng 1 dòng.
+        assert (
+            data["imported"] + data["updated"] == 1
+            and data["total"] == 1
+        ), data
         status, body = _http("GET", url + "/api/cookies")
         assert json.loads(body)["stats"]["total"] == 1, body
         status, body = _http("GET", url + "/api/export-excel")
@@ -670,6 +680,41 @@ def test_http_import_export_excel():
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def test_dashboard_script_parses_and_handlers_escaped():
+    """Hồi quy lỗi 2026-11-17: nút Sao chép/Kiểm tra/Đăng nhập
+    lại/Xoá trong bảng dùng `\"` trong chuỗi Python nên JS nhận
+    về bị vỡ ngoặc — cả khối <script> không chạy, trang kẹt ở
+    "Đang tải…" mãi dù API vẫn trả dữ liệu. Dấu nháy của tham
+    số email trong onclick phải là thực thể HTML &quot;."""
+    import re as _re
+
+    match = _re.search(
+        r"<script>(.*)</script>", cookie_web.DASHBOARD_HTML, _re.S
+    )
+    assert match, "không tìm thấy khối <script> trong trang"
+    script = match.group(1)
+    # Mẫu vỡ (dấu nháy trần sau tên hàm) không được xuất hiện.
+    assert '""+esc(c.email)' not in script, script
+    for handler in ("copyCookie", "checkOne", "refreshOne", "deleteCookie"):
+        assert (
+            f"{handler}(&quot;\"+esc(c.email)+\"&quot;,this)"
+            in script
+        ), handler
+    # Nếu có node thì kiểm tra cú pháp JS thật; không có thì bỏ qua.
+    import shutil as _shutil
+    import subprocess as _subprocess
+
+    node = _shutil.which("node")
+    if node is None:
+        return
+    tmp_js = TMP / "dashboard.js"
+    tmp_js.write_text(script, encoding="utf-8")
+    result = _subprocess.run(
+        [node, "--check", str(tmp_js)], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
 
 
 TESTS = [
@@ -701,6 +746,7 @@ TESTS = [
     test_last_invite_from_sheet_reads_last_code,
     test_http_check_all_expiring_scope,
     test_http_import_export_excel,
+    test_dashboard_script_parses_and_handlers_escaped,
 ]
 
 
