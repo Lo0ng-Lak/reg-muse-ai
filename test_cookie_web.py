@@ -1345,6 +1345,31 @@ def test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc():
     ), job["log"]
 
 
+def test_check_uu_tien_qua_han_truoc():
+    # Ưu tiên quá hạn kiểm tra trước (yêu cầu 2026-11-17):
+    # diện stale lấy theo thứ tự của kho — quá hạn lên trước,
+    # còn hạn xếp sau. Còn hạn mà sống thì thôi, chết thì lượt
+    # kiểm tra tự đăng nhập lại (test riêng ở trên).
+    storage._append_spreadsheet_row(
+        "conhan@fexpost.com",
+        "s",
+        cookie="AAA-song1-BBB",
+        cookie_taken_at=_iso(_now()),
+    )
+    storage._append_spreadsheet_row(
+        "quahan@fexpost.com",
+        "s",
+        cookie="AAA-chet1-BBB",
+        cookie_taken_at=_iso(_now() - timedelta(days=9)),
+    )
+    cookies = cookie_vault.list_cookies()
+    emails = cookie_web.select_check_emails(cookies, "stale")
+    assert emails == [
+        "quahan@fexpost.com",
+        "conhan@fexpost.com",
+    ], emails
+
+
 def test_check_slice_khong_chet_khi_mot_mail_loi():
     storage._append_spreadsheet_row(
         "loi@fexpost.com",
@@ -1434,6 +1459,7 @@ TESTS = [
     test_check_job_khong_dang_nhap_lai_khi_khong_co_cookie_chet,
     test_tu_dong_dang_nhap_lai_bo_qua_khi_dang_co_luot_refresh,
     test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc,
+    test_check_uu_tien_qua_han_truoc,
     test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
     test_check_slice_khong_chet_khi_mot_mail_loi,
     test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,
