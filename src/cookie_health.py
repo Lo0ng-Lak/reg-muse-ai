@@ -51,13 +51,25 @@ STATUS_UNKNOWN = "khong-ro"
 STATUS_LABELS = {
     STATUS_ALIVE: "Hoạt động",
     STATUS_DEAD: "Die",
-    STATUS_UNKNOWN: "Chưa kiểm tra",
+    STATUS_UNKNOWN: "Chưa xác minh",
 }
 
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
+)
+
+# Không cần ảnh, font, video để biết cookie sống hay chết —
+# chỉ cần chữ trên trang. Tắt những thứ này thì trang nhẹ hơn
+# và hết chờ sớm hơn.
+_HEAVY_RESOURCE_TYPES = ("image", "media", "font")
+_BROWSER_LAUNCH_ARGS = (
+    "--disable-gpu",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--mute-audio",
+    "--blink-settings=imagesEnabled=false",
 )
 
 
@@ -208,6 +220,63 @@ def _is_challenge_page(body):
     )
 
 
+def _chan_tai_nguyen_nang(context):
+    """Chặn ảnh, font, video trên context kiểm tra.
+
+    Context giả trong test không có route() thì bỏ qua.
+    """
+    route = getattr(context, "route", None)
+    if route is None:
+        return
+
+    def _handle(request_route):
+        request = getattr(request_route, "request", None)
+        kind = getattr(request, "resource_type", "")
+        if kind in _HEAVY_RESOURCE_TYPES:
+            request_route.abort()
+        else:
+            request_route.continue_()
+
+    try:
+        route("**/*", _handle)
+    except Exception:
+        pass
+
+
+def _thay_o_chat(page):
+    """True khi ô chat đã có trên trang.
+
+    Hỏi đúng phần tử thay vì kéo cả HTML (page.content() nặng
+    và chậm trên SPA). Trang giả không có get_by_placeholder
+    thì trả None để người gọi đọc HTML như cũ.
+    """
+    probe = getattr(page, "get_by_placeholder", None)
+    if probe is None:
+        return None
+    try:
+        return probe("Ask Meta AI").count() > 0
+    except Exception:
+        return None
+
+
+def _thay_man_dang_nhap(page):
+    """True khi trang đang hiện nút đăng nhập.
+
+    Cùng quy ước _thay_o_chat: không có get_by_text thì trả None.
+    """
+    probe = getattr(page, "get_by_text", None)
+    if probe is None:
+        return None
+    try:
+        if probe("Log in").count() > 0:
+            return True
+        if probe("Sign in").count() > 0:
+            return True
+        return False
+    except Exception:
+        return None
+
+
 def clean_cookie_pairs(pairs):
     """Lọc các cặp cookie trước khi gắn vào trình duyệt: bỏ tên
     rỗng, giá trị chứa ký tự cấm, trùng tên thì giữ cái sau.
@@ -292,7 +361,8 @@ class BrowserChecker:
         try:
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
-                headless=True
+                headless=True,
+                args=list(_BROWSER_LAUNCH_ARGS),
             )
         except Exception as error:
             self.close()
@@ -332,6 +402,7 @@ class BrowserChecker:
         if not any(name == "hatch_sess" for name, _ in pairs):
             return STATUS_DEAD, "không có hatch_sess"
         context = self._browser.new_context()
+        _chan_tai_nguyen_nang(context)
         try:
             try:
                 context.add_cookies(
@@ -377,6 +448,22 @@ class BrowserChecker:
                     url = (page.url or "").lower()
                     if "login" in url or "auth.meta.com" in url:
                         return STATUS_DEAD, "bị đẩy về màn đăng nhập"
+                    chat = _thay_o_chat(page)
+                    if chat is True:
+                        return STATUS_ALIVE, "vào được giao diện chat"
+                    dang_nhap = _thay_man_dang_nhap(page)
+                    if dang_nhap is True:
+                        return STATUS_DEAD, "trang hiện màn đăng nhập"
+                    # Playwright thật: chưa thấy dấu hiệu thì chưa
+                    # kéo cả HTML. Chỉ đọc HTML khi không hỏi
+                    # được phần tử (trang giả) hoặc đã hết giờ
+                    # (để nhận trang challenge).
+                    if (
+                        chat is not None
+                        or dang_nhap is not None
+                    ) and time.monotonic() < deadline:
+                        page.wait_for_timeout(250)
+                        continue
                     try:
                         body = (page.content() or "").lower()
                     except Exception:

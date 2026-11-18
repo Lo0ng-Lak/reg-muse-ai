@@ -12,8 +12,9 @@ các bước tạo tài khoản hay đăng nhập.
 
 Đăng nhập lại chạy ĐÚNG luồng tab Đăng nhập lại của tool
 (coordinator._run_relogin_lane): không proxy (DIRECT), không
-nộp thẻ, không mã mời — chỉ lấy OTP từ hộp thư của đúng mail
-đó rồi lấy cookie mới qua helper --relogin. Cookie mới ghi đè
+nộp thẻ, không mã mời, trình duyệt ẩn — nhiều luồng cùng lúc,
+mỗi luồng một file hộp thư riêng. OTP lấy từ hộp thư của đúng
+mail đó rồi lấy cookie mới qua helper --relogin. Cookie mới ghi đè
 vào dòng hiện có trong kho SQLite (và đồng bộ sang file xuất
 muse_cookies.xlsx của tab Đăng nhập lại nếu đã đặt đường dẫn).
 
@@ -24,8 +25,10 @@ không chỉ "có cookie là được".
 Chỉ dùng thư viện chuẩn của Python — không cần cài thêm gì.
 """
 
+import hashlib
 import json
 import queue
+import secrets
 import threading
 import time
 import webbrowser
@@ -39,6 +42,7 @@ import storage
 import cookie_health
 import cookie_vault
 from coordinator import Coordinator
+from web_console import ConsoleError, WebConsole
 
 
 DEFAULT_PORT = 8765
@@ -49,12 +53,15 @@ MAX_LOG_LINES = 200
 # dập quá nhiều yêu cầu song song từ một IP + máy nặng. Trả về
 # 5, cộng thêm chống kẹt từng mail (CHECK_ONE_TIMEOUT_SECONDS).
 CHECK_WORKERS = 5
+# Số luồng đăng nhập lại song song. Mỗi luồng một trình duyệt
+# ẩn và một file hộp thư riêng (mailbox.txt, mailbox-2.txt, ...),
+# cùng cách tab Đăng nhập lại chia luồng — không giẫm OTP.
+REFRESH_WORKERS = 5
 # Tối đa cho một cookie: yêu cầu nhanh (10 giây) + trình duyệt
 # (mở trang 20 giây + chờ ổn định 20 giây) + ghi cache. Quá hạn
 # này thì trình duyệt đã kẹt — bỏ checker đó, mở cái mới, lượt
 # kiểm tra tiếp tục thay vì đứng cứng cả job.
 CHECK_ONE_TIMEOUT_SECONDS = 75
-MAX_HISTORY_SHOWN = 100
 
 _SERVER = None
 _SERVER_LOCK = threading.Lock()
@@ -64,12 +71,16 @@ def _kiem_tra_mot_mail(email, cookie, checker, fast,
                        timeout_seconds=CHECK_ONE_TIMEOUT_SECONDS):
     """Kiểm tra một cookie, chờ tối đa timeout_seconds.
 
+    Chỉ dùng với checker giả trong test — KHÔNG dùng với
+    Playwright. sync_playwright gắn greenlet vào đúng luồng đã
+    start(); gọi check() từ luồng khác ném 'Cannot switch to a
+    different thread'. Lượt kiểm tra thật đi qua _LuongKiemTra:
+    start/check/close nằm trên một luồng chủ.
+
     Trả về entry {status, checked_at, detail}, hoặc None khi
-    quá hạn — lúc đó checker đã kẹt, người gọi phải bỏ nó và
-    mở cặp kiểm tra mới (không gọi close() trực tiếp vì trình
-    duyệt kẹt thì close cũng kẹt theo). Luồng kẹt cứ chạy nền
-    (daemon): nếu sau đó nó trả kết quả thì kết quả vẫn được
-    ghi vào cache, chỉ là lượt kiểm tra không chờ nó nữa.
+    quá hạn. Luồng kẹt cứ chạy nền (daemon): nếu sau đó nó trả
+    kết quả thì kết quả vẫn được ghi vào cache, chỉ là lượt
+    kiểm tra không chờ nó nữa.
     """
     result = {}
 
@@ -113,23 +124,121 @@ def _mo_cap_kiem_tra(factory, fast_factory):
     return checker, fast, None
 
 
-def _bo_cap_kiem_tra_ket(checker, fast):
-    """Đóng một cặp kiểm tra đã kẹt trong luồng nền: trình duyệt
-    kẹt thì close() cũng kẹt theo, không được để nó giữ chân
-    luồng kiểm tra — tiến trình kẹt cứ để đó, tắt server thì
-    hết (daemon)."""
-    def _dong():
-        try:
-            if fast is not None:
-                fast.close()
-        except Exception:
-            pass
-        try:
-            checker.close()
-        except Exception:
-            pass
+class _LuongKiemTra(threading.Thread):
+    """Một luồng chủ Playwright: chỉ luồng này được start/check/close.
 
-    threading.Thread(target=_dong, daemon=True).start()
+    Playwright sync gắn greenlet vào đúng luồng đã gọi start().
+    Gọi check() hay close() từ luồng khác ném 'Cannot switch to
+    a different thread' (lỗi 2026-11-17, mọi cookie đều fail khi
+    chờ timeout bằng một luồng con). Luồng kiểm tra bên ngoài
+    chỉ gửi lệnh qua hàng đợi và chờ có hạn — không đụng tới
+    trình duyệt.
+    """
+
+    def __init__(self, factory, fast_factory):
+        super().__init__(daemon=True, name="cookie-check-owner")
+        self._factory = factory
+        self._fast_factory = fast_factory
+        self._commands = queue.Queue()
+        self.ready = threading.Event()
+        self.start_error = None
+        self._bo = False
+        self._da_dong = False
+
+    def run(self):
+        checker = None
+        fast = None
+        try:
+            checker, fast, error = _mo_cap_kiem_tra(
+                self._factory, self._fast_factory
+            )
+            if checker is None:
+                self.start_error = error
+                return
+        except Exception as error:
+            self.start_error = str(error)
+            return
+        finally:
+            self.ready.set()
+        try:
+            while True:
+                cmd = self._commands.get()
+                if cmd is None:
+                    break
+                email, cookie, reply = cmd
+                try:
+                    entry = cookie_health.check_and_cache(
+                        email,
+                        cookie,
+                        checker=checker,
+                        fast_checker=fast,
+                    )
+                    reply.put(("ok", entry))
+                except Exception as error:
+                    reply.put(("err", error))
+        finally:
+            if fast is not None:
+                try:
+                    fast.close()
+                except Exception:
+                    pass
+            try:
+                checker.close()
+            except Exception:
+                pass
+
+    def kiem_tra(self, email, cookie, timeout_seconds):
+        """Trả về entry, hoặc None khi quá hạn (luồng chủ đang kẹt)."""
+        reply = queue.Queue(maxsize=1)
+        self._commands.put((email, cookie, reply))
+        try:
+            kind, value = reply.get(timeout=timeout_seconds)
+        except queue.Empty:
+            return None
+        if kind == "err":
+            raise value
+        return value
+
+    def bo(self):
+        """Luồng chủ đang kẹt trong Playwright: không close() từ
+        đây (cùng lỗi greenlet). Gửi lệnh đóng để nó tự đóng sau
+        khi lần gọi kẹt trả về. Nếu lần gọi không bao giờ trả về
+        thì trình duyệt kẹt theo tiến trình (daemon)."""
+        self._bo = True
+        self._commands.put(None)
+
+    def dong(self):
+        if self._bo or self._da_dong:
+            return
+        self._da_dong = True
+        if not self.start_error:
+            self._commands.put(None)
+        self.join(timeout=30)
+
+
+def _bat_luong_kiem_tra(job, factory, fast_factory, lock):
+    """Mở luồng chủ. None khi trình duyệt không mở được (đã ghi log)."""
+    owner = _LuongKiemTra(factory, fast_factory)
+    owner.start()
+    owner.ready.wait()
+    if owner.start_error:
+        with lock:
+            job["log"].append(
+                f"✘ luồng kiểm tra: {owner.start_error}"
+            )
+            job["log"] = job["log"][-MAX_LOG_LINES:]
+        owner.dong()
+        return None
+    return owner
+
+
+def _coordinator_dang_nhap_lai(suffix):
+    """Một luồng đăng nhập lại: trình duyệt ẩn, file hộp thư và
+    proxy riêng theo suffix ("" hoặc "-2", "-3", ...)."""
+    coord = Coordinator()
+    coord._headless = True
+    coord._lane_local.suffix = suffix
+    return coord
 
 
 def _now_iso():
@@ -209,10 +318,10 @@ def _checked_recently(checked_at, hours=CHECK_FRESH_HOURS):
 def select_check_emails(cookies, scope):
     """Chọn mail kiểm tra sống/chết theo diện (dùng cho /api/check-all).
 
-    - "stale": chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 giờ
-      trước — diện tự kiểm tra khi mở trang: lần đầu mở thì kiểm
-      tra hết, lần sau chỉ kiểm tra lại phần đã cũ, không spam
-      meta.ai mỗi lần F5.
+    - "stale": chưa kiểm tra bao giờ, đã kiểm tra quá 24 giờ,
+      hoặc lần trước ra chưa rõ (chưa kết luận sống/chết).
+      Diện tự kiểm tra khi mở trang. Mail đã kết luận sống hoặc
+      die trong 24 giờ thì không kiểm tra lại.
     - "expiring": có cookie và sắp hết/hết hạn theo mốc 7 ngày.
     - "all": tất cả tài khoản có cookie.
     """
@@ -221,7 +330,10 @@ def select_check_emails(cookies, scope):
             item["email"]
             for item in cookies
             if item["has_cookie"]
-            and not _checked_recently(item.get("health_checked_at"))
+            and (
+                item.get("health") == cookie_health.STATUS_UNKNOWN
+                or not _checked_recently(item.get("health_checked_at"))
+            )
         ]
     if scope == "expiring":
         return [
@@ -245,9 +357,14 @@ class CookieWeb:
         # trong tool): đăng nhập lại bị từ chối khi tool đang chạy
         # một lượt khác, để hai luồng không giành mailbox.txt.
         self.desktop_coordinator = desktop_coordinator
+        self.console = WebConsole(coordinator=desktop_coordinator)
+        self.token = ""
         self.jobs = {}
         self.jobs_lock = threading.Lock()
         self.refresh_lock = threading.Lock()
+        # Ghi file xuất Excel và lịch sử cookie: hai luồng cùng
+        # đọc-sửa-ghi một file sẽ mất dòng.
+        self._refresh_io_lock = threading.Lock()
         self._job_counter = 0
 
     # --- Đọc kho ------------------------------------------------
@@ -290,8 +407,8 @@ class CookieWeb:
             return True, "Đã xoá cookie."
         return False, "Không tìm thấy tài khoản này trong kho."
 
-    def history(self):
-        return storage._read_cookie_history(MAX_HISTORY_SHOWN)
+    def history_counts(self):
+        return storage._cookie_history_counts()
 
     def status(self):
         cookies = cookie_vault.list_cookies()
@@ -365,6 +482,10 @@ class CookieWeb:
                 ):
                     return job["id"]
         job = self._new_job(emails, "check")
+        # Lượt người dùng bấm hoặc mở trang: mail chưa rõ được
+        # kiểm tra lại một lần nữa khi lượt này xong. Lượt kiểm
+        # tra lại thì không xếp thêm lượt nữa.
+        job["kiem_tra_lai"] = True
         thread = threading.Thread(
             target=self._run_check_job,
             args=(job,),
@@ -384,27 +505,63 @@ class CookieWeb:
         return [dict(job, log=list(job["log"])) for job in jobs[:20]]
 
     def _run_refresh_job(self, job):
-        """Một job: đăng nhập lại lần lượt từng email."""
-        # Một job đăng nhập lại tại một thời điểm (mailbox.txt và
-        # proxy.txt là tài nguyên chung của tool).
+        """Một job: đăng nhập lại nhiều luồng, mỗi luồng một
+        trình duyệt ẩn.
+
+        Vẫn chỉ một job đăng nhập lại tại một thời điểm. Trong
+        job, mail được chia đều cho REFRESH_WORKERS luồng. Luồng
+        1 dùng mailbox.txt, các luồng sau dùng mailbox-2.txt,
+        mailbox-3.txt, ... để OTP không bị đọc nhầm.
+        """
         with self.refresh_lock:
             job["status"] = "running"
-            done = 0
-            failed = 0
-            for email in job["emails"]:
-                try:
-                    self._refresh_one(job, email)
-                    done += 1
-                except Exception as error:
-                    failed += 1
-                    job["log"].append(f"✘ {email}: {error}")
-                    job["log"] = job["log"][-MAX_LOG_LINES:]
-                job["done"] = done + failed
+            emails = list(job["emails"])
+            workers = max(1, min(REFRESH_WORKERS, len(emails) or 1))
+            counts = {"done": 0, "failed": 0}
+            log_lock = threading.Lock()
+            threads = []
+            for index in range(workers):
+                suffix = "" if index == 0 else f"-{index + 1}"
+                thread = threading.Thread(
+                    target=self._refresh_slice,
+                    args=(
+                        job,
+                        emails[index::workers],
+                        suffix,
+                        counts,
+                        log_lock,
+                    ),
+                    name=f"cookie-refresh-{job['id']}-{index}",
+                    daemon=True,
+                )
+                thread.start()
+                threads.append(thread)
+            for thread in threads:
+                thread.join()
             job["status"] = "done"
             job["result"] = (
-                f"Xong: {done} thành công, {failed} thất bại "
-                f"(trong {len(job['emails'])} tài khoản)."
+                f"Xong: {counts['done']} thành công, "
+                f"{counts['failed']} thất bại "
+                f"(trong {len(emails)} tài khoản)."
             )
+
+    def _refresh_slice(self, job, emails, suffix, counts, log_lock):
+        """Một luồng đăng nhập lại: lần lượt các mail của mình."""
+        for email in emails:
+            try:
+                self._refresh_one(
+                    job, email, suffix=suffix, log_lock=log_lock
+                )
+            except Exception as error:
+                with log_lock:
+                    counts["failed"] += 1
+                    job["done"] = counts["done"] + counts["failed"]
+                    job["log"].append(f"✘ {email}: {error}")
+                    job["log"] = job["log"][-MAX_LOG_LINES:]
+                continue
+            with log_lock:
+                counts["done"] += 1
+                job["done"] = counts["done"] + counts["failed"]
 
     def _run_check_job(self, job, checker_factory=None,
                        fast_factory=None):
@@ -446,6 +603,7 @@ class CookieWeb:
         workers = max(1, min(CHECK_WORKERS, len(emails)))
         counts = {"song": 0, "chet": 0, "khong-ro": 0}
         dead = []
+        unclear = []
         lock = threading.Lock()
         threads = []
         for index in range(workers):
@@ -460,6 +618,8 @@ class CookieWeb:
                     dead,
                     lock,
                     fast_factory,
+                    None,
+                    unclear,
                 ),
                 name=f"cookie-check-{job['id']}-{index}",
                 daemon=True,
@@ -475,6 +635,48 @@ class CookieWeb:
             f"(trong {len(emails)} tài khoản)."
         )
         self._tu_dong_dang_nhap_lai_cookie_chet(job, dead)
+        self._tu_dong_kiem_tra_lai_chua_ro(
+            job, unclear, factory, fast_factory
+        )
+
+    def _tu_dong_kiem_tra_lai_chua_ro(self, job, unclear_emails,
+                                      factory, fast_factory):
+        """Mail chưa kết luận được sống/chết thì kiểm tra lại một
+        lần, không chờ người dùng bấm. Lượt kiểm tra lại không
+        tự xếp thêm lượt nữa — không thì trang không nhận diện
+        được sẽ kiểm tra mãi."""
+        if not job.get("kiem_tra_lai"):
+            return None
+        if not unclear_emails:
+            return None
+        with self.jobs_lock:
+            dang_chay = any(
+                item["kind"] == "check"
+                and item["status"] in ("queued", "running")
+                for item in self.jobs.values()
+            )
+        if dang_chay:
+            job["log"].append(
+                f"↻ {len(unclear_emails)} cookie chưa rõ — đã có "
+                "lượt kiểm tra đang chạy, để lượt đó làm."
+            )
+            job["log"] = job["log"][-MAX_LOG_LINES:]
+            return None
+        retry = self._new_job(list(unclear_emails), "check")
+        retry["kiem_tra_lai"] = False
+        thread = threading.Thread(
+            target=self._run_check_job,
+            args=(retry, factory, fast_factory),
+            name=f"cookie-check-{retry['id']}",
+            daemon=True,
+        )
+        thread.start()
+        job["log"].append(
+            f"↻ {len(unclear_emails)} cookie chưa rõ — tự kiểm tra "
+            f"lại ({retry['id']})."
+        )
+        job["log"] = job["log"][-MAX_LOG_LINES:]
+        return retry["id"]
 
     def _tu_dong_dang_nhap_lai_cookie_chet(self, job, dead_emails):
         """Sau một lượt kiểm tra: cookie nào đã chết thì tự động
@@ -515,35 +717,39 @@ class CookieWeb:
 
     def _check_slice(self, job, emails, cookies_by_email, factory,
                      counts, dead, lock, fast_factory=None,
-                     timeout_seconds=None):
-        """Một luồng kiểm tra: mở trình duyệt riêng, kiểm tra lần
-        lượt từng mail trong phần của mình.
+                     timeout_seconds=None, unclear=None):
+        """Một luồng kiểm tra: một luồng chủ giữ trình duyệt, kiểm
+        tra lần lượt từng mail trong phần của mình.
 
         Mỗi mail thử yêu cầu nhanh trước (một GET, không mở
         trang): kết luận được thì khỏi mở trình duyệt; yêu cầu
         nhanh không mở được (thiếu Playwright...) thì cả luồng
-        chỉ dùng trình duyệt. Một mail kẹt quá
-        CHECK_ONE_TIMEOUT_SECONDS thì bỏ cặp kiểm tra đó, mở
-        cặp mới, kiểm tra tiếp — job không bao giờ đứng cứng
-        (lỗi 2026-11-17: kẹt ở 96/2096). Lỗi ở một mail không
-        được giết cả luồng: ghi lại rồi tính là chưa rõ, kiểm
-        tra tiếp mail sau.
+        chỉ dùng trình duyệt. start/check/close chỉ chạy trên
+        luồng chủ — Playwright sync không cho gọi từ luồng khác
+        (lỗi 'Cannot switch to a different thread'). Luồng này
+        chỉ gửi lệnh và chờ. Một mail kẹt quá
+        CHECK_ONE_TIMEOUT_SECONDS thì bỏ luồng chủ đó, mở luồng
+        chủ mới, kiểm tra tiếp — job không đứng cứng (lỗi
+        2026-11-17: kẹt ở 96/2096). Lỗi ở một mail không được
+        giết cả luồng: ghi lại rồi tính là chưa rõ, kiểm tra
+        tiếp mail sau.
         """
-        checker, fast, error = _mo_cap_kiem_tra(
-            factory, fast_factory
-        )
-        if checker is None:
-            with lock:
-                job["log"].append(f"✘ luồng kiểm tra: {error}")
-                job["log"] = job["log"][-MAX_LOG_LINES:]
-            return
         timeout = (
             CHECK_ONE_TIMEOUT_SECONDS
             if timeout_seconds is None
             else timeout_seconds
         )
+        if unclear is None:
+            unclear = []
+        owner = _bat_luong_kiem_tra(
+            job, factory, fast_factory, lock
+        )
+        if owner is None:
+            with lock:
+                unclear.extend(emails)
+            return
         try:
-            for email in emails:
+            for index, email in enumerate(emails):
                 try:
                     cookie = cookies_by_email.get(
                         (email or "").strip().lower(), ""
@@ -557,10 +763,7 @@ class CookieWeb:
                             job["done"] = sum(counts.values())
                             job["log"] = job["log"][-MAX_LOG_LINES:]
                         continue
-                    entry = _kiem_tra_mot_mail(
-                        email, cookie, checker, fast,
-                        timeout_seconds=timeout,
-                    )
+                    entry = owner.kiem_tra(email, cookie, timeout)
                     if entry is None:
                         with lock:
                             counts["khong-ro"] += 1
@@ -570,18 +773,15 @@ class CookieWeb:
                                 f"{timeout} giây, bỏ qua."
                             )
                             job["log"] = job["log"][-MAX_LOG_LINES:]
-                        _bo_cap_kiem_tra_ket(checker, fast)
-                        checker, fast, error = _mo_cap_kiem_tra(
-                            factory, fast_factory
+                        owner.bo()
+                        with lock:
+                            unclear.append(email)
+                        owner = _bat_luong_kiem_tra(
+                            job, factory, fast_factory, lock
                         )
-                        if checker is None:
+                        if owner is None:
                             with lock:
-                                job["log"].append(
-                                    "✘ luồng kiểm tra: không mở "
-                                    "lại được trình duyệt "
-                                    f"({error}), dừng luồng."
-                                )
-                                job["log"] = job["log"][-MAX_LOG_LINES:]
+                                unclear.extend(emails[index + 1:])
                             return
                         continue
                     status = entry["status"]
@@ -591,11 +791,14 @@ class CookieWeb:
                         job["done"] = sum(counts.values())
                         job["log"].append(f"✘ {email}: {error}")
                         job["log"] = job["log"][-MAX_LOG_LINES:]
+                        unclear.append(email)
                     continue
                 with lock:
                     counts[status] += 1
                     if status == cookie_health.STATUS_DEAD:
                         dead.append(email)
+                    elif status == cookie_health.STATUS_UNKNOWN:
+                        unclear.append(email)
                     job["done"] = sum(counts.values())
                     job["log"].append(
                         f"{email}: "
@@ -604,30 +807,31 @@ class CookieWeb:
                     )
                     job["log"] = job["log"][-MAX_LOG_LINES:]
         finally:
-            if fast is not None:
-                fast.close()
-            checker.close()
+            if owner is not None:
+                owner.dong()
 
     # --- Đăng nhập lại một tài khoản ------------------------------
 
-    def _refresh_one(self, job, email):
+    def _refresh_one(self, job, email, suffix="", log_lock=None):
         """Đăng nhập lại MỘT tài khoản để lấy cookie mới.
 
         Chạy ĐÚNG luồng tab Đăng nhập lại: không proxy (ghi
         DIRECT), không nộp thẻ, không mã mời — helper chạy với
-        --relogin, OTP lấy từ hộp thư của đúng mail đó. Khác tab
-        ở chỗ đích ghi: cookie mới ghi đè vào dòng hiện có trong
-        kho SQLite (cột Cookie + cột Thời gian lấy cookie) để
-        quản lý một chỗ, đồng thời đồng bộ sang file xuất
-        muse_cookies.xlsx của tab (nếu đã đặt đường dẫn) để tab
-        không lấy lại mail này.
+        --relogin và --headless (không mở cửa sổ). OTP lấy từ
+        hộp thư của đúng mail đó. suffix là file riêng của luồng
+        ("" hoặc "-2", "-3", ...). Cookie mới ghi đè vào dòng
+        hiện có trong kho SQLite, đồng thời đồng bộ sang file
+        xuất muse_cookies.xlsx của tab (nếu đã đặt đường dẫn).
         """
+        if log_lock is None:
+            log_lock = threading.Lock()
         log = job["log"]
 
         def say(message):
-            log.append(message)
-            if len(log) > MAX_LOG_LINES:
-                del log[: -MAX_LOG_LINES]
+            with log_lock:
+                log.append(message)
+                if len(log) > MAX_LOG_LINES:
+                    del log[: -MAX_LOG_LINES]
 
         rows = storage._relogin_accounts()
         row = next(
@@ -649,7 +853,7 @@ class CookieWeb:
                 f"{email} thiếu mật khẩu hộp thư — không đọc được "
                 "OTP, bỏ qua."
             )
-        coord = Coordinator()
+        coord = _coordinator_dang_nhap_lai(suffix)
         stop_drain = threading.Event()
 
         def drain_events():
@@ -668,12 +872,12 @@ class CookieWeb:
         try:
             say(
                 f"Bắt đầu đăng nhập lại {email} ({row['provider']}) "
-                "— không proxy, không thẻ."
+                "— không proxy, không thẻ, ẩn trình duyệt."
             )
             try:
-                storage._write_active_proxy("DIRECT", "")
+                storage._write_active_proxy("DIRECT", suffix)
             except OSError as error:
-                say(f"Không ghi được proxy.txt: {error}")
+                say(f"Không ghi được proxy{suffix}.txt: {error}")
             try:
                 storage._write_mailbox(
                     {
@@ -681,7 +885,7 @@ class CookieWeb:
                         "email": row["email"],
                         "secret": row["secret"],
                     },
-                    "",
+                    suffix,
                 )
             except OSError as error:
                 raise RuntimeError(
@@ -718,16 +922,23 @@ class CookieWeb:
                     cookie_taken_at=now,
                 )
             output_path = _relogin_output_path()
-            if output_path:
-                try:
-                    storage._write_relogin_cookie(
-                        output_path, email, cookie
-                    )
-                except RuntimeError as error:
-                    say(f"Không ghi được file xuất {output_path}: {error}")
-            storage._append_cookie_history(
-                "lam-moi", email, "đăng nhập lại thành công"
-            )
+            export_error = None
+            with self._refresh_io_lock:
+                if output_path:
+                    try:
+                        storage._write_relogin_cookie(
+                            output_path, email, cookie
+                        )
+                    except RuntimeError as error:
+                        export_error = error
+                storage._append_cookie_history(
+                    "lam-moi", email, "đăng nhập lại thành công"
+                )
+            if export_error is not None:
+                say(
+                    f"Không ghi được file xuất {output_path}: "
+                    f"{export_error}"
+                )
             say(
                 f"✔ {email}: đã lấy cookie mới lúc {now} — "
                 "còn sống 7 ngày."
@@ -784,14 +995,62 @@ class CookieWebHandler(BaseHTTPRequestHandler):
     def web(self):
         return self.server.web
 
+    def _console_post(self, action):
+        data = self._read_json()
+        console = self.web.console
+        try:
+            if action == "cards":
+                result = console.cards((data.get("action") or "").strip(), data)
+            elif action == "capsolver":
+                result = console.save_capsolver(data.get("key") or "")
+            elif action == "capsolver-balance":
+                result = console.capsolver_balance()
+            elif action == "stop":
+                result = console.stop()
+            elif action == "muse/register":
+                result = console.start_muse_register(data)
+            elif action == "muse/login":
+                result = console.start_muse_login(data)
+            elif action == "meta":
+                result = console.start_meta(data)
+            elif action == "relogin":
+                result = console.start_relogin(data)
+            else:
+                self._send_json({"error": "không có đường này"}, 404)
+                return
+        except ConsoleError as error:
+            self._send_json({"error": str(error)}, 400)
+            return
+        self._send_json(result)
+
     # -- Routes ----------------------------------------------------
+
+    def _session_ok(self):
+        token = getattr(self.web, "token", "")
+        if not token:
+            return True
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "muse_session" and value == token:
+                return True
+        return False
+
+    def _send_login(self):
+        self._send_html(LOGIN_HTML)
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
-            if path in ("/", "/index.html"):
+            if not self._session_ok():
+                self._send_login()
+                return
+            if path in ("/", "/index.html", "/dang-ky"):
                 self._send_html(DASHBOARD_HTML)
+            elif path == "/api/console":
+                since = parse_qs(parsed.query).get("since", ["0"])[0]
+                self._send_json(self.web.console.snapshot(since))
             elif path == "/api/cookies":
                 self._send_json(self.web.list_cookies())
             elif path == "/api/cookie":
@@ -800,7 +1059,7 @@ class CookieWebHandler(BaseHTTPRequestHandler):
             elif path == "/api/jobs":
                 self._send_json({"jobs": self.web.list_jobs()})
             elif path == "/api/history":
-                self._send_json({"history": self.web.history()})
+                self._send_json({"counts": self.web.history_counts()})
             elif path == "/api/status":
                 self._send_json(self.web.status())
             elif path == "/api/export-excel":
@@ -828,6 +1087,25 @@ class CookieWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            if path == "/api/login":
+                data = self._read_json()
+                digest = hashlib.sha256(
+                    (data.get("password") or "").encode("utf-8")
+                ).hexdigest()
+                if not self.web.token or digest != self.web.token:
+                    self._send_json({"error": "sai mật khẩu"}, 401)
+                    return
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Set-Cookie", f"muse_session={digest}; HttpOnly; Path=/; SameSite=Lax")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if not self._session_ok():
+                self._send_json({"error": "cần đăng nhập"}, 401)
+                return
             if path == "/api/refresh":
                 data = self._read_json()
                 email = (data.get("email") or "").strip()
@@ -922,10 +1200,51 @@ class CookieWebHandler(BaseHTTPRequestHandler):
                 source = (data.get("path") or "").strip() or None
                 result = self.web.import_excel(source)
                 self._send_json(result)
+            elif path.startswith("/api/console/"):
+                self._console_post(path[len("/api/console/"):])
             else:
                 self._send_json({"error": "không có đường này"}, 404)
         except Exception as error:
             self._send_json({"error": str(error)}, 500)
+
+
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Muse</title>
+<style>
+body { margin:0; min-height:100vh; display:grid; place-items:center; background:#f3f5f7;
+  font:15px/1.5 "Segoe UI",sans-serif; color:#1c2333; }
+form { width:min(360px,92vw); background:#fff; border:1px solid #e3e8ee; border-radius:16px; padding:28px; }
+h1 { margin:0 0 8px; font-size:22px; }
+p { margin:0 0 16px; color:#667085; }
+input { width:100%; box-sizing:border-box; border:1px solid #e3e8ee; border-radius:9px; padding:10px 12px; font:inherit; }
+button { margin-top:12px; width:100%; background:#1570ef; color:#fff; border:0; border-radius:9px; padding:10px; font:inherit; font-weight:700; }
+.err { color:#b42318; min-height:1.2em; font-size:13px; }
+</style>
+</head>
+<body>
+<form id="f">
+  <h1>Muse</h1>
+  <p>Nhập mật khẩu để vào trang quản lý.</p>
+  <input id="p" type="password" autocomplete="current-password" placeholder="Mật khẩu">
+  <div class="err" id="e"></div>
+  <button type="submit">Vào</button>
+</form>
+<script>
+document.getElementById("f").onsubmit = async function(ev){
+  ev.preventDefault();
+  const r = await fetch("/api/login", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({password: document.getElementById("p").value})});
+  if (r.ok) location.reload();
+  else document.getElementById("e").textContent = "Sai mật khẩu.";
+};
+</script>
+</body>
+</html>
+"""
 
 
 # --- Dashboard (một file HTML, không cần mạng ngoài) --------------
@@ -945,8 +1264,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--text);
   font:15px/1.55 -apple-system,"Segoe UI",Roboto,Arial,sans-serif; }
+#viewRegister { display:none; }
+html.register #viewRegister { display:block; }
+html.register #viewHome { display:none; }
+html.home .nav-main, html.register .nav-small { background:var(--blue); color:#fff; }
+.topbar { position:sticky; top:0; z-index:20; display:flex; align-items:center; gap:18px;
+  height:56px; padding:0 22px; background:#fff; border-bottom:1px solid var(--line); }
+.brand { display:flex; align-items:center; gap:10px; color:var(--text); text-decoration:none; font-weight:700; }
+.mark { width:28px; height:28px; border-radius:8px; background:var(--blue); color:#fff;
+  display:grid; place-items:center; font-size:14px; }
+.topbar nav { display:flex; align-items:center; gap:4px; }
+.topbar nav a { text-decoration:none; color:var(--dim); font-weight:600; border-radius:8px; }
+.nav-main { padding:6px 12px; font-size:14px; }
+.nav-small { padding:3px 8px; font-size:12px; }
+.reg-tabs { display:flex; gap:8px; margin:0 0 14px; }
+.reg-tabs button { background:#fff; color:var(--text); border:1px solid var(--line); }
+.reg-tabs button.on { background:var(--blue); color:#fff; }
+.reg-grid { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(280px,.8fr); gap:14px; }
+.field { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
+.field > span { font-size:12.5px; color:var(--dim); font-weight:600; }
+textarea.block, input.block, select.block { width:100%; background:#fff; color:var(--text);
+  border:1px solid var(--line); border-radius:9px; padding:8px 10px; font:inherit; }
+.rowline { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; }
+.logbox { background:#101828; color:#e6e8eb; border-radius:10px; min-height:200px; max-height:360px;
+  overflow:auto; padding:12px; font:12.5px/1.45 Consolas,Menlo,monospace; white-space:pre-wrap; margin:0; }
+.progress { color:var(--dim); font-size:13px; margin:8px 0 0; }
+@media (max-width:900px) { .reg-grid { grid-template-columns:1fr; } }
 .wrap { max-width:1400px; margin:0 auto; padding:28px 18px 56px; }
-header { margin-bottom:20px; }
+.wrap > header { margin-bottom:20px; }
 h1 { font-size:24px; margin:0 0 4px; letter-spacing:-.2px; }
 .sub { color:var(--dim); margin:0; }
 .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:18px; }
@@ -984,7 +1329,8 @@ tr:last-child td { border-bottom:0; }
 .badge.song { background:var(--green-bg); color:var(--green); }
 .badge.sap-het { background:var(--amber-bg); color:var(--amber); }
 .badge.het-han, .badge.chet { background:var(--red-bg); color:var(--red); }
-.badge.khong-ro { background:var(--gray-bg); color:var(--gray); }
+.badge.khong-ro, .badge.chua-kiem-tra { background:var(--gray-bg); color:var(--gray); }
+.badge.chua-xac-minh { background:var(--amber-bg); color:var(--amber); }
 .badge.checking { background:#eef4ff; color:#175cd3; animation:pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
 .count { font-variant-numeric:tabular-nums; font-weight:700; }
@@ -999,12 +1345,22 @@ tr:last-child td { border-bottom:0; }
 .pager { display:flex; gap:8px; align-items:center; margin-top:14px; flex-wrap:wrap; }
 .pager .info { color:var(--dim); font-size:13px; margin-right:auto; }
 .note { color:var(--dim); font-size:13px; }
+.history-counts { margin:6px 0 0; }
+.history-counts b { font-size:22px; font-variant-numeric:tabular-nums; margin-right:4px; }
+.history-counts span { color:var(--dim); margin:0 12px; }
 .actions { white-space:nowrap; }
 @media (max-width:760px) { .stats { grid-template-columns:repeat(2,1fr); } }
 </style>
 </head>
 <body>
-<div class="wrap">
+<header class="topbar">
+  <a class="brand" href="/"><span class="mark">M</span>Muse</a>
+  <nav>
+    <a class="nav-main" href="/">Quản lý</a>
+    <a class="nav-small" href="/dang-ky">Đăng ký</a>
+  </nav>
+</header>
+<div class="wrap" id="viewHome">
   <header>
     <h1>🍪 Kho Cookie — Muse AI</h1>
     <p class="sub">Mỗi cookie sống <b>7 ngày</b> kể từ lúc lấy. Đăng nhập lại chạy đúng luồng tab Đăng nhập lại: không proxy, không thẻ. Cột Hoạt động kiểm tra thật cookie còn vào được Muse hay đã die.</p>
@@ -1016,16 +1372,17 @@ tr:last-child td { border-bottom:0; }
     <input type="text" id="q" placeholder="Tìm email…" oninput="PAGE=1;render()">
     <select id="f" onchange="PAGE=1;render()">
       <option value="">Tất cả hạn</option>
-      <option value="song">Còn sống</option>
+      <option value="song">Còn hạn</option>
       <option value="sap-het">Sắp hết</option>
       <option value="het-han">Quá hạn</option>
       <option value="khong-ro">Không rõ hạn</option>
     </select>
     <select id="hf" onchange="PAGE=1;render()">
       <option value="">Tất cả hoạt động</option>
-      <option value="song">Đang hoạt động</option>
+      <option value="song">Còn sống</option>
       <option value="chet">Die</option>
-      <option value="khong-ro">Chưa kiểm tra</option>
+      <option value="chua-kiem-tra">Chưa kiểm tra</option>
+      <option value="chua-xac-minh">Chưa xác minh</option>
     </select>
     <button id="btnCheckAll" onclick="checkAll('all')">Kiểm tra tất cả</button>
     <button class="ghost" onclick="checkAll('expiring')">Kiểm tra cookie sắp hết</button>
@@ -1049,16 +1406,87 @@ tr:last-child td { border-bottom:0; }
     <h2>Lịch sử</h2>
     <div id="history"><p class="empty">Đang tải…</p></div>
   </div>
-  <p class="note">Server chỉ chạy trên máy này (127.0.0.1) — không ai khác mở được. Cookie đầy đủ không hiện trong bảng, chỉ lấy qua nút Sao chép. <span id="metaLine"></span></p>
+  <p class="note">Cookie đầy đủ không hiện trong bảng, chỉ lấy qua nút Sao chép. <span id="metaLine"></span></p>
+</div>
+<div class="wrap" id="viewRegister">
+  <header>
+    <h1>Đăng ký</h1>
+    <p class="sub">Muse, Meta và đăng nhập lại dùng đúng kho proxy, thẻ và mail như cửa sổ hiện tại. Trình duyệt chạy trên máy đang mở trang này.</p>
+  </header>
+  <div class="reg-tabs">
+    <button type="button" class="on" id="tabMuse" onclick="showReg('muse')">Muse.ai</button>
+    <button type="button" id="tabMeta" onclick="showReg('meta')">Meta</button>
+    <button type="button" id="tabRelogin" onclick="showReg('relogin')">Đăng nhập lại</button>
+  </div>
+  <div class="reg-grid">
+    <div>
+      <div class="card" id="paneMuse">
+        <h2>Muse.ai</h2>
+        <p class="hint">Đăng nhập Muse từ file Excel Meta, hoặc đăng ký mail tạm. Thẻ trong kho được nộp ở bước thẻ.</p>
+        <div id="cardTable" class="small-dim">Đang tải kho thẻ…</div>
+        <div class="field"><span>Dán thẻ (số|MM/YY|CVV hoặc thêm ZIP|nhãn)</span><textarea class="block" id="cardPaste" rows="3"></textarea></div>
+        <div class="rowline">
+          <button type="button" onclick="importCards()">Nhập kho thẻ</button>
+          <button type="button" class="ghost" onclick="cardAction('auto')">Tự động xoay</button>
+          <input class="block" id="cardLimit" type="number" min="0" max="100" value="0" style="width:80px">
+          <button type="button" class="ghost" onclick="limitAll()">Áp dụng cho tất cả thẻ</button>
+        </div>
+        <div class="field" style="margin-top:12px"><span>Mã mời</span><input class="block" id="invite" type="text"></div>
+        <label class="small-dim"><input type="checkbox" id="singleInvite"> Chỉ dùng 1 mã mời này</label>
+        <div class="field" style="margin-top:12px"><span>File Excel Meta trên máy này</span><input class="block" id="metaExcel" type="text" placeholder="C:\\duong\\dan\\meta_accounts.xlsx"></div>
+        <button type="button" onclick="startMuseLogin()">Đăng nhập Muse</button>
+        <div id="museSetup"></div>
+        <div class="rowline" style="margin-top:8px"><button type="button" onclick="startMuseRegister()">Bắt đầu đăng ký</button></div>
+      </div>
+      <div class="card" id="paneMeta" style="display:none">
+        <h2>Meta</h2>
+        <p class="hint">Đăng ký meta.ai, lưu meta_accounts.xlsx. Không nộp thẻ. Cần CapSolver và ảnh selfie.</p>
+        <div class="field"><span>CapSolver API key</span><input class="block" id="capKey" type="password" placeholder="Đã lưu thì để trống"></div>
+        <div class="rowline">
+          <button type="button" class="ghost" onclick="saveKey()">Lưu key</button>
+          <button type="button" class="ghost" onclick="checkBalance()">Số dư</button>
+          <span class="small-dim" id="capState"></span>
+        </div>
+        <div class="field" style="margin-top:12px"><span>Ảnh selfie trên máy này</span><input class="block" id="selfie" type="text"></div>
+        <div class="field"><span>Temp mail</span><select class="block" id="metaProvider"></select></div>
+        <div id="metaSetup"></div>
+        <button type="button" onclick="startMeta()">Đăng kí Meta</button>
+      </div>
+      <div class="card" id="paneRelogin" style="display:none">
+        <h2>Đăng nhập lại</h2>
+        <p class="hint">Lấy lại cookie của mail đã có trong kho. Không proxy, không thẻ. OTP lấy từ đúng hộp thư.</p>
+        <p id="reloginAccounts" class="small-dim"></p>
+        <div class="field"><span>File xuất cookie trên máy này</span><input class="block" id="reloginOutput" type="text"></div>
+        <div class="rowline">
+          <div class="field"><span>Số mail (0 = tất cả)</span><input class="block" id="reloginCount" type="number" min="0" value="0" style="width:120px"></div>
+          <div class="field"><span>Số luồng</span><input class="block" id="reloginLanes" type="number" min="1" max="10" value="1" style="width:90px"></div>
+          <label class="small-dim"><input type="checkbox" id="reloginHeadless"> Ẩn trình duyệt</label>
+        </div>
+        <button type="button" onclick="startRelogin()">Đăng nhập lại</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="rowline" style="justify-content:space-between">
+        <h2 style="margin:0">Quá trình</h2>
+        <button type="button" class="warn" id="btnStop" onclick="stopRun()" disabled>Dừng</button>
+      </div>
+      <p class="progress" id="runProgress">Sẵn sàng.</p>
+      <pre class="logbox" id="runLog"></pre>
+    </div>
+  </div>
 </div>
 <script>
+document.documentElement.className = location.pathname.indexOf("/dang-ky") === 0 ? "register" : "home";
 let COOKIES = [];
 let PAGE = 1, PER_PAGE = 50;
 let CHECKING = {emails:new Set(), since:""};
-const LABEL = {song:"Còn sống","sap-het":"Sắp hết","het-han":"Quá hạn","khong-ro":"Không rõ"};
-const HEALTH = {song:"Hoạt động","chet":"Die","khong-ro":"Chưa kiểm tra"};
-const ACTION = {"lay":"Lấy cookie","lam-moi":"Đăng nhập lại","xoa":"Xoá cookie"};
-
+const LABEL = {song:"Còn hạn","sap-het":"Sắp hết","het-han":"Quá hạn","khong-ro":"Không rõ"};
+const HEALTH = {song:"Còn sống",chet:"Die","chua-kiem-tra":"Chưa kiểm tra","chua-xac-minh":"Chưa xác minh"};
+function healthKind(c){
+  if (c.health === "song" || c.health === "chet") return c.health;
+  if (!c.has_cookie) return "";
+  return c.health_checked_at ? "chua-xac-minh" : "chua-kiem-tra";
+}
 function fmtRemain(sec){
   if (sec === null || sec === undefined) return "—";
   const neg = sec < 0, a = Math.abs(sec);
@@ -1112,9 +1540,12 @@ async function loadAll(){
   COOKIES = c.cookies || [];
   document.getElementById("stats").innerHTML =
     stat(COOKIES.length,"Tổng tài khoản","") +
-    stat(c.stats.song,"Còn sống","good") + stat(c.stats["sap-het"],"Sắp hết","warn") +
-    stat(c.stats["het-han"],"Quá hạn","bad") + stat(c.stats.chet,"Die","bad") +
+    stat(c.stats["hoat-dong"],"Còn sống","good") +
+    stat(c.stats.chet,"Die","bad") +
     stat(c.stats["chua-kiem-tra"],"Chưa kiểm tra","") +
+    stat(c.stats["chua-xac-minh"],"Chưa xác minh","warn") +
+    stat(c.stats["sap-het"],"Sắp hết","warn") +
+    stat(c.stats["het-han"],"Quá hạn","bad") +
     stat(c.stats["khong-co-cookie"],"Chưa có cookie","");
   if (s) {
     document.getElementById("metaLine").textContent =
@@ -1128,10 +1559,11 @@ async function loadAll(){
     }
   }
   if (h) {
-    document.getElementById("history").innerHTML = (h.history||[]).length
-      ? "<table><tr><th>Thời gian</th><th>Việc</th><th>Email</th><th>Chi tiết</th></tr>" +
-        h.history.map(e=>"<tr><td>"+fmtTime(e.at)+"</td><td>"+(ACTION[e.action]||e.action)+"</td><td>"+esc(e.email)+"</td><td>"+esc(e.detail||"")+"</td></tr>").join("") + "</table>"
-      : "<p class='empty'>Chưa có lịch sử.</p>";
+    const n = h.counts || {};
+    document.getElementById("history").innerHTML =
+      "<p class='history-counts'><b>"+(n["lam-moi"]||0)+"</b> đăng nhập lại"+
+      "<span>·</span><b>"+(n.lay||0)+"</b> lấy cookie"+
+      "<span>·</span><b>"+(n.xoa||0)+"</b> xoá cookie</p>";
   } else {
     document.getElementById("history").innerHTML = "<p class='empty'>Chưa tải được lịch sử.</p>";
   }
@@ -1145,9 +1577,12 @@ function healthCell(c){
   // lúc job bắt đầu: đã có kết quả mới hơn thì hiện kết quả).
   const isChecking = CHECKING.emails.has(c.email) &&
     (!c.health_checked_at || new Date(c.health_checked_at) < new Date(CHECKING.since));
+  const kind = healthKind(c);
   const badge = isChecking
     ? "<span class='badge checking'>Đang kiểm tra…</span>"
-    : "<span class='badge "+(c.health==="chet"?"chet":c.health)+"'>"+HEALTH[c.health]+"</span>";
+    : (kind
+      ? "<span class='badge "+kind+"'>"+HEALTH[kind]+"</span>"
+      : "<span class='badge khong-ro'>Chưa có cookie</span>");
   return "<td><div class='cell-flex'>"+badge+"<button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></div>" +
     (c.health_checked_at? "<div class='small-dim nowrap'>"+fmtTime(c.health_checked_at)+"</div>":"") + "</td>";
 }
@@ -1155,7 +1590,7 @@ function render(){
   const q = document.getElementById("q").value.trim().toLowerCase();
   const f = document.getElementById("f").value;
   const hf = document.getElementById("hf").value;
-  const rows = COOKIES.filter(c => (!q || c.email.toLowerCase().includes(q)) && (!f || c.status===f) && (!hf || c.health===hf));
+  const rows = COOKIES.filter(c => (!q || c.email.toLowerCase().includes(q)) && (!f || c.status===f) && (!hf || healthKind(c)===hf));
   // Phân trang: chỉ vẽ 1 trang (mặc định 50 dòng) — vẽ cả 2k
   // dòng một lúc làm trình duyệt nặng, và đồng hồ đếm ngược
   // mỗi giây phải chạm vào từng ô.
@@ -1217,11 +1652,10 @@ async function checkAll(scope){
   loadJobs();
 }
 async function autoCheck(){
-  // Mở trang là tự kiểm tra, không cần bấm nút: chỉ kiểm tra
-  // diện chưa kiểm tra bao giờ hoặc đã kiểm tra quá 24 giờ
-  // trước; server không xếp job mới khi đang có job kiểm tra
-  // chạy. Lỗi thì thôi — trang vẫn hiện số theo mốc 7 ngày,
-  // lần sau mở lại sẽ tự kiểm tra tiếp.
+  // Mở trang là tự kiểm tra, không cần bấm nút: chưa kiểm tra
+  // bao giờ, đã quá 24 giờ, hoặc lần trước chưa rõ. Mail đã
+  // kết luận sống hoặc die trong 24 giờ thì bỏ qua. Server
+  // không xếp job mới khi đang có job kiểm tra chạy.
   try {
     const r = await fetch("/api/check-all", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({scope:"stale"})}).then(r=>r.json());
@@ -1285,7 +1719,147 @@ async function loadJobs(){
   render();
   if (jobs.some(j=>j.status==="queued"||j.status==="running")) setTimeout(loadJobs, 2000);
 }
-loadAll(); loadJobs(); autoCheck(); setInterval(loadAll, 30000);
+function showReg(name){
+  ["muse","meta","relogin"].forEach(function(id){
+    document.getElementById("pane"+id.charAt(0).toUpperCase()+id.slice(1)).style.display = id===name ? "block" : "none";
+    document.getElementById("tab"+id.charAt(0).toUpperCase()+id.slice(1)).classList.toggle("on", id===name);
+  });
+}
+function setupHtml(prefix){
+  return "<div class='field'><span>Proxy — mỗi dòng host:port:user:pass</span><textarea class='block' id='"+prefix+"Proxies' rows='3'></textarea></div>"+
+    "<div class='field'><span>Proxy lỗi</span><textarea class='block' id='"+prefix+"Bad' rows='2'></textarea></div>"+
+    "<div class='rowline'>"+
+    "<div class='field'><span>Số tài khoản</span><input class='block' id='"+prefix+"Total' type='number' min='0' max='100' value='5' style='width:90px'></div>"+
+    "<div class='field'><span>Tài khoản / proxy</span><input class='block' id='"+prefix+"Per' type='number' min='1' max='100' value='5' style='width:90px'></div>"+
+    "<div class='field'><span>Số luồng</span><input class='block' id='"+prefix+"Lanes' type='number' min='1' max='5' value='1' style='width:80px'></div>"+
+    "<div class='field'><span>Kết nối</span><select class='block' id='"+prefix+"Direct'><option value='proxy'>Proxy</option><option value='direct'>IP máy</option></select></div>"+
+    "<label class='small-dim'><input type='checkbox' id='"+prefix+"Headless'> Ẩn trình duyệt</label></div>";
+}
+function setupBody(prefix){
+  return {
+    proxies: document.getElementById(prefix+"Proxies").value,
+    bad: document.getElementById(prefix+"Bad").value,
+    total: document.getElementById(prefix+"Total").value,
+    per_proxy: document.getElementById(prefix+"Per").value,
+    lanes: document.getElementById(prefix+"Lanes").value,
+    headless: document.getElementById(prefix+"Headless").checked,
+    direct: document.getElementById(prefix+"Direct").value === "direct",
+  };
+}
+async function consolePost(path, body){
+  const r = await fetch("/api/console/"+path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body||{})});
+  const d = await r.json();
+  if (!r.ok || d.error) throw new Error(d.error || ("lỗi HTTP "+r.status));
+  return d;
+}
+function renderCards(cards, active){
+  if (!cards.length){ document.getElementById("cardTable").innerHTML = "<p class='empty'>Chưa có thẻ.</p>"; return; }
+  document.getElementById("cardTable").innerHTML = "<table><tr><th>Tên</th><th>Đã dùng</th><th>Giới hạn</th><th></th></tr>"+
+    cards.map(function(c){
+      const mark = c.id===active ? " · đang chọn" : "";
+      return "<tr><td>"+esc(c.label)+mark+"</td><td>"+c.used+"</td><td>"+(c.limit||"∞")+"</td><td class='actions'>"+
+        "<button type='button' class='ghost small' onclick='cardAction(&quot;select&quot;,&quot;"+esc(c.id)+"&quot;)'>Chọn</button> "+
+        "<button type='button' class='ghost small' onclick='cardAction(&quot;delete&quot;,&quot;"+esc(c.id)+"&quot;)'>Xoá</button></td></tr>";
+    }).join("")+"</table>";
+}
+async function importCards(){
+  const text = document.getElementById("cardPaste").value;
+  try { await consolePost("cards", {action:"import", text:text}); }
+  catch (error){ alert(error.message); return; }
+  document.getElementById("cardPaste").value = "";
+  consoleReady = false; loadConsole();
+}
+async function cardAction(action, id){
+  try { await consolePost("cards", {action:action, id:id||""}); }
+  catch (error){ alert(error.message); return; }
+  consoleReady = false; loadConsole();
+}
+async function limitAll(){
+  try { await consolePost("cards", {action:"limit-all", limit:document.getElementById("cardLimit").value}); }
+  catch (error){ alert(error.message); return; }
+  consoleReady = false; loadConsole();
+}
+async function saveKey(){
+  try { await consolePost("capsolver", {key:document.getElementById("capKey").value}); }
+  catch (error){ alert(error.message); return; }
+  document.getElementById("capKey").value = "";
+  document.getElementById("capState").textContent = "Đã lưu key.";
+}
+async function checkBalance(){
+  try { const d = await consolePost("capsolver-balance", {}); document.getElementById("capState").textContent = "Số dư $"+d.balance; }
+  catch (error){ alert(error.message); }
+}
+async function startMuseRegister(){
+  try { await consolePost("muse/register", Object.assign(setupBody("muse"), {invite:document.getElementById("invite").value, single_invite:document.getElementById("singleInvite").checked})); }
+  catch (error){ alert(error.message); }
+}
+async function startMuseLogin(){
+  const body = Object.assign(setupBody("muse"), {excel:document.getElementById("metaExcel").value});
+  try { await consolePost("muse/login", body); }
+  catch (error){
+    if (error.message.indexOf("Chưa có thẻ") === 0 && confirm(error.message)){
+      body.allow_manual_card = true;
+      try { await consolePost("muse/login", body); } catch (again){ alert(again.message); }
+      return;
+    }
+    alert(error.message);
+  }
+}
+async function startMeta(){
+  try { await consolePost("meta", Object.assign(setupBody("meta"), {selfie:document.getElementById("selfie").value, provider:document.getElementById("metaProvider").value, capsolver:document.getElementById("capKey").value})); }
+  catch (error){ alert(error.message); }
+}
+async function startRelogin(){
+  try { await consolePost("relogin", {output:document.getElementById("reloginOutput").value, count:document.getElementById("reloginCount").value, lanes:document.getElementById("reloginLanes").value, headless:document.getElementById("reloginHeadless").checked}); }
+  catch (error){ alert(error.message); }
+}
+async function stopRun(){
+  try { await consolePost("stop", {}); } catch (error){ alert(error.message); }
+}
+let LOG_AT = 0, consoleReady = false;
+function fillOnce(id, value){
+  const el = document.getElementById(id);
+  if (el && !el.dataset.filled){ el.value = value || ""; el.dataset.filled = "1"; }
+}
+async function loadConsole(){
+  let d;
+  try { d = await fetchJson("/api/console?since="+LOG_AT); }
+  catch (error){ return; }
+  LOG_AT = d.since || LOG_AT;
+  if (d.log && d.log.length){
+    const box = document.getElementById("runLog");
+    box.textContent += (box.textContent ? "\\n" : "") + d.log.join("\\n");
+    box.scrollTop = box.scrollHeight;
+  }
+  document.getElementById("runProgress").textContent = d.progress || "";
+  document.getElementById("btnStop").disabled = !d.running;
+  renderCards(d.cards || [], d.active_card || "");
+  if (!consoleReady){
+    fillOnce("museProxies", d.muse && d.muse.proxies);
+    fillOnce("museBad", d.muse && d.muse.bad);
+    fillOnce("metaProxies", d.meta && d.meta.proxies);
+    fillOnce("metaBad", d.meta && d.meta.bad);
+    fillOnce("metaExcel", d.meta_excel);
+    fillOnce("selfie", d.selfie);
+    fillOnce("invite", d.invite);
+    fillOnce("reloginOutput", d.relogin_output);
+    const sel = document.getElementById("metaProvider");
+    if (sel && !sel.dataset.filled){
+      sel.innerHTML = (d.providers||[]).map(function(p){ return "<option value='"+esc(p.id)+"'>"+esc(p.label)+"</option>"; }).join("");
+      sel.dataset.filled = "1";
+    }
+    document.getElementById("capState").textContent = d.capsolver_set ? "Đã có key." : "Chưa lưu key.";
+    consoleReady = true;
+  }
+  document.getElementById("reloginAccounts").textContent = "Kho: "+(d.accounts||0)+" tài khoản";
+}
+document.getElementById("museSetup").innerHTML = setupHtml("muse");
+document.getElementById("metaSetup").innerHTML = setupHtml("meta");
+if (document.documentElement.className === "home"){
+  loadAll(); loadJobs(); autoCheck(); setInterval(loadAll, 30000);
+} else {
+  loadConsole(); setInterval(loadConsole, 2000);
+}
 </script>
 </body>
 </html>
@@ -1304,12 +1878,39 @@ class _Server(ThreadingHTTPServer):
         super().__init__(address, CookieWebHandler)
 
 
-def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
-    """Mở server quản lý cookie trên 127.0.0.1.
+def _public_token(host, password):
+    """Trang mở ra mạng thì cần mật khẩu. Máy này thì không.
 
-    Trả về (httpd, url). Thử port từ port trở đi tới khi bind được.
+    Có --password thì luôn khóa, kể cả khi nginx chuyển tiếp
+    vào 127.0.0.1.
+    """
+    if password:
+        return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return ""
+    if not password:
+        path = paths.data_file("web_password.txt")
+        try:
+            password = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            password = ""
+        if not password:
+            password = secrets.token_urlsafe(9)
+            path.write_text(password + "\n", encoding="utf-8")
+        print(f"Mật khẩu trang: {password}")
+        print(f"Lưu ở {path}")
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def start_server(port=DEFAULT_PORT, desktop_coordinator=None, host="127.0.0.1", password=None):
+    """Mở server trên host:port.
+
+    Mặc định chỉ nghe 127.0.0.1. Truyền host 0.0.0.0 để máy khác
+    mở được. Trả về (httpd, url). Thử port từ port trở đi tới
+    khi bind được. port 0 để hệ điều hành chọn cổng trống.
     """
     web = CookieWeb(desktop_coordinator=desktop_coordinator)
+    web.token = _public_token(host, password)
     # Nhập kho lần đầu chạy nền: lần đầu mở kho, chuyển 2k dòng
     # từ Excel sang SQLite có thể mất một lúc — trang không được
     # chờ nhập xong mới hiện (lỗi 2026-11-17: trang kẹt ở
@@ -1319,9 +1920,10 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
         name="cookie-migrate", daemon=True,
     ).start()
     last_error = None
-    for candidate in range(port, port + 10):
+    candidates = [0] if port == 0 else range(port, port + 10)
+    for candidate in candidates:
         try:
-            httpd = _Server(("127.0.0.1", candidate), web)
+            httpd = _Server((host, candidate), web)
             break
         except OSError as error:
             last_error = error
@@ -1332,7 +1934,8 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None):
         target=httpd.serve_forever, name="cookie-web", daemon=True
     )
     thread.start()
-    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+    shown_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    return httpd, f"http://{shown_host}:{httpd.server_address[1]}"
 
 
 def open_cookie_web(desktop_coordinator=None):
@@ -1363,10 +1966,20 @@ def main():
     )
     parser.add_argument(
         "--port", type=int, default=DEFAULT_PORT,
-        help="cổng nghe trên 127.0.0.1 (mặc định 8765)",
+        help="cổng nghe (mặc định 8765)",
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="địa chỉ nghe, 0.0.0.0 để mở ra mạng",
+    )
+    parser.add_argument(
+        "--password", default="",
+        help="mật khẩu khi mở ra mạng (bỏ trống thì tự tạo)",
     )
     args = parser.parse_args()
-    httpd, url = start_server(port=args.port)
+    httpd, url = start_server(
+        port=args.port, host=args.host, password=args.password or None
+    )
     print(f"Kho Cookie đang chạy tại {url}")
     print("Mở trình duyệt để quản lý — nhấn Ctrl+C để dừng.")
     webbrowser.open(url)

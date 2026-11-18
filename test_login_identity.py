@@ -94,6 +94,12 @@ class _FakeElement:
 
     def click(self, timeout=None):
         self.page.clicked.append(self.name or self.kind)
+        if (self.name or "") == "Use a credit card":
+            self.page.state = "card"
+            self.page.body_text = (
+                "Enter your card number to continue with Muse."
+            )
+            return
         # Bấm nút avatar → mở menu tài khoản.
         if self.kind == "button" and self.name in ("Account", "Profile"):
             self.page.menu_open = True
@@ -140,6 +146,29 @@ class _FakeElement:
                 )
                 self.page.buttons.append(
                     _FakeElement(self.page, "button", name="Learn more")
+                )
+                return
+            if (
+                getattr(self.page, "try_again_on_confirm", False)
+                and self.page.state == "card"
+            ):
+                self.page.body_text = "Something went wrong\nTry again"
+                self.page.buttons.append(
+                    _FakeElement(self.page, "button", name="Try again")
+                )
+                return
+            if (
+                getattr(self.page, "waitlist_on_confirm", False)
+                and self.page.state == "card"
+            ):
+                self.page.body_text = (
+                    "Join the waitlist for Muse\n"
+                    "Muse isn't available in your country or region yet. "
+                    "We'll let you know when it's available to you.\n"
+                    "Join waitlist"
+                )
+                self.page.buttons.append(
+                    _FakeElement(self.page, "button", name="Join waitlist")
                 )
                 return
             if (
@@ -1144,6 +1173,44 @@ def test_link_continue_to_genuine_chooser_still_stops():
         "chỉ bấm Continue 1 lần ở màn liên kết khớp email, "
         f"không bấm gì trên màn chọn sai: {page.clicked}"
     )
+def test_age_chooser_bam_use_credit_card_roi_nhap_the():
+    # Đăng nhập Muse từ Meta: màn "Confirm your age" đứng trước
+    # form thẻ. Bấm Use a credit card, không bấm Upload ID /
+    # Instagram / Facebook, rồi điền thẻ.
+    storage._import_bulk_cards("4333333333333333|01/30|789|10001|Thẻ tuổi")
+    entry = next(
+        item
+        for item in storage._load_vault()
+        if item["label"] == "Thẻ tuổi"
+    )
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "age-chooser"
+    page.body_text = (
+        "Confirm your age\n"
+        "Choose a secure way to confirm your age.\n"
+        "Upload ID photos\n"
+        "Use a credit card\n"
+        "You can also connect your Instagram or Facebook "
+        "profile to confirm your age.\n"
+        "Add an Instagram profile\n"
+        "Add a Facebook profile"
+    )
+    page.buttons.append(
+        _FakeElement(page, "button", name="Use a credit card")
+    )
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    assert browser_helper._age_method_chooser_visible(page)
+    assert (
+        browser_helper._wait_for_profile_or_card(page, INTENDED, 3000)
+        == "card"
+    )
+    assert page.clicked == ["Use a credit card"], page.clicked
+    assert browser_helper._do_card_step(page, entry["id"]) is True
+    assert "Upload ID photos" not in page.clicked
+    assert "Add a Facebook profile" not in page.clicked
+    assert page.fields["card number"].value == "4333333333333333"
+
+
 def test_relogin_waitlist_drops_account_without_clicking():
     # muse.ai/access "Join the waitlist": bỏ mail, không bấm nút.
     page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/access")
@@ -1207,6 +1274,72 @@ def test_already_full_card_is_not_typed_again():
     assert "4111111111111111" not in page.filled, page.filled
     assert "4222222222222222" in page.filled, page.filled
     assert "Confirm" in page.clicked, page.clicked
+
+
+def _card_page_that_switches(flag):
+    storage._import_bulk_cards("4111111111111111|12/28|123|10001|Thẻ A")
+    entry = next(
+        item for item in storage._load_vault() if item["label"] == "Thẻ A"
+    )
+    page = _FakePage(_FakeContext(_FakeBrowser()), "https://muse.ai/")
+    page.state = "card"
+    page.body_text = "Enter your card number to continue with Muse."
+    page.buttons.append(_FakeElement(page, "button", name="Confirm"))
+    setattr(page, flag, True)
+    return page, entry
+
+
+def test_try_again_dialog_drops_proxy_without_counting_card():
+    # Hộp "Something went wrong" + Try again: bỏ proxy, không
+    # bấm Try again, không tăng số lần dùng thẻ.
+    page, entry = _card_page_that_switches("try_again_on_confirm")
+    used_before = entry["used"]
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._do_card_step(page, entry["id"])
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải bỏ proxy khi hiện Try again")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("PROXY_BURN") for line in captured), captured
+    assert not any(line.startswith("CARD_TROUBLE") for line in captured)
+    assert "Try again" not in page.clicked, page.clicked
+    assert "không tính lượt" in message
+    saved = next(
+        item for item in storage._load_vault() if item["id"] == entry["id"]
+    )
+    assert saved["used"] == used_before, saved
+
+
+def test_waitlist_after_card_drops_proxy_without_counting_card():
+    # "Join the waitlist" sau khi điền thẻ: bỏ proxy, không bấm
+    # Join waitlist, không tăng số lần dùng thẻ.
+    page, entry = _card_page_that_switches("waitlist_on_confirm")
+    used_before = entry["used"]
+    captured = []
+    orig = browser_helper._status
+    browser_helper._status = captured.append
+    try:
+        try:
+            browser_helper._do_card_step(page, entry["id"])
+        except RuntimeError as error:
+            message = str(error)
+        else:
+            raise AssertionError("phải bỏ proxy khi hiện waitlist")
+    finally:
+        browser_helper._status = orig
+    assert any(line.startswith("WAITLIST:") for line in captured), captured
+    assert "Join waitlist" not in page.clicked, page.clicked
+    assert "không tính lượt" in message
+    saved = next(
+        item for item in storage._load_vault() if item["id"] == entry["id"]
+    )
+    assert saved["used"] == used_before, saved
 
 
 def test_card_trouble_dialog_drops_proxy():
@@ -1317,8 +1450,11 @@ TESTS = [
     test_link_continue_slow_navigation_clicks_once_to_card,
     test_link_continue_slow_navigation_to_chat_ui_logged_in,
     test_link_continue_to_genuine_chooser_still_stops,
+    test_age_chooser_bam_use_credit_card_roi_nhap_the,
     test_relogin_waitlist_drops_account_without_clicking,
     test_too_many_attempts_reloads_and_fills_same_card,
+    test_try_again_dialog_drops_proxy_without_counting_card,
+    test_waitlist_after_card_drops_proxy_without_counting_card,
     test_card_trouble_dialog_drops_proxy,
     test_already_full_card_is_not_typed_again,
     test_card_blocked_dialog_marks_full_and_fills_next,

@@ -197,6 +197,11 @@ def _classify_after_profile(page, timeout_seconds=45):
             return "error"
         if any(marker in text for marker in waitlist_markers):
             return "waitlist"
+        if _age_method_chooser_visible(page, text):
+            # "Confirm your age" với nút Use a credit card, chưa
+            # có form thẻ. Bấm thẻ rồi mới coi là bước nhập thẻ.
+            if _open_card_form_from_age_chooser(page):
+                return "card"
         if any(marker in text for marker in card_markers):
             return "card"
         page.wait_for_timeout(1200)
@@ -333,6 +338,11 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
             text = ""
         if "having trouble completing your request" in text:
             return "proxy"
+        if _try_again_failure(text):
+            # Hộp "Something went wrong" + nút Try again: lỗi
+            # proxy, không phải thẻ bị từ chối. Không bấm Try
+            # again, không tính lượt dùng thẻ.
+            return "try-again"
         if (
             "too many attempts" in text
             or "too many failed attempts" in text
@@ -345,6 +355,13 @@ def _wait_for_card_step_done(page, timeout_seconds=240):
             return "rejected"
         if any(marker in text for marker in waitlist_markers):
             return "waitlist"
+        if _age_method_chooser_visible(page, text):
+            # Chưa vào form thẻ: bấm Use a credit card, không
+            # được tính là bước thẻ đã xong.
+            clear_polls = 0
+            _click_use_credit_card(page)
+            page.wait_for_timeout(500)
+            continue
         if text and not any(marker in text for marker in card_markers):
             clear_polls += 1
             if clear_polls >= 2:
@@ -373,6 +390,78 @@ def _card_form_visible(page):
     return any(marker in text for marker in _CARD_FORM_MARKERS)
 
 
+def _age_method_chooser_visible(page, body_text=None):
+    """Màn chọn cách xác nhận tuổi, đứng trước form nhập thẻ.
+
+    "Confirm your age" với lựa chọn Use a credit card / Upload ID
+    / Instagram / Facebook. Chưa có ô số thẻ. Form thẻ thật cũng
+    có tiêu đề Confirm your age nhưng đã có "card number" — màn
+    đó không phải màn chọn.
+    """
+    if body_text is None:
+        try:
+            body_text = page.locator("body").inner_text(timeout=2000)
+        except Exception:
+            return False
+    text = (body_text or "").lower()
+    if "confirm your age" not in text or "use a credit card" not in text:
+        return False
+    if any(marker in text for marker in _CARD_FORM_MARKERS):
+        return False
+    return True
+
+
+def _click_use_credit_card(page):
+    """Bấm đúng Use a credit card. Không bấm Upload ID, Instagram,
+    Facebook. Trả True khi đã bấm."""
+    for getter in (
+        lambda: page.get_by_role(
+            "button", name="Use a credit card", exact=False
+        ),
+        lambda: page.get_by_text("Use a credit card", exact=False),
+    ):
+        try:
+            target = _first_visible(getter())
+        except Exception:
+            target = None
+        if target is None:
+            continue
+        try:
+            target.click(timeout=5000)
+        except Exception as error:
+            _status(
+                "Không bấm được Use a credit card: "
+                + _short_error(error)
+            )
+            return False
+        _status(
+            "Màn xác nhận tuổi — đã bấm Use a credit card, "
+            "tiếp theo nhập thẻ."
+        )
+        return True
+    return False
+
+
+def _open_card_form_from_age_chooser(page, timeout_seconds=20):
+    """Nếu đang ở màn chọn cách xác nhận tuổi thì bấm Use a
+    credit card và chờ form thẻ. Không có màn đó thì không bấm
+    gì. Trả True khi form thẻ đang hiện."""
+    if _card_form_visible(page):
+        return True
+    if not _age_method_chooser_visible(page):
+        return False
+    if not _click_use_credit_card(page):
+        return False
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            return False
+        if _card_form_visible(page):
+            return True
+        page.wait_for_timeout(400)
+    return _card_form_visible(page)
+
+
 def _do_card_step(page, card_id):
     """Bước nhập thẻ sau khi đã đăng nhập (chế độ tự động).
 
@@ -399,6 +488,12 @@ def _do_card_step(page, card_id):
             _status(f"CARD_SWITCH: {nxt}")
             current = nxt
             continue
+        if _age_method_chooser_visible(page):
+            if not _open_card_form_from_age_chooser(page):
+                raise RuntimeError(
+                    "Có màn xác nhận tuổi nhưng không mở được "
+                    "form thẻ sau khi bấm Use a credit card."
+                )
         card = _saved_card(current) if current else None
         auto_filled = False
         if card:
@@ -417,6 +512,23 @@ def _do_card_step(page, card_id):
                 "thẻ được chấp nhận thì mới lưu tài khoản."
             )
             card_outcome = _wait_for_card_step_done(page)
+        if card_outcome == "waitlist":
+            _status(
+                "WAITLIST: Muse hiện Join the waitlist — bỏ proxy, "
+                "không tính lượt dùng thẻ, không bấm Join waitlist."
+            )
+            raise RuntimeError(
+                "Join the waitlist — bỏ proxy, không tính lượt thẻ."
+            )
+        if card_outcome == "try-again":
+            _status(
+                "PROXY_BURN: Muse báo Something went wrong "
+                "(Try again) — bỏ proxy, không tính lượt dùng thẻ, "
+                "không bấm Try again."
+            )
+            raise RuntimeError(
+                "Something went wrong — bỏ proxy, không tính lượt thẻ."
+            )
         if card_outcome == "proxy":
             _dismiss_card_blocked_dialog(page)
             if current:
@@ -529,6 +641,9 @@ def _do_card_step_if_present(page, card_id, settle_seconds=10):
                 return False
         except Exception:
             pass
+        if _age_method_chooser_visible(page):
+            if _open_card_form_from_age_chooser(page):
+                return _do_card_step(page, card_id)
         if _card_form_visible(page):
             return _do_card_step(page, card_id)
         page.wait_for_timeout(1000)
@@ -982,6 +1097,7 @@ def _confirm_final_step(page, timeout_seconds=30, email=None,
         if page.is_closed():
             return
         _reject_facebook_proxy(page)
+        _abort_if_region_or_try_again(page)
         if _disclosure_gate(page):
             # Trang "A few things to know" không nằm trong hạn 30
             # giây của bước này: bấm Get started cho tới khi rời
@@ -1082,6 +1198,7 @@ def _wait_for_muse_interface(page, timeout_seconds=30):
     while time.monotonic() < deadline:
         if page.is_closed():
             return
+        _abort_if_region_or_try_again(page)
         if _in_muse_interface(page):
             break
         page.wait_for_timeout(1000)
@@ -3384,6 +3501,11 @@ def _wait_for_profile_or_card(page, email=None, timeout_ms=15000,
             pass
         if _profile_form_present(page):
             return "profile"
+        if _age_method_chooser_visible(page, body):
+            if _open_card_form_from_age_chooser(page):
+                return "card"
+            page.wait_for_timeout(500)
+            continue
         if any(marker in body for marker in card_markers):
             return "card"
         # Đã vào thẳng giao diện chat thì không còn form thẻ.
@@ -3717,6 +3839,71 @@ def _reject_facebook_proxy(page):
     )
 
 
+def _try_again_failure(text):
+    """Hộp thoại chỉ có 'Something went wrong' và nút Try again.
+
+    Khác hộp 'We're having trouble completing your request'
+    (hộp đó có nút OK và được xử lý riêng).
+    """
+    lowered = (
+        (text or "")
+        .lower()
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+    )
+    if "something went wrong" not in lowered:
+        return False
+    if "try again" not in lowered:
+        return False
+    if "having trouble completing your request" in lowered:
+        return False
+    return True
+
+
+def _abort_if_region_or_try_again(page, body_text=None):
+    """Gặp waitlist hoặc hộp Try again thì bỏ proxy ngay.
+
+    Không bấm nút trên hai màn đó. Không tính lượt dùng thẻ —
+    người gọi phải dừng trước khi ghi tài khoản thành công.
+    """
+    if body_text is None:
+        try:
+            body_text = page.locator("body").inner_text(timeout=2000)
+        except Exception:
+            return
+    if _muse_waitlist_visible(page) or _region_waitlist_text(body_text):
+        _status(
+            "WAITLIST: Muse hiện Join the waitlist — bỏ proxy, "
+            "không tính lượt dùng thẻ, không bấm Join waitlist."
+        )
+        raise RuntimeError(
+            "Join the waitlist — bỏ proxy, không tính lượt thẻ."
+        )
+    if _try_again_failure(body_text):
+        _status(
+            "PROXY_BURN: Muse báo Something went wrong (Try again) "
+            "— bỏ proxy, không tính lượt dùng thẻ, không bấm Try again."
+        )
+        raise RuntimeError(
+            "Something went wrong — bỏ proxy, không tính lượt thẻ."
+        )
+
+
+def _region_waitlist_text(text):
+    lowered = (
+        (text or "")
+        .lower()
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+    )
+    return (
+        "join the waitlist" in lowered
+        or "join waitlist" in lowered
+        or "isn't available in your country" in lowered
+        or "available in your country" in lowered
+    )
+
+
 def _muse_waitlist_visible(page):
     """Trang "Join the waitlist" (muse.ai/access): Muse không
     mở ở khu vực của IP này."""
@@ -3749,11 +3936,11 @@ def _raise_if_muse_waitlist(page):
     if not _muse_waitlist_visible(page):
         return
     _status(
-        "Muse hiện Join the waitlist — khu vực này không đăng nhập "
-        "được, bỏ tài khoản này, không bấm Join waitlist."
+        "WAITLIST: Muse hiện Join the waitlist — bỏ proxy, "
+        "không tính lượt dùng thẻ, không bấm Join waitlist."
     )
     raise RuntimeError(
-        "Join the waitlist — bỏ tài khoản này."
+        "Join the waitlist — bỏ proxy, không tính lượt thẻ."
     )
 
 

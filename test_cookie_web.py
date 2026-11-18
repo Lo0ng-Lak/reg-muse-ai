@@ -289,6 +289,11 @@ def test_history_append_read():
     assert len(history) == 2, history
     assert history[0]["action"] == "lam-moi"  # mới nhất trước
     assert history[1]["action"] == "lay"
+    storage._append_cookie_history("lam-moi", "b@fexpost.com", "lấy lại")
+    storage._append_cookie_history("xoa", "a@fexpost.com", "xoá cookie")
+    assert storage._cookie_history_counts() == {
+        "lay": 1, "lam-moi": 2, "xoa": 1,
+    }
 
 
 # --- HTTP ------------------------------------------------------------
@@ -701,6 +706,29 @@ def test_http_import_export_excel():
         httpd.server_close()
 
 
+def test_register_page_and_console_refuse_empty_proxy():
+    httpd, url = cookie_web.start_server(port=0)
+    try:
+        status, body = _http("GET", url + "/dang-ky")
+        page = body.decode("utf-8")
+        assert status == 200, status
+        assert 'id="viewRegister"' in page
+        assert "Quản lý" in page and "Đăng ký" in page
+        status, body = _http("GET", url + "/api/console")
+        data = json.loads(body)
+        assert data["running"] is False
+        assert isinstance(data["cards"], list)
+        status, body = _http(
+            "POST", url + "/api/console/muse/register",
+            {"total": 1, "proxies": "", "direct": False},
+        )
+        assert status == 400, body
+        assert "proxy" in body.decode("utf-8").lower()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_dashboard_script_parses_and_handlers_escaped():
     """Hồi quy lỗi 2026-11-17: nút Sao chép/Kiểm tra/Đăng nhập
     lại/Xoá trong bảng dùng `\"` trong chuỗi Python nên JS nhận
@@ -776,10 +804,11 @@ def test_stats_counts_unchecked_separately_from_dead():
     )
     stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
     assert stats["chua-kiem-tra"] == 1, stats
+    assert stats["chua-xac-minh"] == 0, stats
     assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
-    # Kiểm tra rồi nhưng chưa rõ (lỗi mạng, như 403 hồi
-    # 2026-11-17) vẫn phải tính là chưa kiểm tra — số này
-    # chỉ về 0 khi đã có kết luận sống/chết thật.
+    # Kiểm tra rồi nhưng chưa rõ (lỗi mạng, như 403) là
+    # chưa xác minh — không đếm vào còn sống, cũng không
+    # đếm vào chưa kiểm tra.
     def _boom(url, cookie, timeout):
         raise urllib.error.URLError("403")
 
@@ -787,7 +816,8 @@ def test_stats_counts_unchecked_separately_from_dead():
         "c@fexpost.com", COOKIE_LIVE, fetcher=_boom
     )
     stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
-    assert stats["chua-kiem-tra"] == 1, stats
+    assert stats["chua-kiem-tra"] == 0, stats
+    assert stats["chua-xac-minh"] == 1, stats
     assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
 
 
@@ -827,11 +857,14 @@ def test_select_check_emails_scopes():
         {"email": "fresh@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh},
         {"email": "het@x.com", "status": "het-han", "has_cookie": True, "health_checked_at": fresh},
         {"email": "nocookie@x.com", "status": "khong-ro", "has_cookie": False, "health_checked_at": ""},
+        {"email": "chua@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh, "health": "khong-ro"},
+        {"email": "ro@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh, "health": "song"},
     ]
-    # stale: chưa kiểm tra bao giờ hoặc quá 24 giờ trước.
+    # stale: chưa kiểm tra, quá 24 giờ, hoặc vừa kiểm tra nhưng
+    # chưa rõ. Đã kết luận sống trong 24 giờ thì thôi.
     assert cookie_web.select_check_emails(
         cookies, "stale"
-    ) == ["never@x.com", "old@x.com"]
+    ) == ["never@x.com", "old@x.com", "chua@x.com"]
     assert cookie_web.select_check_emails(
         cookies, "expiring"
     ) == ["old@x.com", "het@x.com"]
@@ -840,6 +873,8 @@ def test_select_check_emails_scopes():
         "old@x.com",
         "fresh@x.com",
         "het@x.com",
+        "chua@x.com",
+        "ro@x.com",
     ]
 
 
@@ -998,6 +1033,63 @@ def _browser_checker_with(page, timeout_ms=None):
     )
     checker.start()
     return checker, browser
+
+
+def test_browser_checker_chan_anh_font_video():
+    # Ảnh, font, video không giúp phân biệt sống/chết — chặn để
+    # trang nhẹ hơn. Script và tài liệu vẫn được tải.
+    page = _FakePage(
+        "https://www.meta.ai/",
+        '<html><body><textarea placeholder="Ask Meta AI">'
+        "</textarea></body></html>",
+    )
+    seen = {}
+
+    class _Request:
+        def __init__(self, kind):
+            self.resource_type = kind
+
+    class _Route:
+        def __init__(self, kind):
+            self.request = _Request(kind)
+            self.aborted = False
+            self.continued = False
+
+        def abort(self):
+            self.aborted = True
+
+        def continue_(self):
+            self.continued = True
+
+    class _Context(_FakeContext):
+        def route(self, pattern, handler):
+            seen["pattern"] = pattern
+            seen["handler"] = handler
+
+    class _Browser(_FakeBrowser):
+        def new_context(self):
+            ctx = _Context(self.page)
+            self.contexts.append(ctx)
+            return ctx
+
+    browser = _Browser(page)
+    checker = cookie_health.BrowserChecker(launcher=lambda: browser)
+    checker.start()
+    status, _detail = checker.check(COOKIE_LIVE)
+    assert status == "song", status
+    assert seen["pattern"] == "**/*"
+    image = _Route("image")
+    script = _Route("script")
+    seen["handler"](image)
+    seen["handler"](script)
+    assert image.aborted and not image.continued
+    assert script.continued and not script.aborted
+    font = _Route("font")
+    video = _Route("media")
+    seen["handler"](font)
+    seen["handler"](video)
+    assert font.aborted and video.aborted
+    checker.close()
 
 
 def test_browser_checker_song_khi_vao_duoc_chat():
@@ -1533,6 +1625,42 @@ def test_kiem_tra_mot_mail_tra_ve_none_khi_ket():
     time.sleep(0.5)
 
 
+def test_check_slice_dung_cung_luong_da_mo_trinh_duyet():
+    # Playwright sync gắn greenlet vào luồng đã start(). check()
+    # và close() phải chạy trên đúng luồng đó — gọi từ luồng chờ
+    # timeout sẽ ném 'Cannot switch to a different thread'.
+    seen = {}
+
+    class _GhiLuong:
+        def start(self):
+            seen["start"] = threading.get_ident()
+
+        def check(self, cookie):
+            seen["check"] = threading.get_ident()
+            return "song", "vào được giao diện chat"
+
+        def close(self):
+            seen["close"] = threading.get_ident()
+
+    web = cookie_web.CookieWeb()
+    job = web._new_job(["a@fexpost.com"], "check")
+    counts = {"song": 0, "chet": 0, "khong-ro": 0}
+    web._check_slice(
+        job,
+        ["a@fexpost.com"],
+        {"a@fexpost.com": COOKIE_LIVE},
+        lambda: _GhiLuong(),
+        counts,
+        [],
+        threading.Lock(),
+        fast_factory=None,
+        timeout_seconds=5,
+    )
+    assert counts["song"] == 1, counts
+    assert seen["start"] == seen["check"] == seen["close"], seen
+    assert seen["start"] != threading.get_ident(), seen
+
+
 def test_check_slice_thay_cap_moi_khi_mot_mail_ket():
     # Mail đầu kẹt (check ngủ 1.2 giây), mail sau vẫn được kiểm
     # tra bằng cặp mới — job không đứng cứng (lỗi 2026-11-17:
@@ -1588,6 +1716,72 @@ def test_check_slice_thay_cap_moi_khi_mot_mail_ket():
     time.sleep(0.5)
 
 
+def test_check_job_tu_kiem_tra_lai_mail_chua_ro():
+    # Mail chưa rõ được kiểm tra lại một lần khi lượt xong.
+    # Lượt kiểm tra lại không tự xếp thêm lượt nữa.
+    storage._append_spreadsheet_row(
+        "chua@fexpost.com",
+        "s",
+        cookie="hatch_sess=CHUA",
+        cookie_taken_at=_iso(_now()),
+    )
+    storage._append_spreadsheet_row(
+        "song@fexpost.com",
+        "s",
+        cookie=COOKIE_LIVE,
+        cookie_taken_at=_iso(_now()),
+    )
+
+    class _Checker:
+        def start(self):
+            pass
+
+        def smoke_test(self):
+            pass
+
+        def check(self, cookie):
+            if "CHUA" in cookie:
+                return "khong-ro", "trang trả về không nhận diện được"
+            return "song", "vào được giao diện chat"
+
+        def close(self):
+            pass
+
+    class _NoFast:
+        def start(self):
+            raise RuntimeError("không dùng yêu cầu nhanh")
+
+        def close(self):
+            pass
+
+    web = cookie_web.CookieWeb()
+    job = web._new_job(
+        ["chua@fexpost.com", "song@fexpost.com"], "check"
+    )
+    job["kiem_tra_lai"] = True
+    web._run_check_job(
+        job, checker_factory=_Checker, fast_factory=_NoFast
+    )
+    extra = [
+        thread for thread in threading.enumerate()
+        if thread.name.startswith("cookie-check-")
+        and thread is not threading.current_thread()
+    ]
+    for thread in extra:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), thread.name
+    checks = [
+        item for item in web.jobs.values() if item["kind"] == "check"
+    ]
+    assert len(checks) == 2, checks
+    retry = next(item for item in checks if item["id"] != job["id"])
+    assert retry["emails"] == ["chua@fexpost.com"], retry
+    assert retry.get("kiem_tra_lai") is False
+    assert "1 chưa rõ" in job["result"], job
+    assert any("tự kiểm tra lại" in line for line in job["log"]), job
+    assert "1 chưa rõ" in retry["result"], retry
+
+
 def test_check_slice_khong_chet_khi_mot_mail_loi():
     storage._append_spreadsheet_row(
         "loi@fexpost.com",
@@ -1618,6 +1812,43 @@ def test_check_slice_khong_chet_khi_mot_mail_loi():
     assert any(
         line.startswith("✘ loi@fexpost.com") for line in job["log"]
     ), job
+
+
+def test_coordinator_dang_nhap_lai_an_trinh_duyet():
+    coord = cookie_web._coordinator_dang_nhap_lai("-2")
+    assert coord._headless is True
+    assert coord._lane_local.suffix == "-2"
+    command = [sys.executable, "browser_helper.py", "a@x.com", "--auto"]
+    # Cùng quy ước coordinator._run_helper: suffix "-2" thành
+    # đối số "2", và có --headless.
+    suffix = coord._lane_local.suffix
+    if suffix:
+        command.append(suffix.lstrip("-"))
+    if coord._headless:
+        command.append("--headless")
+    assert command[-2:] == ["2", "--headless"]
+
+
+def test_refresh_job_chay_nhieu_luong():
+    web = cookie_web.CookieWeb()
+    emails = [f"r{i}@fexpost.com" for i in range(4)]
+    job = web._new_job(emails, "refresh")
+    seen = []
+    seen_lock = threading.Lock()
+
+    def fake_refresh(job, email, suffix="", log_lock=None):
+        time.sleep(0.05)
+        with seen_lock:
+            seen.append((email, suffix, threading.get_ident()))
+
+    web._refresh_one = fake_refresh
+    web._run_refresh_job(job)
+    assert job["done"] == 4, job
+    assert "4 thành công" in job["result"], job
+    suffixes = {suffix for _email, suffix, _ident in seen}
+    assert suffixes == {"", "-2", "-3", "-4"}, suffixes
+    idents = {ident for _email, _suffix, ident in seen}
+    assert len(idents) == 4, idents
 
 
 def test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang():
@@ -1651,6 +1882,7 @@ TESTS = [
     test_list_cookies_dedupes_and_sorts,
     test_history_append_read,
     test_http_api,
+    test_register_page_and_console_refuse_empty_proxy,
     test_http_refresh_unknown_email_fails_cleanly,
     test_health_alive_when_chat_ui,
     test_health_dead_when_redirected_to_login,
@@ -1679,13 +1911,17 @@ TESTS = [
     test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc,
     test_check_uu_tien_qua_han_truoc,
     test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
+    test_check_job_tu_kiem_tra_lai_mail_chua_ro,
     test_check_slice_khong_chet_khi_mot_mail_loi,
+    test_coordinator_dang_nhap_lai_an_trinh_duyet,
+    test_refresh_job_chay_nhieu_luong,
     test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,
     test_parse_cookie_string,
     test_parse_cookie_string_giu_dau_bang_trong_gia_tri,
     test_clean_cookie_pairs_bo_gia_tri_loi_va_trung_ten,
     test_browser_checker_bo_qua_cookie_loi,
     test_browser_checker_khong_chet_khi_add_cookies_loi,
+    test_browser_checker_chan_anh_font_video,
     test_browser_checker_song_khi_vao_duoc_chat,
     test_browser_checker_chet_khi_bi_day_ve_dang_nhap,
     test_browser_checker_khong_ro_khi_trang_la,
@@ -1703,6 +1939,7 @@ TESTS = [
     test_check_and_cache_dung_trinh_duyet_khi_yeu_cau_nhanh_khong_ro,
     test_check_and_cache_khong_dung_trinh_duyet_khi_yeu_cau_nhanh_ket_luan_duoc,
     test_kiem_tra_mot_mail_tra_ve_none_khi_ket,
+    test_check_slice_dung_cung_luong_da_mo_trinh_duyet,
     test_check_slice_thay_cap_moi_khi_mot_mail_ket,
 ]
 

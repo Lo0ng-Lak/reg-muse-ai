@@ -319,6 +319,11 @@ def _append_cookie_history(action, email, detail=""):
 
 def _read_cookie_history(limit=100):
     """Lịch sử cookie mới nhất trước (tối đa limit mốc)."""
+    entries = _load_cookie_history()
+    return list(reversed(entries))[: max(0, int(limit))]
+
+
+def _load_cookie_history():
     try:
         entries = json.loads(
             _cookie_history_path().read_text(encoding="utf-8")
@@ -327,7 +332,19 @@ def _read_cookie_history(limit=100):
         return []
     if not isinstance(entries, list):
         return []
-    return list(reversed(entries))[: max(0, int(limit))]
+    return entries
+
+
+def _cookie_history_counts():
+    """Đếm số mốc theo việc: lấy cookie, đăng nhập lại, xoá."""
+    counts = {"lay": 0, "lam-moi": 0, "xoa": 0}
+    for entry in _load_cookie_history():
+        if not isinstance(entry, dict):
+            continue
+        action = entry.get("action")
+        if action in counts:
+            counts[action] += 1
+    return counts
 
 
 def _append_meta_row(email, mail_password="", username="", provider="", otp_link=""):

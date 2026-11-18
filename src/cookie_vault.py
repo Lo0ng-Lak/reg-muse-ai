@@ -25,7 +25,7 @@ STATUS_EXPIRED = "het-han"
 STATUS_UNKNOWN = "khong-ro"
 
 STATUS_LABELS = {
-    STATUS_ALIVE: "Còn sống",
+    STATUS_ALIVE: "Còn hạn",
     STATUS_EXPIRING: "Sắp hết",
     STATUS_EXPIRED: "Quá hạn",
     STATUS_UNKNOWN: "Không rõ",
@@ -166,16 +166,14 @@ def cookie_stats(cookies):
     Hai chiều riêng biệt, không được gộp:
     - Hạn theo mốc 7 ngày: song / sap-het / het-han / khong-ro
       (khong-ro = không có mốc lấy cookie).
-    - Sống/chết thật: chỉ biết sau khi kiểm tra trên meta.ai
-      (chet / hoat-dong). "chua-kiem-tra" đếm số chưa xác minh
-      được sống/chết — gồm cả chưa từng kiểm tra lẫn kiểm tra
-      rồi nhưng chưa rõ (lỗi 403, challenge, trang chưa nhận
-      diện được). Số này chỉ về 0 khi mọi cookie đã có kết
-      luận sống/chết thật; đếm theo "chưa từng kiểm tra" thì
-      sai (lỗi 2026-11-17: cả 2252 đều từng bị kiểm tra lỗi
-      403 nên số hiện 0 trong khi gần như chưa xác minh được
-      tài khoản nào). Tài khoản chưa có cookie thì đếm riêng
-      ở "khong-co-cookie", không tính vào đây.
+    - Sống/chết thật: chỉ biết sau khi kiểm tra trên meta.ai.
+      "hoat-dong" là đã kiểm tra và còn vào được. "chet" là
+      đã kiểm tra và die. "chua-kiem-tra" là có cookie nhưng
+      chưa từng kiểm tra. "chua-xac-minh" là đã kiểm tra
+      nhưng trang chưa cho kết luận (lỗi mạng, challenge,
+      trang không nhận diện được) — không được đếm vào còn
+      sống. Tài khoản chưa có cookie thì đếm riêng ở
+      "khong-co-cookie".
     """
     stats = {
         "total": len(cookies),
@@ -187,6 +185,7 @@ def cookie_stats(cookies):
         "chet": 0,
         "hoat-dong": 0,
         "chua-kiem-tra": 0,
+        "chua-xac-minh": 0,
     }
     for item in cookies:
         stats[item["status"]] = stats.get(item["status"], 0) + 1
@@ -197,5 +196,8 @@ def cookie_stats(cookies):
         elif item.get("health") == cookie_health.STATUS_ALIVE:
             stats["hoat-dong"] += 1
         elif item.get("has_cookie"):
-            stats["chua-kiem-tra"] += 1
+            if item.get("health_checked_at"):
+                stats["chua-xac-minh"] += 1
+            else:
+                stats["chua-kiem-tra"] += 1
     return stats
