@@ -47,12 +47,13 @@ from web_console import ConsoleError, WebConsole
 
 DEFAULT_PORT = 8765
 MAX_LOG_LINES = 200
-# Số luồng kiểm tra song song (mỗi luồng một trình duyệt headless
-# riêng). Từng là 10 (tăng 2026-11-17) nhưng 10 luồng làm job
-# kẹt cứng ở 96/2096 — meta.ai đáp chậm/trắng trang, có thể do
-# dập quá nhiều yêu cầu song song từ một IP + máy nặng. Trả về
-# 5, cộng thêm chống kẹt từng mail (CHECK_ONE_TIMEOUT_SECONDS).
-CHECK_WORKERS = 5
+# Số trình duyệt headless kiểm tra cùng lúc. Mỗi luồng vẫn đi
+# lần lượt phần mail của mình. Máy chủ 4 nhân, ~8GB RAM: 10
+# trình duyệt là mức vừa. Từng để 5 nên cả nghìn tài khoản nhìn
+# như kiểm tra từng cái. 10 luồng từng làm job kẹt (2026-11-17)
+# khi một trình duyệt không trả về; giờ mỗi mail có hạn 75 giây
+# thì bỏ trình duyệt đó và mở cái mới.
+CHECK_WORKERS = 10
 # Số luồng đăng nhập lại song song. Mỗi luồng một trình duyệt
 # ẩn và một file hộp thư riêng (mailbox.txt, mailbox-2.txt, ...),
 # cùng cách tab Đăng nhập lại chia luồng — không giẫm OTP.
@@ -173,6 +174,15 @@ class _LuongKiemTra(threading.Thread):
                         checker=checker,
                         fast_checker=fast,
                     )
+                    # Đăng nhập lại vừa ghi cookie mới trong lúc
+                    # lượt này còn cầm cookie cũ: kết quả Die là
+                    # của cookie cũ, không được đè Còn sống.
+                    hien_tai = _cookie_dang_luu(email)
+                    if (
+                        hien_tai
+                        and hien_tai.strip() != (cookie or "").strip()
+                    ):
+                        entry = cookie_health.ghi_con_song(email)
                     reply.put(("ok", entry))
                 except Exception as error:
                     reply.put(("err", error))
@@ -230,6 +240,16 @@ def _bat_luong_kiem_tra(job, factory, fast_factory, lock):
         owner.dong()
         return None
     return owner
+
+
+def _cookie_dang_luu(email):
+    """Cookie hiện có trong kho của một email, hoặc ""."""
+    import account_store
+
+    row = account_store.get_account(email, storage.ACCOUNTS_DB_FILE)
+    if not row:
+        return ""
+    return row.get("cookie") or ""
 
 
 def _coordinator_dang_nhap_lai(suffix):
@@ -294,6 +314,9 @@ def select_refresh_emails(cookies, scope):
 
 
 CHECK_FRESH_HOURS = 24
+# Đã kiểm tra còn sống, hoặc vừa đăng nhập được, thì 7 ngày
+# mới xem lại.
+CHECK_ALIVE_HOURS = 7 * 24
 
 
 def _checked_recently(checked_at, hours=CHECK_FRESH_HOURS):
@@ -315,13 +338,30 @@ def _checked_recently(checked_at, hours=CHECK_FRESH_HOURS):
     ).total_seconds() < hours * 3600
 
 
+def _den_luc_kiem_tra_lai(item):
+    """True khi tài khoản này cần được kiểm tra lại.
+
+    Chưa kiểm tra, hoặc lần trước chưa rõ: kiểm tra tiếp.
+    Còn sống: 7 ngày mới kiểm lại.
+    Die: không kiểm tra lại. Die thì đăng nhập lấy cookie mới.
+    """
+    health = item.get("health")
+    checked_at = item.get("health_checked_at")
+    if health == cookie_health.STATUS_DEAD:
+        return False
+    if health == cookie_health.STATUS_ALIVE:
+        return not _checked_recently(checked_at, CHECK_ALIVE_HOURS)
+    if health == cookie_health.STATUS_UNKNOWN:
+        return True
+    return not _checked_recently(checked_at)
+
+
 def select_check_emails(cookies, scope):
     """Chọn mail kiểm tra sống/chết theo diện (dùng cho /api/check-all).
 
-    - "stale": chưa kiểm tra bao giờ, đã kiểm tra quá 24 giờ,
-      hoặc lần trước ra chưa rõ (chưa kết luận sống/chết).
-      Diện tự kiểm tra khi mở trang. Mail đã kết luận sống hoặc
-      die trong 24 giờ thì không kiểm tra lại.
+    - "stale": chưa kiểm tra bao giờ, còn sống đã quá 7 ngày,
+      hoặc lần trước ra chưa rõ. Còn sống trong 7 ngày thì
+      không kiểm tra lại. Die không kiểm tra lại.
     - "expiring": có cookie và sắp hết/hết hạn theo mốc 7 ngày.
     - "all": tất cả tài khoản có cookie.
     """
@@ -329,11 +369,7 @@ def select_check_emails(cookies, scope):
         return [
             item["email"]
             for item in cookies
-            if item["has_cookie"]
-            and (
-                item.get("health") == cookie_health.STATUS_UNKNOWN
-                or not _checked_recently(item.get("health_checked_at"))
-            )
+            if item["has_cookie"] and _den_luc_kiem_tra_lai(item)
         ]
     if scope == "expiring":
         return [
@@ -347,6 +383,33 @@ def select_check_emails(cookies, scope):
             )
         ]
     return [item["email"] for item in cookies if item["has_cookie"]]
+
+
+# Vòng nền hỏi lại kho khi không còn mail cần kiểm tra.
+# Còn sống thì 7 ngày mới kiểm lại. Die không kiểm tra lại,
+# chỉ đăng nhập để lấy cookie mới.
+# Mail chưa xác minh thì kiểm tra lại cho đến khi kết luận được.
+CHECK_LOOP_IDLE_SECONDS = 300
+CHECK_LOOP_POLL_SECONDS = 15
+# Chừa một nhịp sau khi một lượt vừa xong, để lượt kiểm tra
+# lại các mail chưa rõ kịp được xếp trước khi vòng nền xếp lượt mới.
+CHECK_LOOP_GAP_SECONDS = 10
+# Server tự kiểm tra. Bộ test tắt cờ này để không mở trình duyệt.
+TU_DONG_KIEM_TRA = True
+
+
+def select_mail_vong_nen(cookies):
+    """Mail vòng nền sẽ kiểm tra.
+
+    Có cookie, và đến lúc kiểm tra lại: chưa kiểm tra, chưa rõ,
+    hoặc còn sống quá 7 ngày. Mail còn sống trong 7 ngày thì
+    không kiểm tra lại. Die không đưa vào vòng này.
+    """
+    return [
+        item["email"]
+        for item in cookies
+        if item.get("has_cookie") and _den_luc_kiem_tra_lai(item)
+    ]
 
 
 class CookieWeb:
@@ -457,6 +520,13 @@ class CookieWeb:
                 "Tool đang chạy một lượt khác — đợi lượt đó xong rồi "
                 "đăng nhập lại."
             )
+        if self.console is not None and getattr(
+            getattr(self.console, "coordinator", None), "running", False
+        ):
+            raise RuntimeError(
+                "Đang đăng ký hoặc đăng nhập — đợi lượt đó xong rồi "
+                "đăng nhập lại."
+            )
         job = self._new_job(emails, "refresh")
         thread = threading.Thread(
             target=self._run_refresh_job,
@@ -495,6 +565,62 @@ class CookieWeb:
         thread.start()
         return job["id"]
 
+    def _co_job_kiem_tra(self):
+        with self.jobs_lock:
+            return any(
+                job["kind"] == "check"
+                and job["status"] in ("queued", "running")
+                for job in self.jobs.values()
+            )
+
+    def bat_kiem_tra_neu_can(self, cookies=None):
+        """Xếp một lượt kiểm tra nếu kho còn mail cần xem và chưa có lượt nào.
+
+        Trả về id job vừa xếp, hoặc None khi không xếp.
+        """
+        if storage._accounts_migration_running():
+            return None
+        if self._co_job_kiem_tra():
+            return None
+        if cookies is None:
+            cookies = cookie_vault.list_cookies()
+        emails = select_mail_vong_nen(cookies)
+        if not emails:
+            return None
+        job_id = self.start_check_all(emails)
+        print(
+            f"Vòng kiểm tra: {len(emails)} tài khoản ({job_id})",
+            flush=True,
+        )
+        return job_id
+
+    def bat_dau_vong_kiem_tra(self):
+        """Server tự kiểm tra, không cần mở trang."""
+        thread = threading.Thread(
+            target=self._vong_kiem_tra,
+            name="cookie-check-loop",
+            daemon=True,
+        )
+        thread.start()
+
+    def _vong_kiem_tra(self):
+        while True:
+            try:
+                if (
+                    self._co_job_kiem_tra()
+                    or storage._accounts_migration_running()
+                ):
+                    time.sleep(CHECK_LOOP_POLL_SECONDS)
+                    continue
+                time.sleep(CHECK_LOOP_GAP_SECONDS)
+                started = self.bat_kiem_tra_neu_can()
+            except Exception as error:
+                print(f"Vòng kiểm tra lỗi: {error}", flush=True)
+                time.sleep(CHECK_LOOP_IDLE_SECONDS)
+                continue
+            if not started:
+                time.sleep(CHECK_LOOP_IDLE_SECONDS)
+
     def list_jobs(self):
         with self.jobs_lock:
             jobs = sorted(
@@ -509,9 +635,9 @@ class CookieWeb:
         trình duyệt ẩn.
 
         Vẫn chỉ một job đăng nhập lại tại một thời điểm. Trong
-        job, mail được chia đều cho REFRESH_WORKERS luồng. Luồng
-        1 dùng mailbox.txt, các luồng sau dùng mailbox-2.txt,
-        mailbox-3.txt, ... để OTP không bị đọc nhầm.
+        job, mail được chia đều cho REFRESH_WORKERS luồng. File
+        hộp thư là mailbox-11.txt trở đi, không đụng mailbox.txt
+        và mailbox-2.txt … mailbox-10.txt của lượt đăng ký.
         """
         with self.refresh_lock:
             job["status"] = "running"
@@ -521,7 +647,8 @@ class CookieWeb:
             log_lock = threading.Lock()
             threads = []
             for index in range(workers):
-                suffix = "" if index == 0 else f"-{index + 1}"
+                # 11 trở đi: đăng ký dùng mailbox.txt và mailbox-2..10.
+                suffix = f"-{index + 11}"
                 thread = threading.Thread(
                     target=self._refresh_slice,
                     args=(
@@ -601,6 +728,7 @@ class CookieWeb:
             for row in storage._read_cookie_rows()
         }
         workers = max(1, min(CHECK_WORKERS, len(emails)))
+        job["workers"] = workers
         counts = {"song": 0, "chet": 0, "khong-ro": 0}
         dead = []
         unclear = []
@@ -641,10 +769,10 @@ class CookieWeb:
 
     def _tu_dong_kiem_tra_lai_chua_ro(self, job, unclear_emails,
                                       factory, fast_factory):
-        """Mail chưa kết luận được sống/chết thì kiểm tra lại một
-        lần, không chờ người dùng bấm. Lượt kiểm tra lại không
-        tự xếp thêm lượt nữa — không thì trang không nhận diện
-        được sẽ kiểm tra mãi."""
+        """Mail chưa kết luận được sống/chết thì kiểm tra lại ngay
+        một lần. Lượt đó không tự xếp thêm lượt ngay. Vòng nền
+        vẫn xếp lại các mail chưa xác minh ở vòng sau, cho đến
+        khi kết luận được sống hoặc die."""
         if not job.get("kiem_tra_lai"):
             return None
         if not unclear_emails:
@@ -754,6 +882,34 @@ class CookieWeb:
                     cookie = cookies_by_email.get(
                         (email or "").strip().lower(), ""
                     )
+                    fresh = cookie_health.load_health_cache().get(
+                        (email or "").strip().lower()
+                    ) or {}
+                    if (
+                        fresh.get("status") == cookie_health.STATUS_ALIVE
+                        and _checked_recently(
+                            fresh.get("checked_at"), CHECK_ALIVE_HOURS
+                        )
+                    ):
+                        with lock:
+                            counts["song"] += 1
+                            job["done"] = sum(counts.values())
+                            job["log"].append(
+                                f"{email}: Còn sống (vừa đăng nhập "
+                                "Muse từ Meta, chưa cần kiểm tra)."
+                            )
+                            job["log"] = job["log"][-MAX_LOG_LINES:]
+                        continue
+                    if fresh.get("status") == cookie_health.STATUS_DEAD:
+                        with lock:
+                            counts["chet"] += 1
+                            job["done"] = sum(counts.values())
+                            job["log"].append(
+                                f"{email}: Die — không kiểm tra lại. "
+                                "Đăng nhập để lấy cookie mới."
+                            )
+                            job["log"] = job["log"][-MAX_LOG_LINES:]
+                        continue
                     if not cookie:
                         with lock:
                             job["log"].append(
@@ -934,6 +1090,8 @@ class CookieWeb:
                 storage._append_cookie_history(
                     "lam-moi", email, "đăng nhập lại thành công"
                 )
+            if "hatch_sess=" in (cookie or ""):
+                cookie_health.ghi_con_song(email)
             if export_error is not None:
                 say(
                     f"Không ghi được file xuất {output_path}: "
@@ -941,7 +1099,7 @@ class CookieWeb:
                 )
             say(
                 f"✔ {email}: đã lấy cookie mới lúc {now} — "
-                "còn sống 7 ngày."
+                "đã ghi Còn sống."
             )
         finally:
             stop_drain.set()
@@ -1277,6 +1435,11 @@ html.home .nav-main, html.register .nav-small { background:var(--blue); color:#f
 .topbar nav a { text-decoration:none; color:var(--dim); font-weight:600; border-radius:8px; }
 .nav-main { padding:6px 12px; font-size:14px; }
 .nav-small { padding:3px 8px; font-size:12px; }
+.run-banner { display:none; position:sticky; top:56px; z-index:19; padding:10px 22px;
+  background:var(--blue-bg); color:var(--blue); border-bottom:1px solid #b2ddff;
+  font-weight:700; }
+.run-banner.show { display:block; }
+.run-banner.done { background:var(--green-bg); color:var(--green); border-bottom-color:#abefc6; }
 .reg-tabs { display:flex; gap:8px; margin:0 0 14px; }
 .reg-tabs button { background:#fff; color:var(--text); border:1px solid var(--line); }
 .reg-tabs button.on { background:var(--blue); color:#fff; }
@@ -1317,14 +1480,14 @@ button:disabled { opacity:.5; cursor:default; }
 .card h2 { font-size:16px; margin:0 0 4px; }
 .card .hint { color:var(--dim); font-size:13px; margin:0 0 12px; }
 table { width:100%; border-collapse:collapse; }
-th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
-th { color:var(--dim); font-size:12.5px; text-transform:uppercase; letter-spacing:.4px; }
+th, td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
+th { color:var(--dim); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.4px; }
 tr:last-child td { border-bottom:0; }
-.mono { font-family:Consolas,Menlo,monospace; font-size:13px; }
+tbody tr:hover td { background:#f8fafc; }
+.email { font-weight:600; }
+.when { color:var(--dim); font-size:13px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.status-line { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
 .nowrap { white-space:nowrap; }
-.cell-flex { display:flex; align-items:center; gap:8px; }
-.truncate { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.cookie-masked { max-width:120px; }
 .badge { display:inline-block; padding:3px 11px; border-radius:999px; font-size:13px; font-weight:700; white-space:nowrap; }
 .badge.song { background:var(--green-bg); color:var(--green); }
 .badge.sap-het { background:var(--amber-bg); color:var(--amber); }
@@ -1333,7 +1496,6 @@ tr:last-child td { border-bottom:0; }
 .badge.chua-xac-minh { background:var(--amber-bg); color:var(--amber); }
 .badge.checking { background:#eef4ff; color:#175cd3; animation:pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
-.count { font-variant-numeric:tabular-nums; font-weight:700; }
 .small-dim { color:var(--dim); font-size:12.5px; }
 .job { border:1px solid var(--line); border-radius:10px; padding:11px 13px; margin-bottom:10px; background:#fbfcfd; }
 .job .head { display:flex; justify-content:space-between; gap:8px; }
@@ -1360,10 +1522,11 @@ tr:last-child td { border-bottom:0; }
     <a class="nav-small" href="/dang-ky">Đăng ký</a>
   </nav>
 </header>
+<div id="runBanner" class="run-banner"></div>
 <div class="wrap" id="viewHome">
   <header>
     <h1>🍪 Kho Cookie — Muse AI</h1>
-    <p class="sub">Mỗi cookie sống <b>7 ngày</b> kể từ lúc lấy. Đăng nhập lại chạy đúng luồng tab Đăng nhập lại: không proxy, không thẻ. Cột Hoạt động kiểm tra thật cookie còn vào được Muse hay đã die.</p>
+    <p class="sub">Một dòng một tài khoản: lúc lấy cookie, còn sống hay die, và hạn 7 ngày.</p>
   </header>
   <div class="stats" id="stats"></div>
   <div class="errorbox" id="errorBox" style="display:none"></div>
@@ -1387,14 +1550,14 @@ tr:last-child td { border-bottom:0; }
     <button id="btnCheckAll" onclick="checkAll('all')">Kiểm tra tất cả</button>
     <button class="ghost" onclick="checkAll('expiring')">Kiểm tra cookie sắp hết</button>
     <button id="btnAll" onclick="refreshScope('expiring','btnAll')">Đăng nhập lại sắp hết &amp; đã hết</button>
-    <button class="ghost" onclick="refreshScope('expired','btnExpired')" id="btnExpired">Đăng nhập lại đã hết</button>
+    <button class="ghost" onclick="refreshScope('dead','btnDead')" id="btnDead">Đăng nhập lại Die</button>
     <button class="ghost" onclick="loadAll()">Làm mới</button>
     <button class="ghost" onclick="importExcel()">Nhập từ Excel</button>
     <button class="ghost" onclick="exportExcel()">Xuất ra Excel</button>
   </div>
   <div class="card">
-    <h2>Danh sách cookie</h2>
-    <p class="hint">Nguồn: kho SQLite (accounts.db) — một dòng một tài khoản, email là khoá duy nhất. Đăng nhập lại cập nhật đúng dòng của tài khoản đó.</p>
+    <h2>Danh sách</h2>
+    <p class="hint">Cookie không hiện ở bảng. Đăng nhập lại cập nhật đúng dòng của email đó.</p>
     <div id="tableWrap"><p class="empty">Đang tải…</p></div>
     <div class="pager" id="pager"></div>
   </div>
@@ -1406,12 +1569,12 @@ tr:last-child td { border-bottom:0; }
     <h2>Lịch sử</h2>
     <div id="history"><p class="empty">Đang tải…</p></div>
   </div>
-  <p class="note">Cookie đầy đủ không hiện trong bảng, chỉ lấy qua nút Sao chép. <span id="metaLine"></span></p>
+  <p class="note"><span id="metaLine"></span></p>
 </div>
 <div class="wrap" id="viewRegister">
   <header>
     <h1>Đăng ký</h1>
-    <p class="sub">Muse, Meta và đăng nhập lại dùng đúng kho proxy, thẻ và mail như cửa sổ hiện tại. Trình duyệt chạy trên máy đang mở trang này.</p>
+    <p class="sub">Đăng ký Meta, rồi đăng nhập Muse bằng những tài khoản Meta đó. Không tạo tài khoản Muse mới. Trình duyệt chạy trên máy đang mở trang này.</p>
   </header>
   <div class="reg-tabs">
     <button type="button" class="on" id="tabMuse" onclick="showReg('muse')">Muse.ai</button>
@@ -1422,7 +1585,7 @@ tr:last-child td { border-bottom:0; }
     <div>
       <div class="card" id="paneMuse">
         <h2>Muse.ai</h2>
-        <p class="hint">Đăng nhập Muse từ file Excel Meta, hoặc đăng ký mail tạm. Thẻ trong kho được nộp ở bước thẻ.</p>
+        <p class="hint">Đăng nhập Muse bằng tài khoản Meta đã đăng ký. Chọn file Excel Meta, tool lấy mail trong file rồi nộp thẻ trong kho.</p>
         <div id="cardTable" class="small-dim">Đang tải kho thẻ…</div>
         <div class="field"><span>Dán thẻ (số|MM/YY|CVV hoặc thêm ZIP|nhãn)</span><textarea class="block" id="cardPaste" rows="3"></textarea></div>
         <div class="rowline">
@@ -1431,12 +1594,16 @@ tr:last-child td { border-bottom:0; }
           <input class="block" id="cardLimit" type="number" min="0" max="100" value="0" style="width:80px">
           <button type="button" class="ghost" onclick="limitAll()">Áp dụng cho tất cả thẻ</button>
         </div>
+        <div class="rowline">
+          <button type="button" class="ghost" onclick="cardsSelected('delete')">Xoá đã chọn</button>
+          <button type="button" class="ghost" onclick="cardsSelected('limit')">Giới hạn đã chọn</button>
+          <button type="button" class="ghost" onclick="cardsSelected('pick')">Chỉ dùng thẻ đã chọn</button>
+        </div>
         <div class="field" style="margin-top:12px"><span>Mã mời</span><input class="block" id="invite" type="text"></div>
         <label class="small-dim"><input type="checkbox" id="singleInvite"> Chỉ dùng 1 mã mời này</label>
         <div class="field" style="margin-top:12px"><span>File Excel Meta trên máy này</span><input class="block" id="metaExcel" type="text" placeholder="C:\\duong\\dan\\meta_accounts.xlsx"></div>
         <button type="button" onclick="startMuseLogin()">Đăng nhập Muse</button>
         <div id="museSetup"></div>
-        <div class="rowline" style="margin-top:8px"><button type="button" onclick="startMuseRegister()">Bắt đầu đăng ký</button></div>
       </div>
       <div class="card" id="paneMeta" style="display:none">
         <h2>Meta</h2>
@@ -1571,20 +1738,17 @@ async function loadAll(){
 }
 function stat(n,label,cls){ return "<div class='stat "+cls+"'><b>"+n+"</b><span>"+label+"</span></div>"; }
 function esc(s){ return String(s??"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function healthCell(c){
+function healthBadge(c){
   // Tài khoản đang được job kiểm tra mà chưa có kết quả mới
   // thì hiện "Đang kiểm tra…" ở đúng dòng đó (mốc so sánh là
   // lúc job bắt đầu: đã có kết quả mới hơn thì hiện kết quả).
   const isChecking = CHECKING.emails.has(c.email) &&
     (!c.health_checked_at || new Date(c.health_checked_at) < new Date(CHECKING.since));
+  if (isChecking) return "<span class='badge checking'>Đang kiểm tra…</span>";
   const kind = healthKind(c);
-  const badge = isChecking
-    ? "<span class='badge checking'>Đang kiểm tra…</span>"
-    : (kind
-      ? "<span class='badge "+kind+"'>"+HEALTH[kind]+"</span>"
-      : "<span class='badge khong-ro'>Chưa có cookie</span>");
-  return "<td><div class='cell-flex'>"+badge+"<button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button></div>" +
-    (c.health_checked_at? "<div class='small-dim nowrap'>"+fmtTime(c.health_checked_at)+"</div>":"") + "</td>";
+  if (!kind) return "<span class='badge khong-ro'>Chưa có cookie</span>";
+  const title = c.health_checked_at ? " title='Kiểm tra "+fmtTime(c.health_checked_at)+"'" : "";
+  return "<span class='badge "+kind+"'"+title+">"+HEALTH[kind]+"</span>";
 }
 function render(){
   const q = document.getElementById("q").value.trim().toLowerCase();
@@ -1606,34 +1770,15 @@ function render(){
     "<button class='ghost small' onclick='PAGE=Math.min("+totalPages+",PAGE+1);render()'"+(PAGE>=totalPages?" disabled":"")+">Sau ›</button>";
   if (!rows.length){ document.getElementById("tableWrap").innerHTML = "<p class='empty'>Không có tài khoản nào khớp.</p>"; return; }
   document.getElementById("tableWrap").innerHTML =
-    "<table><tr><th>Email</th><th>Cookie</th><th>Lấy lúc</th><th>Hết hạn</th><th>Còn lại</th><th>Hoạt động</th><th>Hạn</th><th></th></tr>" +
-    pageRows.map(c=>"<tr><td class='nowrap'>"+esc(c.email)+"</td>" +
-      "<td><div class='cell-flex'><span class='mono truncate cookie-masked'>"+esc(c.cookie_masked||"(trống)")+"</span><button class='ghost small' onclick='copyCookie(&quot;"+esc(c.email)+"&quot;,this)'>Sao chép</button></div></td>" +
-      "<td class='nowrap'>"+fmtTime(c.cookie_taken_at)+"</td><td class='nowrap'>"+fmtTime(c.expires_at)+"</td>" +
-      "<td class='count nowrap' data-remain='"+(c.remaining_seconds??"")+"'>"+fmtRemain(c.remaining_seconds)+"</td>" +
-      healthCell(c) +
-      "<td><span class='badge "+c.status+"'>"+LABEL[c.status]+"</span></td>" +
-      "<td class='actions'><button class='small' onclick='refreshOne(&quot;"+esc(c.email)+"&quot;,this)'>Đăng nhập lại</button> " +
-      "<button class='ghost small' onclick='deleteCookie(&quot;"+esc(c.email)+"&quot;,this)'>Xoá</button></td></tr>").join("") + "</table>";
-}
-setInterval(()=>{
-  document.querySelectorAll("[data-remain]").forEach(el=>{
-    const v = el.getAttribute("data-remain");
-    if (v === "" || v === null) return;
-    const n = parseInt(v,10) - 1;
-    el.setAttribute("data-remain", String(n));
-    el.textContent = fmtRemain(n);
-  });
-}, 1000);
-async function copyCookie(email, btn){
-  const r = await fetch("/api/cookie?email="+encodeURIComponent(email)).then(r=>r.json());
-  if (!r.cookie){ alert("Tài khoản này chưa có cookie."); return; }
-  try { await navigator.clipboard.writeText(r.cookie); }
-  catch(e){
-    const ta = document.createElement("textarea"); ta.value = r.cookie;
-    document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
-  }
-  btn.textContent = "Đã sao chép"; setTimeout(()=>btn.textContent="Sao chép", 1500);
+    "<table class='acct'><tr><th>Email</th><th>Lấy lúc</th><th>Trạng thái</th><th>Hạn</th><th></th></tr>" +
+    pageRows.map(c=>"<tr><td class='email'>"+esc(c.email)+"</td>" +
+      "<td class='when'>"+fmtTime(c.cookie_taken_at)+"</td>" +
+      "<td>"+healthBadge(c)+"</td>" +
+      "<td><div class='status-line'><span class='badge "+c.status+"'>"+LABEL[c.status]+"</span>"+
+        "<span class='small-dim'>"+fmtRemain(c.remaining_seconds)+"</span></div></td>" +
+      "<td class='actions'><button class='ghost small' onclick='checkOne(&quot;"+esc(c.email)+"&quot;,this)'>Kiểm tra</button> "+
+        "<button class='small' onclick='refreshOne(&quot;"+esc(c.email)+"&quot;,this)'>Đăng nhập lại</button> "+
+        "<button class='ghost small' onclick='deleteCookie(&quot;"+esc(c.email)+"&quot;,this)'>Xoá</button></td></tr>").join("") + "</table>";
 }
 async function checkOne(email, btn){
   btn.disabled = true; btn.textContent = "Đang kiểm tra…";
@@ -1653,9 +1798,9 @@ async function checkAll(scope){
 }
 async function autoCheck(){
   // Mở trang là tự kiểm tra, không cần bấm nút: chưa kiểm tra
-  // bao giờ, đã quá 24 giờ, hoặc lần trước chưa rõ. Mail đã
-  // kết luận sống hoặc die trong 24 giờ thì bỏ qua. Server
-  // không xếp job mới khi đang có job kiểm tra chạy.
+  // bao giờ, còn sống đã quá 7 ngày, hoặc lần trước chưa rõ.
+  // Die không kiểm tra lại. Server không xếp job mới khi đang có
+  // job kiểm tra chạy.
   try {
     const r = await fetch("/api/check-all", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({scope:"stale"})}).then(r=>r.json());
@@ -1697,27 +1842,35 @@ async function deleteCookie(email, btn){
 async function loadJobs(){
   const r = await fetch("/api/jobs").then(r=>r.json());
   const jobs = r.jobs || [];
+  const live = jobs.filter(j=>j.status==="queued"||j.status==="running");
   const card = document.getElementById("jobsCard");
-  if (!jobs.length){ card.style.display = "none"; return; }
-  card.style.display = "block";
   // Tài khoản nào đang được job kiểm tra thì bảng hiện
   // "Đang kiểm tra…" ở đúng dòng đó — thẻ job chỉ hiện số
   // lượng + tiến độ, không liệt kê mail nữa.
+  // Lượt đã xong thì bỏ khỏi trang, không giữ log cũ.
   const checking = new Set();
   let since = "";
-  for (const j of jobs){
-    if (j.kind === "check" && (j.status === "queued" || j.status === "running")){
+  for (const j of live){
+    if (j.kind === "check"){
       for (const e of (j.emails || [])) checking.add(e);
       if (!since || j.created_at < since) since = j.created_at;
     }
   }
   CHECKING = {emails: checking, since: since};
-  document.getElementById("jobs").innerHTML = jobs.map(j=>
-    "<div class='job'><div class='head'><b>"+esc(j.id)+" — "+(j.kind==="check"?"Kiểm tra":"Đăng nhập lại")+" — "+(j.emails||[]).length+" tài khoản · đã xong "+(j.done||0)+"</b><span>"+j.status+"</span></div>" +
+  if (!live.length){
+    card.style.display = "none";
+    document.getElementById("jobs").innerHTML = "";
+    render();
+    setTimeout(loadJobs, 5000);
+    return;
+  }
+  card.style.display = "block";
+  document.getElementById("jobs").innerHTML = live.map(j=>
+    "<div class='job'><div class='head'><b>"+esc(j.id)+" — "+(j.kind==="check"?"Kiểm tra":"Đăng nhập lại")+" — "+(j.emails||[]).length+" tài khoản · đã xong "+(j.done||0)+(j.workers?" · "+j.workers+" luồng":"")+"</b><span>"+j.status+"</span></div>" +
     (j.result? "<div>"+esc(j.result)+"</div>":"") +
     (j.log && j.log.length? "<pre>"+esc(j.log.slice(-60).join("\\n"))+"</pre>":"") + "</div>").join("");
   render();
-  if (jobs.some(j=>j.status==="queued"||j.status==="running")) setTimeout(loadJobs, 2000);
+  setTimeout(loadJobs, 2000);
 }
 function showReg(name){
   ["muse","meta","relogin"].forEach(function(id){
@@ -1752,15 +1905,44 @@ async function consolePost(path, body){
   if (!r.ok || d.error) throw new Error(d.error || ("lỗi HTTP "+r.status));
   return d;
 }
-function renderCards(cards, active){
+const cardTicks = new Set();
+function toggleCard(id, on){
+  if (on) cardTicks.add(id); else cardTicks.delete(id);
+}
+function toggleAllCards(on){
+  document.querySelectorAll(".card-tick").forEach(function(box){
+    box.checked = on;
+    toggleCard(box.value, on);
+  });
+}
+function renderCards(cards, active, picked){
+  const use = {};
+  (picked || []).forEach(function(id){ use[id] = true; });
+  if (active && !(picked && picked.length)) use[active] = true;
+  const alive = {};
+  cards.forEach(function(c){ alive[c.id] = true; });
+  Array.from(cardTicks).forEach(function(id){ if (!alive[id]) cardTicks.delete(id); });
   if (!cards.length){ document.getElementById("cardTable").innerHTML = "<p class='empty'>Chưa có thẻ.</p>"; return; }
-  document.getElementById("cardTable").innerHTML = "<table><tr><th>Tên</th><th>Đã dùng</th><th>Giới hạn</th><th></th></tr>"+
+  const allOn = cards.every(function(c){ return cardTicks.has(c.id); });
+  document.getElementById("cardTable").innerHTML = "<table><tr><th><input type='checkbox'"+(allOn?" checked":"")+" onchange='toggleAllCards(this.checked)'></th><th>Tên</th><th>Đã dùng</th><th>Giới hạn</th><th></th></tr>"+
     cards.map(function(c){
-      const mark = c.id===active ? " · đang chọn" : "";
-      return "<tr><td>"+esc(c.label)+mark+"</td><td>"+c.used+"</td><td>"+(c.limit||"∞")+"</td><td class='actions'>"+
+      const mark = use[c.id] ? " · sẽ dùng" : "";
+      const ticked = cardTicks.has(c.id) ? " checked" : "";
+      return "<tr><td><input class='card-tick' type='checkbox' value='"+esc(c.id)+"'"+ticked+" onchange='toggleCard(this.value, this.checked)'></td><td>"+esc(c.label)+mark+"</td><td>"+c.used+"</td><td>"+(c.limit||"∞")+"</td><td class='actions'>"+
         "<button type='button' class='ghost small' onclick='cardAction(&quot;select&quot;,&quot;"+esc(c.id)+"&quot;)'>Chọn</button> "+
         "<button type='button' class='ghost small' onclick='cardAction(&quot;delete&quot;,&quot;"+esc(c.id)+"&quot;)'>Xoá</button></td></tr>";
     }).join("")+"</table>";
+}
+async function cardsSelected(action){
+  const ids = Array.from(cardTicks);
+  if (!ids.length){ alert("Tick ít nhất một thẻ."); return; }
+  if (action === "delete" && !confirm("Xoá "+ids.length+" thẻ đã chọn khỏi kho?")) return;
+  const body = {action: action === "delete" ? "delete-many" : (action === "limit" ? "limit-many" : "pick"), ids: ids};
+  if (action === "limit") body.limit = document.getElementById("cardLimit").value;
+  try { await consolePost("cards", body); }
+  catch (error){ alert(error.message); return; }
+  if (action === "delete") ids.forEach(function(id){ cardTicks.delete(id); });
+  consoleReady = false; loadConsole();
 }
 async function importCards(){
   const text = document.getElementById("cardPaste").value;
@@ -1789,34 +1971,51 @@ async function checkBalance(){
   try { const d = await consolePost("capsolver-balance", {}); document.getElementById("capState").textContent = "Số dư $"+d.balance; }
   catch (error){ alert(error.message); }
 }
-async function startMuseRegister(){
-  try { await consolePost("muse/register", Object.assign(setupBody("muse"), {invite:document.getElementById("invite").value, single_invite:document.getElementById("singleInvite").checked})); }
-  catch (error){ alert(error.message); }
-}
 async function startMuseLogin(){
-  const body = Object.assign(setupBody("muse"), {excel:document.getElementById("metaExcel").value});
+  const body = Object.assign(setupBody("muse"), {excel:document.getElementById("metaExcel").value, invite:document.getElementById("invite").value, single_invite:document.getElementById("singleInvite").checked});
   try { await consolePost("muse/login", body); }
   catch (error){
     if (error.message.indexOf("Chưa có thẻ") === 0 && confirm(error.message)){
       body.allow_manual_card = true;
-      try { await consolePost("muse/login", body); } catch (again){ alert(again.message); }
+      try { await consolePost("muse/login", body); } catch (again){ alert(again.message); return; }
+      paintBanner("Đang chạy…", true);
       return;
     }
     alert(error.message);
+    return;
   }
+  paintBanner("Đang chạy…", true);
 }
 async function startMeta(){
   try { await consolePost("meta", Object.assign(setupBody("meta"), {selfie:document.getElementById("selfie").value, provider:document.getElementById("metaProvider").value, capsolver:document.getElementById("capKey").value})); }
-  catch (error){ alert(error.message); }
+  catch (error){ alert(error.message); return; }
+  paintBanner("Đang chạy…", true);
 }
 async function startRelogin(){
   try { await consolePost("relogin", {output:document.getElementById("reloginOutput").value, count:document.getElementById("reloginCount").value, lanes:document.getElementById("reloginLanes").value, headless:document.getElementById("reloginHeadless").checked}); }
-  catch (error){ alert(error.message); }
+  catch (error){ alert(error.message); return; }
+  paintBanner("Đang chạy…", true);
 }
 async function stopRun(){
   try { await consolePost("stop", {}); } catch (error){ alert(error.message); }
 }
 let LOG_AT = 0, consoleReady = false;
+function paintBanner(progress, running){
+  const banner = document.getElementById("runBanner");
+  if (!banner) return;
+  const text = progress || "";
+  const finished = text.indexOf("Hoàn tất") >= 0 || text.indexOf("Đã dừng") >= 0;
+  if (running){
+    banner.className = "run-banner show";
+    banner.textContent = "Đang chạy — " + (text && text !== "Sẵn sàng." ? text : "đang xử lý…");
+  } else if (finished){
+    banner.className = "run-banner show done";
+    banner.textContent = text;
+  } else {
+    banner.className = "run-banner";
+    banner.textContent = "";
+  }
+}
 function fillOnce(id, value){
   const el = document.getElementById(id);
   if (el && !el.dataset.filled){ el.value = value || ""; el.dataset.filled = "1"; }
@@ -1832,8 +2031,9 @@ async function loadConsole(){
     box.scrollTop = box.scrollHeight;
   }
   document.getElementById("runProgress").textContent = d.progress || "";
+  paintBanner(d.progress, d.running);
   document.getElementById("btnStop").disabled = !d.running;
-  renderCards(d.cards || [], d.active_card || "");
+  renderCards(d.cards || [], d.active_card || "", d.picked || []);
   if (!consoleReady){
     fillOnce("museProxies", d.muse && d.muse.proxies);
     fillOnce("museBad", d.muse && d.muse.bad);
@@ -1855,10 +2055,10 @@ async function loadConsole(){
 }
 document.getElementById("museSetup").innerHTML = setupHtml("muse");
 document.getElementById("metaSetup").innerHTML = setupHtml("meta");
+loadConsole();
+setInterval(loadConsole, 2000);
 if (document.documentElement.className === "home"){
   loadAll(); loadJobs(); autoCheck(); setInterval(loadAll, 30000);
-} else {
-  loadConsole(); setInterval(loadConsole, 2000);
 }
 </script>
 </body>
@@ -1911,6 +2111,16 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None, host="127.0.0.1", 
     """
     web = CookieWeb(desktop_coordinator=desktop_coordinator)
     web.token = _public_token(host, password)
+    try:
+        rows = storage._read_cookie_rows()
+        cookie_health.nang_cookie_moi_thanh_song(rows)
+        excel = storage._load_meta_excel_path_text()
+        if excel:
+            cookie_health.nang_dang_nhap_meta_thanh_song(
+                rows, storage._meta_da_dang_nhap_muse(excel)
+            )
+    except Exception:
+        pass
     # Nhập kho lần đầu chạy nền: lần đầu mở kho, chuyển 2k dòng
     # từ Excel sang SQLite có thể mất một lúc — trang không được
     # chờ nhập xong mới hiện (lỗi 2026-11-17: trang kẹt ở
@@ -1934,6 +2144,8 @@ def start_server(port=DEFAULT_PORT, desktop_coordinator=None, host="127.0.0.1", 
         target=httpd.serve_forever, name="cookie-web", daemon=True
     )
     thread.start()
+    if TU_DONG_KIEM_TRA:
+        web.bat_dau_vong_kiem_tra()
     shown_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     return httpd, f"http://{shown_host}:{httpd.server_address[1]}"
 

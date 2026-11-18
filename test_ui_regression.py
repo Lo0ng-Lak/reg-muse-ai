@@ -351,7 +351,6 @@ def test_vault_and_run_visible_without_scrolling():
             ("ô dán thẻ", app.muse_tab.bulk_card_text),
             ("nút Nhập kho thẻ", app.muse_tab.import_bulk_button),
             ("nút Đăng nhập Muse", app.muse_tab.muse_login_button),
-            ("nút Bắt đầu đăng ký", app.muse_tab.start_button),
         ):
             _check_visible(canvas, widget, name)
 

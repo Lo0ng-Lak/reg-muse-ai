@@ -573,6 +573,28 @@ def _relogin_done_emails(output_path):
         workbook.close()
 
 
+def _save_relogin_to_accounts(email, cookie, mail_password=""):
+    """Đưa cookie vừa đăng nhập lại vào kho Quản lý.
+
+    Cập nhật đúng dòng email. Chưa có dòng thì thêm. Quản lý
+    đọc kho này, không đọc file Excel xuất.
+    """
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    updated = _update_cookie_row(email, cookie, now)
+    if not updated:
+        _append_spreadsheet_row(
+            email,
+            mail_password,
+            cookie=cookie,
+            cookie_taken_at=now,
+        )
+    _append_cookie_history("lam-moi", email, "đăng nhập lại thành công")
+    if "hatch_sess=" in (cookie or ""):
+        import cookie_health
+
+        cookie_health.ghi_con_song(email)
+
+
 def _write_relogin_cookie(output_path, email, cookie):
     """Ghi một dòng Email + Cookie đăng nhập vào file xuất.
 
@@ -833,6 +855,46 @@ def _set_meta_muse_cell(excel_path, email, value):
         _save_workbook_retry(workbook, excel_path)
     finally:
         workbook.close()
+
+
+def _meta_da_dang_nhap_muse(excel_path):
+    """Email đã vào Muse (cột Muse là thời điểm), không tính dòng đang chạy.
+
+    Trả về dict email chữ thường -> thời điểm trong ô Muse.
+    File không đọc được thì trả về dict rỗng.
+    """
+    found = {}
+    try:
+        workbook = load_workbook(excel_path, read_only=True, data_only=True)
+    except Exception:
+        return found
+    try:
+        sheet = workbook.active
+        columns = _meta_sheet_columns(sheet)
+        email_col = columns.get("Email Meta")
+        muse_col = columns.get("Muse")
+        if not email_col or not muse_col:
+            return found
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            if not row or len(row) < max(email_col, muse_col):
+                continue
+            raw_email = row[email_col - 1]
+            raw_muse = row[muse_col - 1]
+            if not isinstance(raw_email, str) or "@" not in raw_email:
+                continue
+            if not isinstance(raw_muse, str):
+                continue
+            text = raw_muse.strip()
+            if not text or text.startswith(_LOGIN_IN_PROGRESS_PREFIX):
+                continue
+            try:
+                datetime.fromisoformat(text)
+            except ValueError:
+                continue
+            found[raw_email.strip().lower()] = text
+    finally:
+        workbook.close()
+    return found
 
 
 def _mark_meta_logged_in(excel_path, email):
@@ -1307,11 +1369,12 @@ def _read_vault_file():
     except (TypeError, ValueError):
         return None
     if isinstance(data, list):
-        return {"active": "", "cards": _clean_vault_entries(data)}
+        return {"active": "", "picked": [], "cards": _clean_vault_entries(data)}
     if not isinstance(data, dict):
         return None
     return {
         "active": str(data.get("active") or "").strip(),
+        "picked": _clean_picked_ids(data.get("picked")),
         "cards": _clean_vault_entries(data.get("cards")),
     }
 
@@ -1322,6 +1385,7 @@ def _write_vault_file(data):
     sau 3 lần thử."""
     cleaned = {
         "active": str(data.get("active") or "").strip(),
+        "picked": _clean_picked_ids(data.get("picked")),
         "cards": _clean_vault_entries(data.get("cards")),
     }
     payload = json.dumps(cleaned, ensure_ascii=False)
@@ -1341,6 +1405,7 @@ def _write_vault_file(data):
             if (
                 back is not None
                 and back["active"] == cleaned["active"]
+                and back.get("picked") == cleaned["picked"]
                 and [e["id"] for e in back["cards"]]
                 == [e["id"] for e in cleaned["cards"]]
             ):
@@ -1439,6 +1504,20 @@ def _save_vault_index(entries):
     _write_vault_file(data)
 
 
+def _clean_picked_ids(raw):
+    """Danh sách id thẻ đã tick, bỏ trống và trùng, giữ thứ tự."""
+    if isinstance(raw, str):
+        raw = [raw] if raw.strip() else []
+    if not isinstance(raw, list):
+        return []
+    cleaned = []
+    for item in raw:
+        card_id = str(item or "").strip()
+        if card_id and card_id not in cleaned:
+            cleaned.append(card_id)
+    return cleaned
+
+
 def _load_vault_active():
     """Id thẻ đang chọn tay ("" là tự động xoay theo thứ tự kho)."""
     _ensure_cards_migrated()
@@ -1450,9 +1529,71 @@ def _load_vault_active():
 
 def _save_vault_active(card_id):
     _ensure_cards_migrated()
-    data = _read_vault_file() or {"active": "", "cards": []}
+    data = _read_vault_file() or {"active": "", "picked": [], "cards": []}
     data["active"] = card_id or ""
     _write_vault_file(data)
+
+
+def _load_vault_picked():
+    """Các thẻ đã tick để lượt chạy chỉ dùng nhóm này.
+
+    Id không còn trong kho thì bỏ. Danh sách trống là chưa tick
+    nhóm riêng — lượt chạy theo thẻ chọn tay hoặc cả kho.
+    """
+    _ensure_cards_migrated()
+    data = _read_vault_file() or {}
+    known = {entry["id"] for entry in _load_vault_index()}
+    return [card_id for card_id in data.get("picked") or [] if card_id in known]
+
+
+def _save_vault_picked(card_ids):
+    """Ghi nhóm thẻ sẽ dùng cho lượt chạy.
+
+    Một thẻ thì đồng thời là thẻ chọn tay (cửa sổ desktop hiểu).
+    Nhiều thẻ thì bỏ chọn tay, lượt chạy xoay trong nhóm đã tick.
+    Danh sách trống là tự động xoay cả kho.
+    """
+    _ensure_cards_migrated()
+    data = _read_vault_file() or {"active": "", "picked": [], "cards": []}
+    known = {
+        entry["id"]
+        for entry in (data.get("cards") or [])
+        if isinstance(entry, dict)
+    }
+    cleaned = [
+        card_id
+        for card_id in _clean_picked_ids(card_ids)
+        if card_id in known
+    ]
+    data["picked"] = cleaned
+    data["active"] = cleaned[0] if len(cleaned) == 1 else ""
+    _write_vault_file(data)
+
+
+def vault_cards_for_run():
+    """Thẻ của lượt chạy sắp bắt đầu.
+
+    Trả về (danh sách thẻ theo thứ tự kho, manual). manual là
+    True khi chỉ có đúng một thẻ (chọn tay hoặc tick một thẻ).
+    Tick nhiều thẻ thì xoay trong nhóm đó. Không tick và không
+    chọn tay thì dùng cả kho.
+    """
+    vault = _load_vault()
+    picked = _load_vault_picked()
+    if picked:
+        wanted = set(picked)
+        chosen = [card for card in vault if card["id"] in wanted]
+        if chosen:
+            return chosen, len(chosen) == 1
+        _save_vault_picked([])
+    active = _load_vault_active()
+    if active:
+        chosen = [card for card in vault if card["id"] == active]
+        if not chosen:
+            _save_vault_active("")
+        else:
+            return chosen, True
+    return vault, False
 
 
 # --- Đọc Credential Manager (chỉ để chuyển sang file) ---------------
@@ -1863,6 +2004,11 @@ def _delete_vault_card(card_id):
         _save_vault_index(kept)
     if _load_vault_active() == card_id:
         _save_vault_active("")
+    data = _read_vault_file()
+    picked = list((data or {}).get("picked") or [])
+    if card_id in picked:
+        data["picked"] = [item for item in picked if item != card_id]
+        _write_vault_file(data)
 
 
 def _set_vault_card_limit(card_id, limit):
@@ -1876,6 +2022,25 @@ def _set_vault_card_limit(card_id, limit):
             _save_vault_index(entries)
             return True
     return False
+
+
+def _set_vault_card_limits(card_ids, limit):
+    """Đặt một giới hạn cho đúng các thẻ đã tick (0 = không giới hạn).
+
+    Trả về số thẻ đặt được. Id không có trong kho thì bỏ qua.
+    """
+    limit = max(0, min(int(limit), 100))
+    wanted = {str(item or "").strip() for item in (card_ids or [])}
+    wanted.discard("")
+    entries = _load_vault_index()
+    count = 0
+    for entry in entries:
+        if entry["id"] in wanted:
+            entry["limit"] = limit
+            count += 1
+    if count:
+        _save_vault_index(entries)
+    return count
 
 
 def _set_all_vault_card_limits(limit):

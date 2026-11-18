@@ -182,6 +182,107 @@ def check_and_cache(email, cookie, fetcher=None, checker=None,
     return entry
 
 
+def ghi_con_song(email, detail="đăng nhập lại xong, đã vào được chat"):
+    """Ghi tài khoản là còn sống sau khi đăng nhập lại lấy được cookie.
+
+    Đăng nhập lại đã vào chat và có hatch_sess. Cache kiểm tra
+    vẫn đang giữ Die của cookie cũ thì số Còn sống không tăng
+    và số Die không giảm. Ghi đè kết quả đó.
+    """
+    key = (email or "").strip().lower()
+    if not key:
+        return None
+    entry = {
+        "status": STATUS_ALIVE,
+        "checked_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        ),
+        "detail": detail,
+    }
+    with _CACHE_LOCK:
+        cache = load_health_cache()
+        cache[key] = entry
+        save_health_cache(cache)
+    return entry
+
+
+def nang_dang_nhap_meta_thanh_song(rows, da_vao):
+    """Mail đã vào Muse từ Meta mà cookie này chưa được kiểm tra.
+
+    Vào được chat là còn sống tại lúc lấy cookie. Chưa có kết quả
+    kiểm tra sau mốc đó thì ghi Còn sống, để vòng kiểm tra không
+    mở trình duyệt cho đúng tài khoản vừa đăng nhập. Đã kiểm tra
+    sau lúc lấy cookie thì giữ kết quả đó.
+    da_vao: email (chữ thường) -> thời điểm đăng nhập.
+    """
+    if not da_vao:
+        return False
+    by_email = {
+        (row.get("email") or "").strip().lower(): row for row in rows
+    }
+    changed = False
+    with _CACHE_LOCK:
+        cache = load_health_cache()
+        for email, when_login in da_vao.items():
+            row = by_email.get((email or "").strip().lower())
+            if not row:
+                continue
+            cookie = row.get("cookie") or ""
+            taken = row.get("cookie_taken_at") or when_login or ""
+            if "hatch_sess=" not in cookie or not taken:
+                continue
+            current = cache.get(email) or {}
+            checked = current.get("checked_at") or ""
+            if checked and checked >= taken:
+                continue
+            cache[(email or "").strip().lower()] = {
+                "status": STATUS_ALIVE,
+                "checked_at": taken,
+                "detail": "đăng nhập Muse từ Meta xong, đã vào được chat",
+            }
+            changed = True
+        if changed:
+            save_health_cache(cache)
+    return changed
+
+
+def nang_cookie_moi_thanh_song(rows):
+    """Cookie lấy sau lần kiểm tra gần nhất thì tính là còn sống.
+
+    Dùng cho các lượt đăng nhập lại đã ghi cookie mới trước khi
+    có bước ghi Còn sống. Chỉ nâng khi đã từng kiểm tra và mốc
+    lấy cookie đứng sau mốc kiểm tra.
+    """
+    changed = False
+    with _CACHE_LOCK:
+        cache = load_health_cache()
+        for row in rows:
+            email = (row.get("email") or "").strip().lower()
+            cookie = row.get("cookie") or ""
+            taken = row.get("cookie_taken_at") or ""
+            if (
+                not email
+                or "hatch_sess=" not in cookie
+                or not taken
+            ):
+                continue
+            current = cache.get(email) or {}
+            checked = current.get("checked_at") or ""
+            if not checked or taken <= checked:
+                continue
+            if current.get("status") == STATUS_ALIVE:
+                continue
+            cache[email] = {
+                "status": STATUS_ALIVE,
+                "checked_at": taken,
+                "detail": "cookie mới sau đăng nhập lại",
+            }
+            changed = True
+        if changed:
+            save_health_cache(cache)
+    return changed
+
+
 BROWSER_CHECK_TIMEOUT_MS = 20000
 
 

@@ -4,14 +4,12 @@ import secrets
 import string
 import sys
 import time
-import tkinter as tk
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from datetime import date
 from pathlib import Path
-from tkinter import messagebox
 
 import keyring
 
@@ -6761,6 +6759,17 @@ def _submit_meta_login_code(page):
 
 
 def _show_error(title, detail):
+    """Hộp thoại lỗi khi chạy tay trên máy có giao diện.
+
+    Lượt web chạy ẩn trên máy chủ không cài tkinter: in lỗi ra
+    thay vì sập ngay lúc mở file.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except ImportError:
+        print(f"{title}: {detail}", file=sys.stderr)
+        return
     root = tk.Tk()
     root.withdraw()
     messagebox.showerror(title, detail, parent=root)

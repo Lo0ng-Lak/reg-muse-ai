@@ -1359,6 +1359,23 @@ class Coordinator:
                                 )
                             except RuntimeError as error:
                                 mark_error = error
+                    if saved and "hatch_sess=" in (cookie or ""):
+                        try:
+                            import cookie_health
+
+                            cookie_health.ghi_con_song(
+                                address,
+                                "đăng nhập Muse từ Meta xong, đã vào được chat",
+                            )
+                        except Exception as error:
+                            self.events.put(
+                                (
+                                    "log",
+                                    f"[{display}/{label_total}] {address} đã "
+                                    f"vào Muse nhưng chưa ghi được Còn sống: "
+                                    f"{error}",
+                                )
+                            )
                     if saved:
                         if mark_error is not None:
                             self.events.put(
@@ -1374,9 +1391,9 @@ class Coordinator:
                                 f"{address} — "
                                 + (
                                     "đã đăng nhập sẵn qua màn liên kết, "
-                                    "bỏ qua bước thẻ, đã lưu vào sheet Excel."
+                                    "bỏ qua bước thẻ, đã ghi Còn sống."
                                     if card_skipped
-                                    else "đã nộp thẻ và lưu vào sheet Excel."
+                                    else "đã nộp thẻ và ghi Còn sống."
                                 ),
                             )
                         )
@@ -1704,6 +1721,9 @@ class Coordinator:
                     with shared_lock:
                         storage._write_relogin_cookie(
                             settings.relogin_output_path, address, cookie
+                        )
+                        storage._save_relogin_to_accounts(
+                            address, cookie, row.get("secret") or ""
                         )
                         shared["success"] += 1
                 except RuntimeError as error:

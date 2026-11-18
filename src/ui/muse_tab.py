@@ -1,14 +1,10 @@
-"""Tab Muse.ai: đăng ký tài khoản Muse.ai theo lô.
+"""Tab Muse.ai: đăng nhập Muse bằng tài khoản Meta đã đăng ký.
 
-Cách đăng ký chính: đăng nhập Muse bằng tài khoản Meta đã đăng
-kí — chọn file Excel Meta (tab Meta tạo ra file đó), tool lấy
-mail trong file đăng nhập rồi nộp thẻ đã lưu, không tạo mail
-mới. Vì vậy tab này KHÔNG có ô Temp mail (mail lấy từ file).
-Nút Bắt đầu đăng ký là cách cũ: tạo mail tạm mới (tempmail.plus)
-rồi đăng ký trực tiếp. Setup chạy (proxy, luồng, kết nối, số
-lượng) nằm ở SetupPanel riêng của tab này — kho proxy là
-proxies.txt / bad-proxies.txt (file cũ). Thẻ + mã mời chỉ có ở
-tab này.
+Chọn file Excel Meta (tab Meta tạo ra file đó), tool lấy mail
+trong file đăng nhập rồi nộp thẻ đã lưu. Không tạo tài khoản
+Muse mới và không tạo mail tạm. Setup chạy (proxy, luồng, kết
+nối, số lượng) nằm ở SetupPanel riêng của tab này — kho proxy
+là proxies.txt / bad-proxies.txt. Thẻ + mã mời chỉ có ở tab này.
 """
 
 import tkinter as tk
@@ -30,16 +26,15 @@ class MuseTab(ttk.Frame):
 
         ttk.Label(
             self,
-            text="Đăng ký Muse.ai theo lô",
+            text="Đăng nhập Muse từ tài khoản Meta",
             font=("Segoe UI", 16, "bold"),
         ).grid(row=0, column=0, sticky="w")
         ttk.Label(
             self,
             text=(
-                "Đăng nhập Muse bằng tài khoản Meta đã đăng kí: chọn file Excel "
-                "Meta ở ô bên dưới, tool lấy mail trong file đăng nhập rồi nộp "
-                "thẻ đã lưu. Nút Bắt đầu đăng ký là cách cũ: tạo mail tạm mới "
-                "rồi đăng ký trực tiếp."
+                "Chọn file Excel Meta ở ô bên dưới. Tool lấy mail đã đăng ký "
+                "Meta, đăng nhập Muse rồi nộp thẻ đã lưu. Không tạo tài khoản "
+                "Muse mới."
             ),
             wraplength=720,
         ).grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -168,8 +163,7 @@ class MuseTab(ttk.Frame):
         self.apply_limit_all_button.pack(side="left", padx=(6, 0))
         self._refresh_vault()
 
-        # Hàng chạy gọn trong một dòng: mã mời + Bắt đầu đăng ký
-        # + Mở sheet Excel.
+        # Mã mời dùng khi đăng nhập Muse, rồi mở sheet Excel.
         run_row = ttk.Frame(self)
         run_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(run_row, text="Mã mời:").pack(side="left")
@@ -190,10 +184,6 @@ class MuseTab(ttk.Frame):
             saved_invite = ""
         if saved_invite:
             self.invite_entry.insert(0, saved_invite.splitlines()[0].strip())
-        self.start_button = ttk.Button(
-            run_row, text="Bắt đầu đăng ký", command=self._start_registration
-        )
-        self.start_button.pack(side="left", padx=(12, 0))
         self.open_sheet_button = ttk.Button(
             run_row,
             text="Mở sheet Excel",
@@ -475,24 +465,7 @@ class MuseTab(ttk.Frame):
         manual=True là chỉ dùng thẻ chọn tay, False là tự động
         xoay. Kho trống thì ([], False) — bước thẻ chờ nhập tay.
         """
-        vault = storage._load_vault()
-        active = storage._load_vault_active()
-        if active:
-            chosen = [card for card in vault if card["id"] == active]
-            if not chosen:
-                storage._save_vault_active("")
-            else:
-                return (
-                    [
-                        CardRunState(
-                            card_id=chosen[0]["id"],
-                            label=chosen[0]["label"],
-                            limit=chosen[0]["limit"],
-                            used=chosen[0]["used"],
-                        )
-                    ],
-                    True,
-                )
+        chosen, manual = storage.vault_cards_for_run()
         return (
             [
                 CardRunState(
@@ -501,9 +474,9 @@ class MuseTab(ttk.Frame):
                     limit=card["limit"],
                     used=card["used"],
                 )
-                for card in vault
+                for card in chosen
             ],
-            False,
+            manual,
         )
 
     def _check_cards_before_run(self, cards, manual):
@@ -929,7 +902,6 @@ class MuseTab(ttk.Frame):
             self.delete_vault_card_button,
             self.save_limit_button,
             self.apply_limit_all_button,
-            self.start_button,
             self.meta_excel_entry,
             self.browse_excel_button,
             self.muse_login_button,

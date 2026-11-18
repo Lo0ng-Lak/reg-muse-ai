@@ -102,6 +102,7 @@ class WebConsole:
             "invite": invite,
             "cards": storage._load_vault(),
             "active_card": active or "",
+            "picked": storage._load_vault_picked(),
             "muse": _pool_view("proxies.txt", "bad-proxies.txt"),
             "meta": _pool_view("proxies_meta.txt", "bad-proxies-meta.txt"),
             "providers": [
@@ -136,11 +137,18 @@ class WebConsole:
             }
         if action == "select":
             card_id = (data.get("id") or "").strip()
-            storage._save_vault_active(card_id)
+            storage._save_vault_picked([card_id] if card_id else [])
             self._log("Đã chọn một thẻ cho lượt chạy sau.")
             return {"ok": True}
+        if action == "pick":
+            ids = _card_ids(data)
+            if not ids:
+                raise ConsoleError("Chọn ít nhất một thẻ.")
+            storage._save_vault_picked(ids)
+            self._log(f"Lượt chạy sau chỉ dùng {len(ids)} thẻ đã chọn.")
+            return {"ok": True, "count": len(ids)}
         if action == "auto":
-            storage._save_vault_active("")
+            storage._save_vault_picked([])
             self._log("Kho thẻ tự xoay theo thứ tự.")
             return {"ok": True}
         if action == "delete":
@@ -148,6 +156,14 @@ class WebConsole:
             storage._delete_vault_card(card_id)
             self._log("Đã xoá một thẻ khỏi kho.")
             return {"ok": True}
+        if action == "delete-many":
+            ids = _card_ids(data)
+            if not ids:
+                raise ConsoleError("Chọn ít nhất một thẻ.")
+            for card_id in ids:
+                storage._delete_vault_card(card_id)
+            self._log(f"Đã xoá {len(ids)} thẻ khỏi kho.")
+            return {"ok": True, "count": len(ids)}
         if action == "limit":
             try:
                 limit = int(data.get("limit") or 0)
@@ -159,6 +175,17 @@ class WebConsole:
                 raise ConsoleError("Không còn thẻ này trong kho.")
             self._log("Đã lưu giới hạn thẻ.")
             return {"ok": True}
+        if action == "limit-many":
+            ids = _card_ids(data)
+            if not ids:
+                raise ConsoleError("Chọn ít nhất một thẻ.")
+            try:
+                limit = int(data.get("limit") or 0)
+            except (TypeError, ValueError):
+                limit = 0
+            count = storage._set_vault_card_limits(ids, limit)
+            self._log(f"Đã đặt giới hạn cho {count} thẻ đã chọn.")
+            return {"ok": True, "count": count}
         if action == "limit-all":
             try:
                 limit = int(data.get("limit") or 0)
@@ -193,34 +220,10 @@ class WebConsole:
         return {"ok": True}
 
     def start_muse_register(self, data):
-        setup = _read_setup(data, "proxies.txt", "bad-proxies.txt", mail=False)
-        cards, manual = _run_cards()
-        _check_cards(cards, manual)
-        invite = (data.get("invite") or "").strip()
-        if invite:
-            paths.data_file("invite.txt").write_text(
-                invite + "\n", encoding="utf-8"
-            )
-        elif not invite:
-            invite = storage._last_invite_from_sheet() or ""
-        settings = RunSettings(
-            total=setup["total"],
-            pool=setup["pool"],
-            per_proxy=setup["per_proxy"],
-            lanes=setup["lanes"],
-            provider_id=setup["provider_id"],
-            direct=setup["direct"],
-            meta=False,
-            invite=invite,
-            single_invite=bool(data.get("single_invite")),
-            cards=cards,
-            manual_card=manual,
-            bad_file=setup["bad_file"],
-            bad_mapping=setup["bad_mapping"],
-            headless=setup["headless"],
+        raise ConsoleError(
+            "Không đăng ký Muse mới. Dùng Đăng nhập Muse với file "
+            "Excel tài khoản Meta đã đăng ký."
         )
-        self._begin(settings, f"đăng ký Muse, mục tiêu {setup['total']}")
-        return {"ok": True}
 
     def start_muse_login(self, data):
         excel = (data.get("excel") or "").strip()
@@ -243,6 +246,13 @@ class WebConsole:
                 "muốn nhập thẻ tay trên trình duyệt."
             )
         _check_cards(cards, manual)
+        invite = (data.get("invite") or "").strip()
+        if invite:
+            paths.data_file("invite.txt").write_text(
+                invite + "\n", encoding="utf-8"
+            )
+        else:
+            invite = storage._last_invite_from_sheet() or ""
         settings = RunSettings(
             total=setup["total"],
             pool=setup["pool"],
@@ -252,6 +262,8 @@ class WebConsole:
             direct=setup["direct"],
             meta_login=True,
             meta_excel_path=excel,
+            invite=invite,
+            single_invite=bool(data.get("single_invite")),
             cards=cards,
             manual_card=manual,
             bad_file=setup["bad_file"],
@@ -453,26 +465,15 @@ def _read_setup(data, pool_name, bad_name, mail):
     }
 
 
+def _card_ids(data):
+    raw = data.get("ids")
+    if not isinstance(raw, list):
+        raw = [data.get("id")] if data.get("id") else []
+    return storage._clean_picked_ids(raw)
+
+
 def _run_cards():
-    vault = storage._load_vault()
-    active = storage._load_vault_active()
-    if active:
-        chosen = [card for card in vault if card["id"] == active]
-        if not chosen:
-            storage._save_vault_active("")
-        else:
-            card = chosen[0]
-            return (
-                [
-                    CardRunState(
-                        card_id=card["id"],
-                        label=card["label"],
-                        limit=card["limit"],
-                        used=card["used"],
-                    )
-                ],
-                True,
-            )
+    chosen, manual = storage.vault_cards_for_run()
     return (
         [
             CardRunState(
@@ -481,9 +482,9 @@ def _run_cards():
                 limit=card["limit"],
                 used=card["used"],
             )
-            for card in vault
+            for card in chosen
         ],
-        False,
+        manual,
     )
 
 
