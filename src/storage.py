@@ -268,13 +268,23 @@ def import_accounts_from_excel(excel_path=None):
 
 
 def export_accounts_excel(excel_path=None):
-    """Xuất toàn bộ kho ra file Excel (để xem bằng Excel).
+    """Xuất các tài khoản còn sống ra file Excel.
 
     Mặc định ghi đè accounts.xlsx trong AppData. Trả về số tài
-    khoản đã xuất.
+    khoản đã xuất. Die và chưa kiểm tra không ghi vào file.
     """
+    import cookie_health
+    import cookie_vault
+
     path = excel_path or str(SPREADSHEET_FILE)
-    return account_store.export_to_excel(path, ACCOUNTS_DB_FILE)
+    alive = [
+        item["email"]
+        for item in cookie_vault.list_cookies()
+        if item.get("health") == cookie_health.STATUS_ALIVE
+    ]
+    return account_store.export_to_excel(
+        path, ACCOUNTS_DB_FILE, only_emails=alive
+    )
 
 
 def _cookie_history_path():

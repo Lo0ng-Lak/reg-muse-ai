@@ -692,6 +692,31 @@ def test_http_import_export_excel():
         ), data
         status, body = _http("GET", url + "/api/cookies")
         assert json.loads(body)["stats"]["total"] == 1, body
+        cookie_health.save_health_cache({
+            "imp@fexpost.com": {
+                "status": "song",
+                "checked_at": _iso(_now()),
+                "detail": "còn sống",
+            }
+        })
+        storage._append_spreadsheet_row(
+            "die@fexpost.com",
+            "s",
+            cookie="hatch_sess=die",
+            cookie_taken_at=_iso(_now()),
+        )
+        cookie_health.save_health_cache({
+            "imp@fexpost.com": {
+                "status": "song",
+                "checked_at": _iso(_now()),
+                "detail": "còn sống",
+            },
+            "die@fexpost.com": {
+                "status": "chet",
+                "checked_at": _iso(_now()),
+                "detail": "die",
+            },
+        })
         status, body = _http("GET", url + "/api/export-excel")
         assert status == 200, status
         assert body[:2] == b"PK"  # xlsx là file zip
@@ -701,7 +726,8 @@ def test_http_import_export_excel():
         values = list(
             _load(_io.BytesIO(body)).active.iter_rows(values_only=True)
         )
-        assert values[1][1] == "imp@fexpost.com", values
+        emails = [row[1] for row in values[1:]]
+        assert emails == ["imp@fexpost.com"], values
         assert values[1][3] == COOKIE_A, values
     finally:
         httpd.shutdown()

@@ -456,11 +456,16 @@ class CookieWeb:
         return storage.import_accounts_from_excel(path)
 
     def export_excel_bytes(self):
-        """Toàn bộ kho -> bytes file Excel (để tải về)."""
+        """Các tài khoản còn sống -> bytes file Excel."""
         import account_store
 
+        alive = [
+            item["email"]
+            for item in cookie_vault.list_cookies()
+            if item.get("health") == cookie_health.STATUS_ALIVE
+        ]
         return account_store.export_to_excel_bytes(
-            storage.ACCOUNTS_DB_FILE
+            storage.ACCOUNTS_DB_FILE, only_emails=alive
         )
 
     def delete_cookie(self, email):
@@ -1553,7 +1558,7 @@ tbody tr:hover td { background:#f8fafc; }
     <button class="ghost" onclick="refreshScope('dead','btnDead')" id="btnDead">Đăng nhập lại Die</button>
     <button class="ghost" onclick="loadAll()">Làm mới</button>
     <button class="ghost" onclick="importExcel()">Nhập từ Excel</button>
-    <button class="ghost" onclick="exportExcel()">Xuất ra Excel</button>
+    <button class="ghost" onclick="exportExcel()">Xuất còn sống</button>
   </div>
   <div class="card">
     <h2>Danh sách</h2>

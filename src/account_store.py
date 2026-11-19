@@ -452,15 +452,25 @@ def import_from_excel(excel_path, db_path=None):
     }
 
 
-def export_to_excel_bytes(db_path=None):
-    """Toàn bộ kho -> bytes file Excel (7 cột, đúng thứ tự cũ)."""
+def export_to_excel_bytes(db_path=None, only_emails=None):
+    """Kho -> bytes file Excel (7 cột, đúng thứ tự cũ).
+
+    only_emails là tập email (chữ thường) cần xuất. None thì
+    xuất mọi dòng.
+    """
     from openpyxl import Workbook
 
+    wanted = None
+    if only_emails is not None:
+        wanted = {(email or "").strip().lower() for email in only_emails}
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Muse.ai"
     sheet.append(EXCEL_HEADERS)
     for row in list_accounts(db_path):
+        email = (row.get("email") or "").strip().lower()
+        if wanted is not None and email not in wanted:
+            continue
         sheet.append(
             [
                 row["created_at"],
@@ -477,12 +487,21 @@ def export_to_excel_bytes(db_path=None):
     return buffer.getvalue()
 
 
-def export_to_excel(excel_path, db_path=None):
-    """Ghi toàn bộ kho ra file Excel (đường xuất). Trả về số dòng."""
+def export_to_excel(excel_path, db_path=None, only_emails=None):
+    """Ghi kho ra file Excel. Trả về số dòng đã xuất."""
     path = Path(excel_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(export_to_excel_bytes(db_path))
-    return count(db_path)
+    path.write_bytes(
+        export_to_excel_bytes(db_path, only_emails=only_emails)
+    )
+    if only_emails is None:
+        return count(db_path)
+    wanted = {(email or "").strip().lower() for email in only_emails}
+    return sum(
+        1
+        for row in list_accounts(db_path)
+        if (row.get("email") or "").strip().lower() in wanted
+    )
 
 
 def db_file_exists(db_path=None):

@@ -867,7 +867,8 @@ class MuseTab(ttk.Frame):
             return
         if total == 0:
             messagebox.showwarning(
-                "Kho trống", "Kho chưa có tài khoản nào."
+                "Không có tài khoản còn sống",
+                "Kho không có tài khoản Còn sống để xuất.",
             )
             return
         try:
