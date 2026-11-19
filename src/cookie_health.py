@@ -44,34 +44,25 @@ HEALTH_CACHE_FILE = "cookie_health.json"
 # browser_helper._is_muse_chat_ui).
 ALIVE_MARKERS = ("Ask Meta AI",)
 
+# Dấu hiệu tài khoản đã bị Meta ngắt kết nối: đăng nhập xong vẫn
+# hiện màn này thay vì giao diện chat — cookie đã chết, đăng nhập
+# lại cũng không cứu được (gặp 2026-11-19).
+DEAD_MARKERS = ("muse is disconnected", "we disconnected muse")
+
 STATUS_ALIVE = "song"
 STATUS_DEAD = "chet"
 STATUS_UNKNOWN = "khong-ro"
-STATUS_HOPELESS = "het-cuu"
 
 STATUS_LABELS = {
     STATUS_ALIVE: "Hoạt động",
     STATUS_DEAD: "Die",
-    STATUS_UNKNOWN: "Chưa xác minh",
-    STATUS_HOPELESS: "Hết cứu",
+    STATUS_UNKNOWN: "Chưa kiểm tra",
 }
 
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
-)
-
-# Không cần ảnh, font, video để biết cookie sống hay chết —
-# chỉ cần chữ trên trang. Tắt những thứ này thì trang nhẹ hơn
-# và hết chờ sớm hơn.
-_HEAVY_RESOURCE_TYPES = ("image", "media", "font")
-_BROWSER_LAUNCH_ARGS = (
-    "--disable-gpu",
-    "--disable-extensions",
-    "--disable-background-networking",
-    "--mute-audio",
-    "--blink-settings=imagesEnabled=false",
 )
 
 
@@ -119,6 +110,8 @@ def check_cookie(cookie, fetcher=None, url=MUSE_HOME_URL):
         return STATUS_DEAD, "bị đẩy về màn đăng nhập"
     if "log in" in lowered_body:
         return STATUS_DEAD, "trang hiện màn đăng nhập"
+    if any(marker in lowered_body for marker in DEAD_MARKERS):
+        return STATUS_DEAD, "tài khoản bị ngắt kết nối (Muse is disconnected)"
     return STATUS_UNKNOWN, "trang trả về không nhận diện được"
 
 
@@ -184,130 +177,6 @@ def check_and_cache(email, cookie, fetcher=None, checker=None,
     return entry
 
 
-def ghi_con_song(email, detail="đăng nhập lại xong, đã vào được chat"):
-    """Ghi tài khoản là còn sống sau khi đăng nhập lại lấy được cookie.
-
-    Đăng nhập lại đã vào chat và có hatch_sess. Cache kiểm tra
-    vẫn đang giữ Die của cookie cũ thì số Còn sống không tăng
-    và số Die không giảm. Ghi đè kết quả đó.
-    """
-    key = (email or "").strip().lower()
-    if not key:
-        return None
-    entry = {
-        "status": STATUS_ALIVE,
-        "checked_at": datetime.now().astimezone().isoformat(
-            timespec="seconds"
-        ),
-        "detail": detail,
-    }
-    with _CACHE_LOCK:
-        cache = load_health_cache()
-        cache[key] = entry
-        save_health_cache(cache)
-    return entry
-
-
-def ghi_het_cuu(email, detail):
-    """Ghi tài khoản là hết cứu: đăng nhập lại không lấy lại được.
-
-    Die còn có thể đăng nhập lại. Hết cứu thì không đưa vào
-    lượt đăng nhập lại nữa. detail là lý do cụ thể.
-    """
-    key = (email or "").strip().lower()
-    if not key:
-        return None
-    entry = {
-        "status": STATUS_HOPELESS,
-        "checked_at": datetime.now().astimezone().isoformat(
-            timespec="seconds"
-        ),
-        "detail": detail or "hết cứu",
-    }
-    with _CACHE_LOCK:
-        cache = load_health_cache()
-        cache[key] = entry
-        save_health_cache(cache)
-    return entry
-
-
-def nang_dang_nhap_meta_thanh_song(rows, da_vao):
-    """Mail đã vào Muse từ Meta mà cookie này chưa được kiểm tra.
-
-    Vào được chat là còn sống tại lúc lấy cookie. Chưa có kết quả
-    kiểm tra sau mốc đó thì ghi Còn sống, để vòng kiểm tra không
-    mở trình duyệt cho đúng tài khoản vừa đăng nhập. Đã kiểm tra
-    sau lúc lấy cookie thì giữ kết quả đó.
-    da_vao: email (chữ thường) -> thời điểm đăng nhập.
-    """
-    if not da_vao:
-        return False
-    by_email = {
-        (row.get("email") or "").strip().lower(): row for row in rows
-    }
-    changed = False
-    with _CACHE_LOCK:
-        cache = load_health_cache()
-        for email, when_login in da_vao.items():
-            row = by_email.get((email or "").strip().lower())
-            if not row:
-                continue
-            cookie = row.get("cookie") or ""
-            taken = row.get("cookie_taken_at") or when_login or ""
-            if "hatch_sess=" not in cookie or not taken:
-                continue
-            current = cache.get(email) or {}
-            checked = current.get("checked_at") or ""
-            if checked and checked >= taken:
-                continue
-            cache[(email or "").strip().lower()] = {
-                "status": STATUS_ALIVE,
-                "checked_at": taken,
-                "detail": "đăng nhập Muse từ Meta xong, đã vào được chat",
-            }
-            changed = True
-        if changed:
-            save_health_cache(cache)
-    return changed
-
-
-def nang_cookie_moi_thanh_song(rows):
-    """Cookie lấy sau lần kiểm tra gần nhất thì tính là còn sống.
-
-    Dùng cho các lượt đăng nhập lại đã ghi cookie mới trước khi
-    có bước ghi Còn sống. Chỉ nâng khi đã từng kiểm tra và mốc
-    lấy cookie đứng sau mốc kiểm tra.
-    """
-    changed = False
-    with _CACHE_LOCK:
-        cache = load_health_cache()
-        for row in rows:
-            email = (row.get("email") or "").strip().lower()
-            cookie = row.get("cookie") or ""
-            taken = row.get("cookie_taken_at") or ""
-            if (
-                not email
-                or "hatch_sess=" not in cookie
-                or not taken
-            ):
-                continue
-            current = cache.get(email) or {}
-            checked = current.get("checked_at") or ""
-            if not checked or taken <= checked:
-                continue
-            if current.get("status") == STATUS_ALIVE:
-                continue
-            cache[email] = {
-                "status": STATUS_ALIVE,
-                "checked_at": taken,
-                "detail": "cookie mới sau đăng nhập lại",
-            }
-            changed = True
-        if changed:
-            save_health_cache(cache)
-    return changed
-
-
 BROWSER_CHECK_TIMEOUT_MS = 20000
 
 
@@ -344,63 +213,6 @@ def _is_challenge_page(body):
             "cloudflare",
         )
     )
-
-
-def _chan_tai_nguyen_nang(context):
-    """Chặn ảnh, font, video trên context kiểm tra.
-
-    Context giả trong test không có route() thì bỏ qua.
-    """
-    route = getattr(context, "route", None)
-    if route is None:
-        return
-
-    def _handle(request_route):
-        request = getattr(request_route, "request", None)
-        kind = getattr(request, "resource_type", "")
-        if kind in _HEAVY_RESOURCE_TYPES:
-            request_route.abort()
-        else:
-            request_route.continue_()
-
-    try:
-        route("**/*", _handle)
-    except Exception:
-        pass
-
-
-def _thay_o_chat(page):
-    """True khi ô chat đã có trên trang.
-
-    Hỏi đúng phần tử thay vì kéo cả HTML (page.content() nặng
-    và chậm trên SPA). Trang giả không có get_by_placeholder
-    thì trả None để người gọi đọc HTML như cũ.
-    """
-    probe = getattr(page, "get_by_placeholder", None)
-    if probe is None:
-        return None
-    try:
-        return probe("Ask Meta AI").count() > 0
-    except Exception:
-        return None
-
-
-def _thay_man_dang_nhap(page):
-    """True khi trang đang hiện nút đăng nhập.
-
-    Cùng quy ước _thay_o_chat: không có get_by_text thì trả None.
-    """
-    probe = getattr(page, "get_by_text", None)
-    if probe is None:
-        return None
-    try:
-        if probe("Log in").count() > 0:
-            return True
-        if probe("Sign in").count() > 0:
-            return True
-        return False
-    except Exception:
-        return None
 
 
 def clean_cookie_pairs(pairs):
@@ -487,8 +299,7 @@ class BrowserChecker:
         try:
             self._playwright = sync_playwright().start()
             self._browser = self._playwright.chromium.launch(
-                headless=True,
-                args=list(_BROWSER_LAUNCH_ARGS),
+                headless=True
             )
         except Exception as error:
             self.close()
@@ -528,7 +339,6 @@ class BrowserChecker:
         if not any(name == "hatch_sess" for name, _ in pairs):
             return STATUS_DEAD, "không có hatch_sess"
         context = self._browser.new_context()
-        _chan_tai_nguyen_nang(context)
         try:
             try:
                 context.add_cookies(
@@ -574,22 +384,6 @@ class BrowserChecker:
                     url = (page.url or "").lower()
                     if "login" in url or "auth.meta.com" in url:
                         return STATUS_DEAD, "bị đẩy về màn đăng nhập"
-                    chat = _thay_o_chat(page)
-                    if chat is True:
-                        return STATUS_ALIVE, "vào được giao diện chat"
-                    dang_nhap = _thay_man_dang_nhap(page)
-                    if dang_nhap is True:
-                        return STATUS_DEAD, "trang hiện màn đăng nhập"
-                    # Playwright thật: chưa thấy dấu hiệu thì chưa
-                    # kéo cả HTML. Chỉ đọc HTML khi không hỏi
-                    # được phần tử (trang giả) hoặc đã hết giờ
-                    # (để nhận trang challenge).
-                    if (
-                        chat is not None
-                        or dang_nhap is not None
-                    ) and time.monotonic() < deadline:
-                        page.wait_for_timeout(250)
-                        continue
                     try:
                         body = (page.content() or "").lower()
                     except Exception:
@@ -603,6 +397,8 @@ class BrowserChecker:
                         return STATUS_ALIVE, "vào được giao diện chat"
                     if "log in" in body or "sign in" in body:
                         return STATUS_DEAD, "trang hiện màn đăng nhập"
+                    if any(marker in body for marker in DEAD_MARKERS):
+                        return STATUS_DEAD, "tài khoản bị ngắt kết nối (Muse is disconnected)"
                     if time.monotonic() >= deadline:
                         if _is_challenge_page(body):
                             return (
@@ -739,6 +535,11 @@ class ApiChecker:
             return (
                 STATUS_DEAD,
                 "trang hiện màn đăng nhập (yêu cầu nhanh)",
+            )
+        if any(marker in body for marker in DEAD_MARKERS):
+            return (
+                STATUS_DEAD,
+                "tài khoản bị ngắt kết nối (yêu cầu nhanh)",
             )
         return (
             STATUS_UNKNOWN,

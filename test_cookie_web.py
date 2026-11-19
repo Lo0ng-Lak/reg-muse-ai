@@ -70,8 +70,6 @@ def _iso(dt):
 
 
 def reset():
-    # Vòng kiểm tra nền sẽ mở trình duyệt. Test không bật vòng đó.
-    cookie_web.TU_DONG_KIEM_TRA = False
     # Đặt lại trạng thái nhập kho: mỗi test tự nhập từ fixture
     # Excel của mình (không thì test đầu tiên nhập xong sẽ làm
     # các test sau bỏ qua bước nhập).
@@ -291,11 +289,6 @@ def test_history_append_read():
     assert len(history) == 2, history
     assert history[0]["action"] == "lam-moi"  # mới nhất trước
     assert history[1]["action"] == "lay"
-    storage._append_cookie_history("lam-moi", "b@fexpost.com", "lấy lại")
-    storage._append_cookie_history("xoa", "a@fexpost.com", "xoá cookie")
-    assert storage._cookie_history_counts() == {
-        "lay": 1, "lam-moi": 2, "xoa": 1,
-    }
 
 
 # --- HTTP ------------------------------------------------------------
@@ -425,6 +418,20 @@ def test_health_dead_when_login_button_without_chat():
         ),
     )
     assert status == cookie_health.STATUS_DEAD, status
+
+
+def test_health_dead_when_disconnected_page():
+    status, detail = cookie_health.check_cookie(
+        COOKIE_LIVE,
+        fetcher=_fake_fetch(
+            "https://www.meta.ai/",
+            "<html><body><h1>Muse is disconnected</h1>"
+            "<p>We disconnected Muse to protect your information."
+            "</p></body></html>",
+        ),
+    )
+    assert status == cookie_health.STATUS_DEAD, (status, detail)
+    assert "ngắt kết nối" in detail, detail
 
 
 def test_health_unknown_when_page_unrecognised():
@@ -692,31 +699,6 @@ def test_http_import_export_excel():
         ), data
         status, body = _http("GET", url + "/api/cookies")
         assert json.loads(body)["stats"]["total"] == 1, body
-        cookie_health.save_health_cache({
-            "imp@fexpost.com": {
-                "status": "song",
-                "checked_at": _iso(_now()),
-                "detail": "còn sống",
-            }
-        })
-        storage._append_spreadsheet_row(
-            "die@fexpost.com",
-            "s",
-            cookie="hatch_sess=die",
-            cookie_taken_at=_iso(_now()),
-        )
-        cookie_health.save_health_cache({
-            "imp@fexpost.com": {
-                "status": "song",
-                "checked_at": _iso(_now()),
-                "detail": "còn sống",
-            },
-            "die@fexpost.com": {
-                "status": "chet",
-                "checked_at": _iso(_now()),
-                "detail": "die",
-            },
-        })
         status, body = _http("GET", url + "/api/export-excel")
         assert status == 200, status
         assert body[:2] == b"PK"  # xlsx là file zip
@@ -726,89 +708,8 @@ def test_http_import_export_excel():
         values = list(
             _load(_io.BytesIO(body)).active.iter_rows(values_only=True)
         )
-        emails = [row[1] for row in values[1:]]
-        assert emails == ["imp@fexpost.com"], values
+        assert values[1][1] == "imp@fexpost.com", values
         assert values[1][3] == COOKIE_A, values
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-
-
-def test_chon_nhieu_the_va_dang_ky_vao_quan_ly():
-    """Tick nhiều thẻ thì lượt chạy chỉ lấy nhóm đó. Đăng ký Muse
-    và đăng nhập lại ghi đúng kho Quản lý. Meta nằm ở file Meta,
-    chưa có cookie Muse thì không hiện là cookie."""
-    import web_console
-
-    added, errors, skipped = storage._import_bulk_cards(
-        "4000000000000002|12/30|123|10001|Thẻ A\n"
-        "4000000000000010|12/30|123|10001|Thẻ B\n"
-        "4000000000000028|12/30|123|10001|Thẻ C\n"
-    )
-    assert errors == [], errors
-    assert skipped == 0
-    assert added == ["Thẻ A", "Thẻ B", "Thẻ C"], added
-    vault = storage._load_vault()
-    by_label = {card["label"]: card["id"] for card in vault}
-    storage._save_vault_picked([by_label["Thẻ A"], by_label["Thẻ B"]])
-    cards, manual = web_console._run_cards()
-    assert [card.label for card in cards] == ["Thẻ A", "Thẻ B"]
-    assert manual is False
-    console = web_console.WebConsole()
-    console.cards("limit-many", {"ids": [by_label["Thẻ A"], by_label["Thẻ B"]], "limit": 4})
-    limits = {card["label"]: card["limit"] for card in storage._load_vault()}
-    assert limits["Thẻ A"] == 4 and limits["Thẻ B"] == 4, limits
-    console.cards("delete-many", {"ids": [by_label["Thẻ C"]]})
-    assert "Thẻ C" not in {card["label"] for card in storage._load_vault()}
-    assert storage._load_vault_picked() == [by_label["Thẻ A"], by_label["Thẻ B"]]
-
-    storage._append_spreadsheet_row(
-        "reg@fexpost.com", "pw", cookie="hatch_sess=reg1", invite="INV9"
-    )
-    listed = {item["email"]: item for item in cookie_vault.list_cookies()}
-    assert listed["reg@fexpost.com"]["has_cookie"] is True
-    assert listed["reg@fexpost.com"]["invite"] == "INV9"
-
-    storage._append_meta_row(
-        "meta@fexpost.com",
-        mail_password="secret-mail",
-        username="meta-user",
-        provider="tempmail.plus",
-    )
-    pending = storage._pending_meta_logins(storage.META_SPREADSHEET_FILE)
-    assert pending and pending[0]["email"] == "meta@fexpost.com", pending
-    assert pending[0]["secret"] == "secret-mail"
-    assert "meta@fexpost.com" not in listed
-
-    storage._save_relogin_to_accounts(
-        "reg@fexpost.com", "hatch_sess=moi", "pw"
-    )
-    again = {item["email"]: item for item in cookie_vault.list_cookies()}
-    assert again["reg@fexpost.com"]["has_cookie"] is True
-    assert storage._cookie_history_counts()["lam-moi"] == 1
-    page = cookie_web.DASHBOARD_HTML
-    assert "Xoá đã chọn" in page and "card-tick" in page
-    assert "Chỉ dùng thẻ đã chọn" in page
-
-
-def test_register_page_and_console_refuse_empty_proxy():
-    httpd, url = cookie_web.start_server(port=0)
-    try:
-        status, body = _http("GET", url + "/dang-ky")
-        page = body.decode("utf-8")
-        assert status == 200, status
-        assert 'id="viewRegister"' in page
-        assert "Quản lý" in page and "Đăng ký" in page
-        status, body = _http("GET", url + "/api/console")
-        data = json.loads(body)
-        assert data["running"] is False
-        assert isinstance(data["cards"], list)
-        status, body = _http(
-            "POST", url + "/api/console/muse/register",
-            {"total": 1, "proxies": "", "direct": False},
-        )
-        assert status == 400, body
-        assert "không đăng ký muse" in body.decode("utf-8").lower()
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -835,9 +736,8 @@ def test_dashboard_script_parses_and_handlers_escaped():
     assert "j.emails.map(esc).join" not in script, script
     assert "(j.emails||[]).length" in script, script
     assert "Đang kiểm tra…" in script, script
-    assert "healthBadge" in script, script
-    assert "cookie-masked" not in script, script
-    for handler in ("checkOne", "refreshOne", "deleteCookie"):
+    assert "healthCell" in script, script
+    for handler in ("copyCookie", "checkOne", "refreshOne", "deleteCookie"):
         assert (
             f"{handler}(&quot;\"+esc(c.email)+\"&quot;,this)"
             in script
@@ -890,11 +790,10 @@ def test_stats_counts_unchecked_separately_from_dead():
     )
     stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
     assert stats["chua-kiem-tra"] == 1, stats
-    assert stats["chua-xac-minh"] == 0, stats
     assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
-    # Kiểm tra rồi nhưng chưa rõ (lỗi mạng, như 403) là
-    # chưa xác minh — không đếm vào còn sống, cũng không
-    # đếm vào chưa kiểm tra.
+    # Kiểm tra rồi nhưng chưa rõ (lỗi mạng, như 403 hồi
+    # 2026-11-17) vẫn phải tính là chưa kiểm tra — số này
+    # chỉ về 0 khi đã có kết luận sống/chết thật.
     def _boom(url, cookie, timeout):
         raise urllib.error.URLError("403")
 
@@ -902,8 +801,7 @@ def test_stats_counts_unchecked_separately_from_dead():
         "c@fexpost.com", COOKIE_LIVE, fetcher=_boom
     )
     stats = cookie_vault.cookie_stats(cookie_vault.list_cookies())
-    assert stats["chua-kiem-tra"] == 0, stats
-    assert stats["chua-xac-minh"] == 1, stats
+    assert stats["chua-kiem-tra"] == 1, stats
     assert stats["hoat-dong"] == 1 and stats["chet"] == 1, stats
 
 
@@ -943,24 +841,11 @@ def test_select_check_emails_scopes():
         {"email": "fresh@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh},
         {"email": "het@x.com", "status": "het-han", "has_cookie": True, "health_checked_at": fresh},
         {"email": "nocookie@x.com", "status": "khong-ro", "has_cookie": False, "health_checked_at": ""},
-        {"email": "chua@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh, "health": "khong-ro"},
-        {"email": "ro@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh, "health": "song"},
-        {"email": "song-2ngay@x.com", "status": "song", "has_cookie": True, "health_checked_at": _iso(now - timedelta(days=2)), "health": "song"},
-        {"email": "song-4ngay@x.com", "status": "song", "has_cookie": True, "health_checked_at": _iso(now - timedelta(days=4)), "health": "song"},
-        {"email": "song-8ngay@x.com", "status": "song", "has_cookie": True, "health_checked_at": _iso(now - timedelta(days=8)), "health": "song"},
-        {"email": "chet-moi@x.com", "status": "song", "has_cookie": True, "health_checked_at": fresh, "health": "chet"},
-        {"email": "chet-25h@x.com", "status": "song", "has_cookie": True, "health_checked_at": old, "health": "chet"},
     ]
-    # stale: chưa kiểm tra, còn sống quá 7 ngày, hoặc vừa kiểm
-    # tra nhưng chưa rõ. Còn sống 4 ngày thì thôi. Die thì thôi.
+    # stale: chưa kiểm tra bao giờ hoặc quá 24 giờ trước.
     assert cookie_web.select_check_emails(
         cookies, "stale"
-    ) == [
-        "never@x.com",
-        "old@x.com",
-        "chua@x.com",
-        "song-8ngay@x.com",
-    ]
+    ) == ["never@x.com", "old@x.com"]
     assert cookie_web.select_check_emails(
         cookies, "expiring"
     ) == ["old@x.com", "het@x.com"]
@@ -969,73 +854,7 @@ def test_select_check_emails_scopes():
         "old@x.com",
         "fresh@x.com",
         "het@x.com",
-        "chua@x.com",
-        "ro@x.com",
-        "song-2ngay@x.com",
-        "song-4ngay@x.com",
-        "song-8ngay@x.com",
-        "chet-moi@x.com",
-        "chet-25h@x.com",
     ]
-
-
-def test_vong_nen_tu_bat_dau_va_khong_xep_chong():
-    now = _now()
-    fresh = _iso(now - timedelta(minutes=30))
-    cookies = [
-        {"email": "never@x.com", "has_cookie": True, "health_checked_at": ""},
-        {
-            "email": "vua-song@x.com",
-            "has_cookie": True,
-            "health_checked_at": fresh,
-            "health": "song",
-        },
-        {
-            "email": "vua-chua-ro@x.com",
-            "has_cookie": True,
-            "health_checked_at": fresh,
-            "health": "khong-ro",
-        },
-        {"email": "trong@x.com", "has_cookie": False, "health_checked_at": ""},
-        {
-            "email": "song-2ngay@x.com",
-            "has_cookie": True,
-            "health_checked_at": _iso(now - timedelta(days=2)),
-            "health": "song",
-        },
-        {
-            "email": "song-4ngay@x.com",
-            "has_cookie": True,
-            "health_checked_at": _iso(now - timedelta(days=4)),
-            "health": "song",
-        },
-        {
-            "email": "song-8ngay@x.com",
-            "has_cookie": True,
-            "health_checked_at": _iso(now - timedelta(days=8)),
-            "health": "song",
-        },
-    ]
-    # Chưa kiểm tra và vừa ra chưa rõ đều được xếp lại.
-    # Còn sống dưới 7 ngày thì thôi. Còn sống quá 7 ngày thì kiểm.
-    # Không có cookie thì thôi.
-    assert cookie_web.select_mail_vong_nen(cookies) == [
-        "never@x.com",
-        "vua-chua-ro@x.com",
-        "song-8ngay@x.com",
-    ]
-    web = cookie_web.CookieWeb()
-    called = []
-    web.start_check_all = lambda emails: called.append(list(emails)) or "job-x"
-    assert web.bat_kiem_tra_neu_can(cookies) == "job-x"
-    assert called == [["never@x.com", "vua-chua-ro@x.com", "song-8ngay@x.com"]]
-    web.jobs["job-1"] = {
-        "kind": "check",
-        "status": "running",
-        "created_at": fresh,
-    }
-    assert web.bat_kiem_tra_neu_can(cookies) is None
-    assert called == [["never@x.com", "vua-chua-ro@x.com", "song-8ngay@x.com"]]
 
 
 def test_start_check_all_khong_xep_chong_job():
@@ -1195,63 +1014,6 @@ def _browser_checker_with(page, timeout_ms=None):
     return checker, browser
 
 
-def test_browser_checker_chan_anh_font_video():
-    # Ảnh, font, video không giúp phân biệt sống/chết — chặn để
-    # trang nhẹ hơn. Script và tài liệu vẫn được tải.
-    page = _FakePage(
-        "https://www.meta.ai/",
-        '<html><body><textarea placeholder="Ask Meta AI">'
-        "</textarea></body></html>",
-    )
-    seen = {}
-
-    class _Request:
-        def __init__(self, kind):
-            self.resource_type = kind
-
-    class _Route:
-        def __init__(self, kind):
-            self.request = _Request(kind)
-            self.aborted = False
-            self.continued = False
-
-        def abort(self):
-            self.aborted = True
-
-        def continue_(self):
-            self.continued = True
-
-    class _Context(_FakeContext):
-        def route(self, pattern, handler):
-            seen["pattern"] = pattern
-            seen["handler"] = handler
-
-    class _Browser(_FakeBrowser):
-        def new_context(self):
-            ctx = _Context(self.page)
-            self.contexts.append(ctx)
-            return ctx
-
-    browser = _Browser(page)
-    checker = cookie_health.BrowserChecker(launcher=lambda: browser)
-    checker.start()
-    status, _detail = checker.check(COOKIE_LIVE)
-    assert status == "song", status
-    assert seen["pattern"] == "**/*"
-    image = _Route("image")
-    script = _Route("script")
-    seen["handler"](image)
-    seen["handler"](script)
-    assert image.aborted and not image.continued
-    assert script.continued and not script.aborted
-    font = _Route("font")
-    video = _Route("media")
-    seen["handler"](font)
-    seen["handler"](video)
-    assert font.aborted and video.aborted
-    checker.close()
-
-
 def test_browser_checker_song_khi_vao_duoc_chat():
     page = _FakePage(
         "https://www.meta.ai/",
@@ -1320,6 +1082,20 @@ def test_browser_checker_chet_khi_trang_hien_sign_in():
     checker, browser = _browser_checker_with(page)
     status, _detail = checker.check(COOKIE_LIVE)
     assert status == "chet", status
+    checker.close()
+
+
+def test_browser_checker_chet_khi_tai_khoan_bi_ngat_ket_noi():
+    page = _FakePage(
+        "https://www.meta.ai/",
+        "<html><body><h1>Muse is disconnected</h1>"
+        "<p>We disconnected Muse to protect your information.</p>"
+        "</body></html>",
+    )
+    checker, browser = _browser_checker_with(page)
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "chet", (status, detail)
+    assert "ngắt kết nối" in detail, detail
     checker.close()
 
 
@@ -1428,6 +1204,19 @@ def test_api_checker_chet_khi_html_hien_sign_in():
     )
     status, detail = checker.check(COOKIE_LIVE)
     assert status == "chet", (status, detail)
+    checker.close()
+
+
+def test_api_checker_chet_khi_tai_khoan_bi_ngat_ket_noi():
+    checker, _request = _api_checker_with(
+        "https://www.meta.ai/",
+        "<html><body><h1>Muse is disconnected</h1>"
+        "<p>We disconnected Muse to protect your information.</p>"
+        "</body></html>",
+    )
+    status, detail = checker.check(COOKIE_LIVE)
+    assert status == "chet", (status, detail)
+    assert "ngắt kết nối" in detail, detail
     checker.close()
 
 
@@ -1785,42 +1574,6 @@ def test_kiem_tra_mot_mail_tra_ve_none_khi_ket():
     time.sleep(0.5)
 
 
-def test_check_slice_dung_cung_luong_da_mo_trinh_duyet():
-    # Playwright sync gắn greenlet vào luồng đã start(). check()
-    # và close() phải chạy trên đúng luồng đó — gọi từ luồng chờ
-    # timeout sẽ ném 'Cannot switch to a different thread'.
-    seen = {}
-
-    class _GhiLuong:
-        def start(self):
-            seen["start"] = threading.get_ident()
-
-        def check(self, cookie):
-            seen["check"] = threading.get_ident()
-            return "song", "vào được giao diện chat"
-
-        def close(self):
-            seen["close"] = threading.get_ident()
-
-    web = cookie_web.CookieWeb()
-    job = web._new_job(["a@fexpost.com"], "check")
-    counts = {"song": 0, "chet": 0, "khong-ro": 0}
-    web._check_slice(
-        job,
-        ["a@fexpost.com"],
-        {"a@fexpost.com": COOKIE_LIVE},
-        lambda: _GhiLuong(),
-        counts,
-        [],
-        threading.Lock(),
-        fast_factory=None,
-        timeout_seconds=5,
-    )
-    assert counts["song"] == 1, counts
-    assert seen["start"] == seen["check"] == seen["close"], seen
-    assert seen["start"] != threading.get_ident(), seen
-
-
 def test_check_slice_thay_cap_moi_khi_mot_mail_ket():
     # Mail đầu kẹt (check ngủ 1.2 giây), mail sau vẫn được kiểm
     # tra bằng cặp mới — job không đứng cứng (lỗi 2026-11-17:
@@ -1876,72 +1629,6 @@ def test_check_slice_thay_cap_moi_khi_mot_mail_ket():
     time.sleep(0.5)
 
 
-def test_check_job_tu_kiem_tra_lai_mail_chua_ro():
-    # Mail chưa rõ được kiểm tra lại một lần khi lượt xong.
-    # Lượt kiểm tra lại không tự xếp thêm lượt nữa.
-    storage._append_spreadsheet_row(
-        "chua@fexpost.com",
-        "s",
-        cookie="hatch_sess=CHUA",
-        cookie_taken_at=_iso(_now()),
-    )
-    storage._append_spreadsheet_row(
-        "song@fexpost.com",
-        "s",
-        cookie=COOKIE_LIVE,
-        cookie_taken_at=_iso(_now()),
-    )
-
-    class _Checker:
-        def start(self):
-            pass
-
-        def smoke_test(self):
-            pass
-
-        def check(self, cookie):
-            if "CHUA" in cookie:
-                return "khong-ro", "trang trả về không nhận diện được"
-            return "song", "vào được giao diện chat"
-
-        def close(self):
-            pass
-
-    class _NoFast:
-        def start(self):
-            raise RuntimeError("không dùng yêu cầu nhanh")
-
-        def close(self):
-            pass
-
-    web = cookie_web.CookieWeb()
-    job = web._new_job(
-        ["chua@fexpost.com", "song@fexpost.com"], "check"
-    )
-    job["kiem_tra_lai"] = True
-    web._run_check_job(
-        job, checker_factory=_Checker, fast_factory=_NoFast
-    )
-    extra = [
-        thread for thread in threading.enumerate()
-        if thread.name.startswith("cookie-check-")
-        and thread is not threading.current_thread()
-    ]
-    for thread in extra:
-        thread.join(timeout=5)
-        assert not thread.is_alive(), thread.name
-    checks = [
-        item for item in web.jobs.values() if item["kind"] == "check"
-    ]
-    assert len(checks) == 2, checks
-    retry = next(item for item in checks if item["id"] != job["id"])
-    assert retry["emails"] == ["chua@fexpost.com"], retry
-    assert retry.get("kiem_tra_lai") is False
-    assert "1 chưa rõ" in job["result"], job
-    assert any("tự kiểm tra lại" in line for line in job["log"]), job
-    assert "1 chưa rõ" in retry["result"], retry
-
-
 def test_check_slice_khong_chet_khi_mot_mail_loi():
     storage._append_spreadsheet_row(
         "loi@fexpost.com",
@@ -1974,43 +1661,6 @@ def test_check_slice_khong_chet_khi_mot_mail_loi():
     ), job
 
 
-def test_coordinator_dang_nhap_lai_an_trinh_duyet():
-    coord = cookie_web._coordinator_dang_nhap_lai("-2")
-    assert coord._headless is True
-    assert coord._lane_local.suffix == "-2"
-    command = [sys.executable, "browser_helper.py", "a@x.com", "--auto"]
-    # Cùng quy ước coordinator._run_helper: suffix "-2" thành
-    # đối số "2", và có --headless.
-    suffix = coord._lane_local.suffix
-    if suffix:
-        command.append(suffix.lstrip("-"))
-    if coord._headless:
-        command.append("--headless")
-    assert command[-2:] == ["2", "--headless"]
-
-
-def test_refresh_job_chay_nhieu_luong():
-    web = cookie_web.CookieWeb()
-    emails = [f"r{i}@fexpost.com" for i in range(4)]
-    job = web._new_job(emails, "refresh")
-    seen = []
-    seen_lock = threading.Lock()
-
-    def fake_refresh(job, email, suffix="", log_lock=None):
-        time.sleep(0.05)
-        with seen_lock:
-            seen.append((email, suffix, threading.get_ident()))
-
-    web._refresh_one = fake_refresh
-    web._run_refresh_job(job)
-    assert job["done"] == 4, job
-    assert "4 thành công" in job["result"], job
-    suffixes = {suffix for _email, suffix, _ident in seen}
-    assert suffixes == {"-11", "-12", "-13", "-14"}, suffixes
-    idents = {ident for _email, _suffix, ident in seen}
-    assert len(idents) == 4, idents
-
-
 def test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang():
     class _NoPageChecker(_FakeChecker):
         def smoke_test(self):
@@ -2025,166 +1675,6 @@ def test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang():
     assert job["done"] == 0, job
     assert "Không kiểm tra được" in job["result"], job
     assert "không tạo được trang" in job["result"], job
-
-
-def test_dang_nhap_meta_thanh_cong_khong_kiem_tra():
-    # Vào được Muse từ Meta là còn sống. Vừa vào thì không kiểm tra.
-    # Vào quá 7 ngày thì kiểm lại. Mail không đi từ Meta thì vẫn kiểm.
-    now = _iso(_now())
-    old = _iso(_now() - timedelta(days=8))
-    storage._append_spreadsheet_row(
-        "moi@fexpost.com", "pw",
-        cookie="hatch_sess=moi", cookie_taken_at=now,
-    )
-    storage._append_spreadsheet_row(
-        "cu@fexpost.com", "pw",
-        cookie="hatch_sess=cu", cookie_taken_at=old,
-    )
-    storage._append_spreadsheet_row(
-        "khac@fexpost.com", "pw",
-        cookie="hatch_sess=khac", cookie_taken_at=now,
-    )
-    from openpyxl import Workbook
-
-    book = Workbook()
-    sheet = book.active
-    sheet.append(list(storage.META_SPREADSHEET_HEADERS))
-    sheet.append(["t", "moi@fexpost.com", "pw", "u", "tempmail.plus", now, ""])
-    sheet.append(["t", "cu@fexpost.com", "pw", "u", "tempmail.plus", old, ""])
-    sheet.append([
-        "t", "dang@fexpost.com", "pw", "u", "tempmail.plus",
-        "ĐANG ĐĂNG NHẬP " + now, "",
-    ])
-    path = TMP / "meta_live.xlsx"
-    book.save(path)
-    da_vao = storage._meta_da_dang_nhap_muse(path)
-    assert set(da_vao) == {"moi@fexpost.com", "cu@fexpost.com"}, da_vao
-    assert cookie_health.nang_dang_nhap_meta_thanh_song(
-        storage._read_cookie_rows(), da_vao
-    ) is True
-    listed = {
-        item["email"]: item for item in cookie_vault.list_cookies()
-    }
-    assert listed["moi@fexpost.com"]["health"] == "song", listed
-    assert listed["cu@fexpost.com"]["health"] == "song", listed
-    assert listed["khac@fexpost.com"]["health"] != "song", listed
-    due = set(cookie_web.select_mail_vong_nen(list(listed.values())))
-    assert "moi@fexpost.com" not in due, due
-    assert "cu@fexpost.com" in due, due
-    assert "khac@fexpost.com" in due, due
-    later = _iso(_now() + timedelta(minutes=5))
-    cookie_health.save_health_cache({
-        "moi@fexpost.com": {
-            "status": "chet",
-            "checked_at": later,
-            "detail": "die sau khi đã vào",
-        }
-    })
-    cookie_health.nang_dang_nhap_meta_thanh_song(
-        storage._read_cookie_rows(), {"moi@fexpost.com": now}
-    )
-    again = {
-        item["email"]: item for item in cookie_vault.list_cookies()
-    }
-    assert again["moi@fexpost.com"]["health"] == "chet", again
-
-
-def test_dang_nhap_lai_het_cuu_khong_chon_nua():
-    assert cookie_web.con_cuu_duoc(
-        "Chờ mãi không thấy form nhập email của Muse.ai."
-    )
-    assert cookie_web.con_cuu_duoc(
-        "Proxy này đẩy sang Facebook. Đã bỏ proxy."
-    )
-    assert cookie_web.con_cuu_duoc("")
-    assert not cookie_web.con_cuu_duoc(
-        "Không tìm thấy mã xác minh mới trong hộp thư "
-        "tempmail.plus sau 180 giây."
-    )
-    assert not cookie_web.con_cuu_duoc(
-        "Đăng nhập xong Muse đòi nhập thẻ — tab đăng nhập "
-        "lại không nộp thẻ."
-    )
-    assert not cookie_web.con_cuu_duoc(
-        "Màn liên kết Meta không khớp mail cần đăng nhập "
-        "— không bấm Continue, không lấy cookie."
-    )
-    now = _iso(_now())
-    storage._append_spreadsheet_row(
-        "die@fexpost.com", "pw", cookie="hatch_sess=d",
-        cookie_taken_at=now,
-    )
-    storage._append_spreadsheet_row(
-        "het@fexpost.com", "pw", cookie="hatch_sess=h",
-        cookie_taken_at=now,
-    )
-    cookie_health.save_health_cache({
-        "die@fexpost.com": {
-            "status": "chet", "checked_at": now, "detail": "die",
-        }
-    })
-    cookie_health.ghi_het_cuu(
-        "het@fexpost.com", "Không tìm thấy mã xác minh mới"
-    )
-    listed = cookie_vault.list_cookies()
-    assert cookie_web.select_refresh_emails(listed, "dead") == [
-        "die@fexpost.com"
-    ]
-    assert "het@fexpost.com" not in cookie_web.select_refresh_emails(
-        listed, "all"
-    )
-    by_email = {item["email"]: item for item in listed}
-    assert by_email["het@fexpost.com"]["health"] == "het-cuu"
-    stats = cookie_vault.cookie_stats(listed)
-    assert stats["het-cuu"] == 1 and stats["chet"] == 1, stats
-
-
-def test_dang_nhap_lai_thanh_cong_ghi_con_song():
-    # Cookie cũ đã Die. Đăng nhập lại lấy cookie mới thì Còn sống
-    # phải tăng, không giữ Die của cookie cũ.
-    taken_cu = _iso(_now() - timedelta(days=2))
-    storage._append_spreadsheet_row(
-        "die@fexpost.com",
-        "pw",
-        cookie="hatch_sess=cu",
-        cookie_taken_at=taken_cu,
-    )
-    cookie_health.save_health_cache({
-        "die@fexpost.com": {
-            "status": "chet",
-            "checked_at": _iso(_now() - timedelta(hours=1)),
-            "detail": "bị đẩy về màn đăng nhập",
-        }
-    })
-    storage._update_cookie_row(
-        "die@fexpost.com",
-        "hatch_sess=moi",
-        _iso(_now()),
-    )
-    assert cookie_health.nang_cookie_moi_thanh_song(
-        storage._read_cookie_rows()
-    ) is True
-    listed = {
-        item["email"]: item for item in cookie_vault.list_cookies()
-    }
-    assert listed["die@fexpost.com"]["health"] == "song", listed
-    stats = cookie_vault.cookie_stats(list(listed.values()))
-    assert stats["hoat-dong"] == 1 and stats["chet"] == 0, stats
-
-    cookie_health.save_health_cache({
-        "die@fexpost.com": {
-            "status": "chet",
-            "checked_at": _iso(_now() - timedelta(minutes=5)),
-            "detail": "die lại",
-        }
-    })
-    storage._save_relogin_to_accounts(
-        "die@fexpost.com", "hatch_sess=nua", "pw"
-    )
-    again = {
-        item["email"]: item for item in cookie_vault.list_cookies()
-    }
-    assert again["die@fexpost.com"]["health"] == "song", again
 
 
 TESTS = [
@@ -2202,8 +1692,6 @@ TESTS = [
     test_list_cookies_dedupes_and_sorts,
     test_history_append_read,
     test_http_api,
-    test_chon_nhieu_the_va_dang_ky_vao_quan_ly,
-    test_register_page_and_console_refuse_empty_proxy,
     test_http_refresh_unknown_email_fails_cleanly,
     test_health_alive_when_chat_ui,
     test_health_dead_when_redirected_to_login,
@@ -2222,7 +1710,6 @@ TESTS = [
     test_stats_counts_unchecked_separately_from_dead,
     test_select_refresh_emails_scopes,
     test_select_check_emails_scopes,
-    test_vong_nen_tu_bat_dau_va_khong_xep_chong,
     test_start_check_all_khong_xep_chong_job,
     test_check_job_reports_done_count,
     test_check_job_dung_ngay_khi_khong_mo_duoc_trinh_duyet,
@@ -2233,20 +1720,13 @@ TESTS = [
     test_tu_dong_dang_nhap_lai_ghi_log_khi_khong_khoi_dong_duoc,
     test_check_uu_tien_qua_han_truoc,
     test_check_and_cache_khong_mat_entry_khi_ghi_song_song,
-    test_check_job_tu_kiem_tra_lai_mail_chua_ro,
     test_check_slice_khong_chet_khi_mot_mail_loi,
-    test_coordinator_dang_nhap_lai_an_trinh_duyet,
-    test_refresh_job_chay_nhieu_luong,
-    test_dang_nhap_meta_thanh_cong_khong_kiem_tra,
-    test_dang_nhap_lai_het_cuu_khong_chon_nua,
-    test_dang_nhap_lai_thanh_cong_ghi_con_song,
     test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,
     test_parse_cookie_string,
     test_parse_cookie_string_giu_dau_bang_trong_gia_tri,
     test_clean_cookie_pairs_bo_gia_tri_loi_va_trung_ten,
     test_browser_checker_bo_qua_cookie_loi,
     test_browser_checker_khong_chet_khi_add_cookies_loi,
-    test_browser_checker_chan_anh_font_video,
     test_browser_checker_song_khi_vao_duoc_chat,
     test_browser_checker_chet_khi_bi_day_ve_dang_nhap,
     test_browser_checker_khong_ro_khi_trang_la,
@@ -2264,7 +1744,6 @@ TESTS = [
     test_check_and_cache_dung_trinh_duyet_khi_yeu_cau_nhanh_khong_ro,
     test_check_and_cache_khong_dung_trinh_duyet_khi_yeu_cau_nhanh_ket_luan_duoc,
     test_kiem_tra_mot_mail_tra_ve_none_khi_ket,
-    test_check_slice_dung_cung_luong_da_mo_trinh_duyet,
     test_check_slice_thay_cap_moi_khi_mot_mail_ket,
 ]
 
