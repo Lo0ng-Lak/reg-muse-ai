@@ -280,6 +280,21 @@ def _relogin_output_path():
     return storage._load_relogin_output_path()
 
 
+def con_cuu_duoc(reason):
+    """True khi lỗi là mạng, IP hoặc trang — lần sau vẫn đăng nhập lại được.
+
+    Hết cứu khi hộp thư không còn gửi mã, Muse đòi thẻ mà lượt
+    này không nộp thẻ, hoặc màn liên kết không có đúng mail.
+    """
+    text = (reason or "").lower()
+    het = (
+        "không tìm thấy mã xác minh",
+        "đòi nhập thẻ",
+        "không khớp mail cần đăng nhập",
+    )
+    return not any(mark in text for mark in het)
+
+
 def select_refresh_emails(cookies, scope):
     """Chọn mail đăng nhập lại theo diện (dùng cho /api/refresh-all).
 
@@ -287,24 +302,29 @@ def select_refresh_emails(cookies, scope):
     - "dead": chỉ cookie đã kiểm tra thật trên meta.ai là chết.
     - "all": tất cả.
     - "expiring" (mặc định): sắp hết + đã hết hạn.
+    Tài khoản hết cứu không nằm trong diện nào.
     """
+    usable = [
+        item for item in cookies
+        if item.get("health") != cookie_health.STATUS_HOPELESS
+    ]
     if scope == "expired":
         return [
             item["email"]
-            for item in cookies
+            for item in usable
             if item["status"] == cookie_vault.STATUS_EXPIRED
         ]
     if scope == "dead":
         return [
             item["email"]
-            for item in cookies
+            for item in usable
             if item.get("health") == cookie_health.STATUS_DEAD
         ]
     if scope == "all":
-        return [item["email"] for item in cookies]
+        return [item["email"] for item in usable]
     return [
         item["email"]
-        for item in cookies
+        for item in usable
         if item["status"]
         in (
             cookie_vault.STATUS_EXPIRING,
@@ -344,10 +364,13 @@ def _den_luc_kiem_tra_lai(item):
     Chưa kiểm tra, hoặc lần trước chưa rõ: kiểm tra tiếp.
     Còn sống: 7 ngày mới kiểm lại.
     Die: không kiểm tra lại. Die thì đăng nhập lấy cookie mới.
+    Hết cứu: không kiểm tra, không đăng nhập lại.
     """
     health = item.get("health")
     checked_at = item.get("health_checked_at")
     if health == cookie_health.STATUS_DEAD:
+        return False
+    if health == cookie_health.STATUS_HOPELESS:
         return False
     if health == cookie_health.STATUS_ALIVE:
         return not _checked_recently(checked_at, CHECK_ALIVE_HOURS)
@@ -915,6 +938,16 @@ class CookieWeb:
                             )
                             job["log"] = job["log"][-MAX_LOG_LINES:]
                         continue
+                    if fresh.get("status") == cookie_health.STATUS_HOPELESS:
+                        with lock:
+                            counts["chet"] += 1
+                            job["done"] = sum(counts.values())
+                            job["log"].append(
+                                f"{email}: Hết cứu — "
+                                f"{fresh.get('detail') or 'không đăng nhập lại nữa'}."
+                            )
+                            job["log"] = job["log"][-MAX_LOG_LINES:]
+                        continue
                     if not cookie:
                         with lock:
                             job["log"].append(
@@ -1062,12 +1095,20 @@ class CookieWeb:
                 _invite,
                 _card_skipped,
                 _facebook,
+                fail_reason,
             ) = coord._run_helper(
                 helper, email, "Web", 1, relogin=True
             )
             if not helper_ok or not cookie:
+                reason = (fail_reason or "").strip() or (
+                    "trình duyệt đóng mà không báo lý do"
+                )
+                if con_cuu_duoc(reason):
+                    raise RuntimeError(f"còn cứu — {reason}")
+                cookie_health.ghi_het_cuu(email, reason)
                 raise RuntimeError(
-                    "đăng nhập lại thất bại — xem log phía trên."
+                    f"hết cứu — {reason} Đã ghi chú, không "
+                    "đăng nhập lại tài khoản này nữa."
                 )
             now = _now_iso()
             updated = storage._update_cookie_row(email, cookie, now)
@@ -1497,6 +1538,7 @@ tbody tr:hover td { background:#f8fafc; }
 .badge.song { background:var(--green-bg); color:var(--green); }
 .badge.sap-het { background:var(--amber-bg); color:var(--amber); }
 .badge.het-han, .badge.chet { background:var(--red-bg); color:var(--red); }
+.badge.het-cuu { background:#f2f4f7; color:#b42318; }
 .badge.khong-ro, .badge.chua-kiem-tra { background:var(--gray-bg); color:var(--gray); }
 .badge.chua-xac-minh { background:var(--amber-bg); color:var(--amber); }
 .badge.checking { background:#eef4ff; color:#175cd3; animation:pulse 1.2s ease-in-out infinite; }
@@ -1551,6 +1593,7 @@ tbody tr:hover td { background:#f8fafc; }
       <option value="chet">Die</option>
       <option value="chua-kiem-tra">Chưa kiểm tra</option>
       <option value="chua-xac-minh">Chưa xác minh</option>
+      <option value="het-cuu">Hết cứu</option>
     </select>
     <button id="btnCheckAll" onclick="checkAll('all')">Kiểm tra tất cả</button>
     <button class="ghost" onclick="checkAll('expiring')">Kiểm tra cookie sắp hết</button>
@@ -1653,9 +1696,9 @@ let COOKIES = [];
 let PAGE = 1, PER_PAGE = 50;
 let CHECKING = {emails:new Set(), since:""};
 const LABEL = {song:"Còn hạn","sap-het":"Sắp hết","het-han":"Quá hạn","khong-ro":"Không rõ"};
-const HEALTH = {song:"Còn sống",chet:"Die","chua-kiem-tra":"Chưa kiểm tra","chua-xac-minh":"Chưa xác minh"};
+const HEALTH = {song:"Còn sống",chet:"Die","het-cuu":"Hết cứu","chua-kiem-tra":"Chưa kiểm tra","chua-xac-minh":"Chưa xác minh"};
 function healthKind(c){
-  if (c.health === "song" || c.health === "chet") return c.health;
+  if (c.health === "song" || c.health === "chet" || c.health === "het-cuu") return c.health;
   if (!c.has_cookie) return "";
   return c.health_checked_at ? "chua-xac-minh" : "chua-kiem-tra";
 }
@@ -1714,6 +1757,7 @@ async function loadAll(){
     stat(COOKIES.length,"Tổng tài khoản","") +
     stat(c.stats["hoat-dong"],"Còn sống","good") +
     stat(c.stats.chet,"Die","bad") +
+    stat(c.stats["het-cuu"]||0,"Hết cứu","bad") +
     stat(c.stats["chua-kiem-tra"],"Chưa kiểm tra","") +
     stat(c.stats["chua-xac-minh"],"Chưa xác minh","warn") +
     stat(c.stats["sap-het"],"Sắp hết","warn") +
@@ -1752,7 +1796,9 @@ function healthBadge(c){
   if (isChecking) return "<span class='badge checking'>Đang kiểm tra…</span>";
   const kind = healthKind(c);
   if (!kind) return "<span class='badge khong-ro'>Chưa có cookie</span>";
-  const title = c.health_checked_at ? " title='Kiểm tra "+fmtTime(c.health_checked_at)+"'" : "";
+  const note = c.health_detail ? c.health_detail + (c.health_checked_at ? " · " : "") : "";
+  const when = c.health_checked_at ? "Kiểm tra "+fmtTime(c.health_checked_at) : "";
+  const title = (note || when) ? " title='"+esc(note+when).replace(/'/g,"&#39;")+"'" : "";
   return "<span class='badge "+kind+"'"+title+">"+HEALTH[kind]+"</span>";
 }
 function render(){

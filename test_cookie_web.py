@@ -2089,6 +2089,56 @@ def test_dang_nhap_meta_thanh_cong_khong_kiem_tra():
     assert again["moi@fexpost.com"]["health"] == "chet", again
 
 
+def test_dang_nhap_lai_het_cuu_khong_chon_nua():
+    assert cookie_web.con_cuu_duoc(
+        "Chờ mãi không thấy form nhập email của Muse.ai."
+    )
+    assert cookie_web.con_cuu_duoc(
+        "Proxy này đẩy sang Facebook. Đã bỏ proxy."
+    )
+    assert cookie_web.con_cuu_duoc("")
+    assert not cookie_web.con_cuu_duoc(
+        "Không tìm thấy mã xác minh mới trong hộp thư "
+        "tempmail.plus sau 180 giây."
+    )
+    assert not cookie_web.con_cuu_duoc(
+        "Đăng nhập xong Muse đòi nhập thẻ — tab đăng nhập "
+        "lại không nộp thẻ."
+    )
+    assert not cookie_web.con_cuu_duoc(
+        "Màn liên kết Meta không khớp mail cần đăng nhập "
+        "— không bấm Continue, không lấy cookie."
+    )
+    now = _iso(_now())
+    storage._append_spreadsheet_row(
+        "die@fexpost.com", "pw", cookie="hatch_sess=d",
+        cookie_taken_at=now,
+    )
+    storage._append_spreadsheet_row(
+        "het@fexpost.com", "pw", cookie="hatch_sess=h",
+        cookie_taken_at=now,
+    )
+    cookie_health.save_health_cache({
+        "die@fexpost.com": {
+            "status": "chet", "checked_at": now, "detail": "die",
+        }
+    })
+    cookie_health.ghi_het_cuu(
+        "het@fexpost.com", "Không tìm thấy mã xác minh mới"
+    )
+    listed = cookie_vault.list_cookies()
+    assert cookie_web.select_refresh_emails(listed, "dead") == [
+        "die@fexpost.com"
+    ]
+    assert "het@fexpost.com" not in cookie_web.select_refresh_emails(
+        listed, "all"
+    )
+    by_email = {item["email"]: item for item in listed}
+    assert by_email["het@fexpost.com"]["health"] == "het-cuu"
+    stats = cookie_vault.cookie_stats(listed)
+    assert stats["het-cuu"] == 1 and stats["chet"] == 1, stats
+
+
 def test_dang_nhap_lai_thanh_cong_ghi_con_song():
     # Cookie cũ đã Die. Đăng nhập lại lấy cookie mới thì Còn sống
     # phải tăng, không giữ Die của cookie cũ.
@@ -2188,6 +2238,7 @@ TESTS = [
     test_coordinator_dang_nhap_lai_an_trinh_duyet,
     test_refresh_job_chay_nhieu_luong,
     test_dang_nhap_meta_thanh_cong_khong_kiem_tra,
+    test_dang_nhap_lai_het_cuu_khong_chon_nua,
     test_dang_nhap_lai_thanh_cong_ghi_con_song,
     test_probe_dung_ngay_khi_trinh_duyet_khong_mo_duoc_trang,
     test_parse_cookie_string,

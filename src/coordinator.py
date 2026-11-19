@@ -827,7 +827,7 @@ class Coordinator:
                         ).unlink()
                     except OSError:
                         pass
-                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped, facebook = self._run_helper(
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped, facebook, _fail_reason = self._run_helper(
                     helper,
                     address,
                     display,
@@ -1301,7 +1301,7 @@ class Coordinator:
                         self.events.put(
                             ("log", f"[{display}/{label_total}] {error}")
                         )
-                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped, facebook = (
+                helper_ok, burned, waitlisted, load_failed, cookie, own_invite, card_skipped, facebook, _fail_reason = (
                     self._run_helper(
                         helper, address, display, label_total,
                         muse_login=True,
@@ -1713,6 +1713,7 @@ class Coordinator:
                 _invite,
                 _card_skipped,
                 _facebook,
+                _fail_reason,
             ) = self._run_helper(
                 helper, address, index, label_total, relogin=True
             )
@@ -1789,7 +1790,7 @@ class Coordinator:
             self.events.put(
                 ("log", f"[{index}/{total}] Không mở được trình duyệt: {error}")
             )
-            return False, False, False, False, "", "", False, False
+            return False, False, False, False, "", "", False, False, str(error)
         self.helper_process = process
         with self._process_lock:
             self.helper_processes.add(process)
@@ -1801,12 +1802,17 @@ class Coordinator:
             "cookie": "",
             "invite": "",
             "card_skipped": False,
+            "fail_reason": "",
         }
 
         def forward_output():
             for line in process.stdout:
                 line = line.strip()
                 if line:
+                    if line.startswith("RESULT: FAIL"):
+                        signals["fail_reason"] = line.split(
+                            "RESULT: FAIL", 1
+                        )[1].strip()
                     if proxy_pool._line_burns_proxy(line):
                         signals["burn"] = True
                     if proxy_pool._line_flags_waitlist(line):
@@ -1913,6 +1919,11 @@ class Coordinator:
                         "khoản — đóng trình duyệt và bỏ qua.",
                     )
                 )
+                if not signals["fail_reason"]:
+                    signals["fail_reason"] = (
+                        f"Quá {HELPER_TIMEOUT_SECONDS // 60} phút "
+                        "cho một tài khoản — đóng trình duyệt và bỏ qua."
+                    )
                 process.terminate()
                 break
             time.sleep(0.3)
@@ -1926,4 +1937,4 @@ class Coordinator:
             self.helper_processes.discard(process)
         return (
             process.returncode == 0 and not self.stop_event.is_set()
-        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"], signals["card_skipped"], signals["facebook"]
+        ), signals["burn"], signals["waitlist"], signals["load_fail"], signals["cookie"], signals["invite"], signals["card_skipped"], signals["facebook"], signals["fail_reason"]

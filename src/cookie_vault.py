@@ -183,6 +183,7 @@ def cookie_stats(cookies):
         "khong-ro": 0,
         "khong-co-cookie": 0,
         "chet": 0,
+        "het-cuu": 0,
         "hoat-dong": 0,
         "chua-kiem-tra": 0,
         "chua-xac-minh": 0,
@@ -193,6 +194,8 @@ def cookie_stats(cookies):
             stats["khong-co-cookie"] += 1
         if item.get("health") == cookie_health.STATUS_DEAD:
             stats["chet"] += 1
+        elif item.get("health") == cookie_health.STATUS_HOPELESS:
+            stats["het-cuu"] += 1
         elif item.get("health") == cookie_health.STATUS_ALIVE:
             stats["hoat-dong"] += 1
         elif item.get("has_cookie"):

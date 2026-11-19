@@ -47,11 +47,13 @@ ALIVE_MARKERS = ("Ask Meta AI",)
 STATUS_ALIVE = "song"
 STATUS_DEAD = "chet"
 STATUS_UNKNOWN = "khong-ro"
+STATUS_HOPELESS = "het-cuu"
 
 STATUS_LABELS = {
     STATUS_ALIVE: "Hoạt động",
     STATUS_DEAD: "Die",
     STATUS_UNKNOWN: "Chưa xác minh",
+    STATUS_HOPELESS: "Hết cứu",
 }
 
 _BROWSER_UA = (
@@ -198,6 +200,29 @@ def ghi_con_song(email, detail="đăng nhập lại xong, đã vào được cha
             timespec="seconds"
         ),
         "detail": detail,
+    }
+    with _CACHE_LOCK:
+        cache = load_health_cache()
+        cache[key] = entry
+        save_health_cache(cache)
+    return entry
+
+
+def ghi_het_cuu(email, detail):
+    """Ghi tài khoản là hết cứu: đăng nhập lại không lấy lại được.
+
+    Die còn có thể đăng nhập lại. Hết cứu thì không đưa vào
+    lượt đăng nhập lại nữa. detail là lý do cụ thể.
+    """
+    key = (email or "").strip().lower()
+    if not key:
+        return None
+    entry = {
+        "status": STATUS_HOPELESS,
+        "checked_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        ),
+        "detail": detail or "hết cứu",
     }
     with _CACHE_LOCK:
         cache = load_health_cache()
